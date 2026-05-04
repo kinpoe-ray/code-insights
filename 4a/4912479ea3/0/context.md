@@ -50,3 +50,24 @@ Guide completion of development work by presenting clear options and handling ch
 
 ### Ste...
 
+### Prompt 5
+
+# /start-review — Triple-Layer Code Review Team
+
+**PR**: 290
+
+You are setting up a triple-layer code review for PR `290`. This can be used standalone or as part of a `/start-feature` team workflow. The review loops until all FIX NOW items are resolved — it does NOT end after a single pass.
+
+---
+
+## Step 1: Get PR Details
+
+Fetch the PR details:
+
+```bash
+# Get the correct owner from git remote
+git remote get-url origin | sed 's/.*[:/]\([^/]*\)\/[^/]*\.git/\1/'
+```
+
+Use `gh pr view 290` to get P...
+
