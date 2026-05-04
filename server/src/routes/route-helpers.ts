@@ -82,6 +82,8 @@ export function trackAnalysisResult(
 ): void {
   const llmConfig = loadLLMConfig();
   const baseProperties: Record<string, unknown> = {
+    // 'type' is safe here — only flows to trackEvent, never to captureError (which has a
+    // PostHog schema collision with that key). Keep it out of any captureError call sites.
     type: analysisType,
     llm_provider: llmConfig?.provider,
     llm_model: llmConfig?.model,
@@ -182,6 +184,8 @@ export function streamSessionAnalysis(
       });
 
       const baseProperties: Record<string, unknown> = {
+        // 'type' is safe here — only flows to trackEvent, never to captureError (which has a
+        // PostHog schema collision with that key). Keep it out of any captureError call sites.
         type: opts.analysisType,
         llm_provider: llmConfig?.provider,
         llm_model: llmConfig?.model,
