@@ -311,7 +311,6 @@ export async function insightsCheckCommand(opts: {
   days?: number;
   quiet?: boolean;
   analyze?: boolean;
-  model?: string;
 }): Promise<void> {
   const days = opts.days ?? 7;
   const quiet = opts.quiet ?? false;
@@ -370,14 +369,14 @@ export async function insightsCheckCommand(opts: {
       return;
     }
 
-    // Auto-analyse silently when 1-2 unanalysed sessions
+    // Auto-analyze silently when 1-2 unanalyzed sessions
     if (count <= 2) {
       const runner = ProviderRunner.fromConfig();
       for (const row of rows) {
         try {
           await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });
         } catch {
-          // Silently ignore auto-analyse errors for 1-2 sessions
+          // Silently ignore auto-analyze errors for 1-2 sessions
         }
       }
       return;

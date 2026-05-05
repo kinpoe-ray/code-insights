@@ -572,6 +572,7 @@ describe('insightsCheckCommand — --analyze flag', () => {
     runMigrations(mockDb);
     mockRunAnalysis.mockReset();
     mockValidate.mockReset();
+    mockFromConfig.mockReset();
     mockProviderRunAnalysis.mockReset();
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

@@ -166,13 +166,11 @@ insightsCmd
   .option('--days <n>', 'Lookback window in days', '7')
   .option('-q, --quiet', 'Machine-readable output (just count)')
   .option('--analyze', 'Process all found sessions sequentially')
-  .option('--model <model>', 'Model for native analysis (default: sonnet)')
   .action(async (opts) => {
     await insightsCheckCommand({
       days: opts.days ? parseInt(opts.days, 10) : 7,
       quiet: opts.quiet,
       analyze: opts.analyze,
-      model: opts.model,
     });
   });
 
