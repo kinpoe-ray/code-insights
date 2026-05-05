@@ -195,7 +195,8 @@ Options:
   --path <dir>        Override output directory (default: project git root)
   --dry-run           Print to stdout without writing to disk
   --no-llm            YAML frontmatter + reflect rules only (skip LLM narrative synthesis)
-  --yes, -y           Skip interactive confirmation on re-run (for CI/automation)
+  --yes, -y           Skip interactive confirmations (overwrite + injection prompts)
+  --no-inject         Skip the rules injection step into agent bootstrap files
   --check             Exit code 1 if sessions since last generation > threshold (CI staleness gate)
 ```
 
@@ -204,6 +205,8 @@ Options:
 - Fuzzy project matching: if the name matches multiple projects, show a numbered list and ask the user to pick. Never silently pick the closest match.
 - `--no-llm` mode: generates YAML frontmatter only (deterministic, from SQLite aggregations) + `rules[]` from pre-existing reflect snapshot `claudeMdRules[]`. Markdown body (Decisions, Friction, Patterns narrative) is omitted entirely. The terminal output must make this explicit: "Generated: frontmatter + rules only (--no-llm mode; markdown narrative skipped)."
 - `--check` mode: reads `sessions_at_generation` from existing file's YAML frontmatter, compares to current session count via direct SQLite query (no LLM call, no server required). Exits 1 if delta > configurable threshold (default: 50). For pre-commit hooks and CI gates. See Section 9 for full rationale.
+- `--no-inject`: skips the agent bootstrap injection step entirely. The generated `.code-insights.md` is written but no rules are pushed into `CLAUDE.md`, `.cursorrules`, or `.github/copilot-instructions.md`. Useful when the user manages those files manually.
+- `--yes` flag covers both the overwrite confirmation AND the injection confirmation — all prompts skipped. Intended for CI pipelines that auto-run `attach` after a session threshold is crossed.
 
 **CLI-to-server invocation model — open implementation decision:**
 
@@ -246,9 +249,16 @@ Two valid approaches for the implementer to choose between:
   Add to version control? This lets the knowledge travel with your repo.
   Add to .gitignore instead (keep personal)? [commit/ignore/skip]: commit
 
-  → Add reference to CLAUDE.md? This helps AI agents find the file automatically.
-    Suggested line: "See .code-insights.md for AI-extracted codebase knowledge."
-    [add/skip]: add
+  Detected agent bootstrap files:
+    ✔ CLAUDE.md                          Claude Code
+    ✔ .github/copilot-instructions.md    VS Code Copilot
+    ○ .cursorrules                        Cursor  (not found — will skip)
+
+  Inject 12 rules into detected files? Rules are wrapped in sentinels
+  and updated automatically on each regeneration. [yes/no]: yes
+    ✔ Injected into CLAUDE.md
+    ✔ Injected into .github/copilot-instructions.md
+    ○ .cursorrules not found — skipped (create the file to enable Cursor injection)
 
   Tip: Regenerate after more sessions: code-insights attach
 ```
@@ -579,22 +589,61 @@ CREATE TABLE IF NOT EXISTS knowledge_sync (
 
 ### 5.5 AI Agent Consumption
 
-**Primary (default): Direct file discovery.** The file header tells agents how to use it:
+**Primary mechanism: sentinel-based inline injection into agent bootstrap files.**
+
+A reference line ("See `.code-insights.md`...") is Tier 2 reliability — the agent must *follow* the reference to load the content. Inline injection is Tier 1 — the rules are in the file the agent reads unconditionally at session start.
+
+After writing `.code-insights.md`, `code-insights attach` scans the git root for known bootstrap files and injects the `rules[]` block into each one it finds, wrapped in sentinel markers.
+
+**Target files (Phase 1 — three agents):**
+
+| Agent | Bootstrap file | Detection |
+|-------|---------------|-----------|
+| Claude Code | `CLAUDE.md` at git root | `existsSync(join(gitRoot, 'CLAUDE.md'))` |
+| Claude Code | `.claude/CLAUDE.md` | `existsSync(join(gitRoot, '.claude/CLAUDE.md'))` |
+| VS Code Copilot | `.github/copilot-instructions.md` | `existsSync(join(gitRoot, '.github/copilot-instructions.md'))` |
+| Cursor | `.cursorrules` | `existsSync(join(gitRoot, '.cursorrules'))` |
+
+**Important:** Only inject into files that already exist. Never auto-create bootstrap files — that is an invasive action the user did not request. If a file is not found, skip it silently and tell the user which agents were skipped and why.
+
+**Sentinel format (identical across all three target files):**
+
+```
+<!-- code-insights:start — do not edit this block; regenerate with: code-insights attach -->
+## Codebase Rules (12 rules · extracted from AI sessions · 2026-04-20)
+
+- **Use WAL mode for all SQLite connections** — Prevents SQLITE_BUSY under concurrent reads from dashboard + CLI sync. [confidence: 95]
+- **Write SQLite migrations as raw SQL in applyVN()** — ORM failed silently on schema V6; raw SQL is auditable. [confidence: 92]
+- **@hono/node-server and hono must be in cli/package.json dependencies** — npm-installed users get runtime errors when these are devDeps. [confidence: 88]
+<!-- code-insights:end -->
+```
+
+Rules are formatted as a markdown list with the rule text bolded, context appended, and confidence shown inline. This format is human-readable in all three target files and parseable by all three agents.
+
+**Injection behavior:**
+
+| Scenario | Behavior |
+|----------|----------|
+| First run — file exists, no sentinels | Prompt user; on approval, append the block at the end of the file |
+| Re-run — sentinels already present | Auto find-and-replace between sentinel markers. No prompt. |
+| Re-run — sentinels were deleted | Treat as "user opted out." Do not re-inject without prompting again. |
+| `--yes` flag | Inject into all detected files without prompting |
+| `--no-inject` flag | Skip injection step entirely |
+| `--dry-run` flag | Show what would be injected; do not write |
+
+**Sentinel deletion = explicit opt-out.** If a user removes the sentinel block from a file, the tool respects that permanently — no re-injection without prompting. The absence of sentinels in a previously-injected file is a clear user signal.
+
+**The file header still tells agents where the full knowledge lives:**
 
 ```html
 <!--
-  FOR AI AGENTS: Parse the YAML frontmatter. The `rules` array contains
-  imperative instructions for this codebase. `friction_hotspots` identifies
-  known problem areas. `proven_patterns` lists what works well here.
+  FOR AI AGENTS: The `rules` block below is a summary. Full knowledge
+  (decisions, friction, patterns) is in .code-insights.md at the project root.
   Regenerate: code-insights attach
 -->
 ```
 
-**CLAUDE.md bridge:** After first generation, CLI prompts the user to add one line to CLAUDE.md:
-```
-See .code-insights.md for AI-extracted codebase knowledge.
-```
-This is the bridge that makes agents automatically find the file. The CLI proposes it; the user decides.
+This comment is prepended to the injected block so agents know to look at the full file for richer context beyond the rules list.
 
 ---
 
@@ -607,6 +656,7 @@ This is the bridge that makes agents automatically find the file. The CLI propos
 | `cli/src/commands/export.ts` | `export` command + `attach` alias; all flags |
 | `cli/src/utils/project-root.ts` | `findGitRoot()`, `resolveProjectRoot()`, monorepo logic |
 | `cli/src/utils/scrub.ts` | `scrubSensitiveData()` with regex patterns |
+| `cli/src/utils/agent-inject.ts` | `detectBootstrapFiles()`, `injectRulesBlock()`, `removeInjectedBlock()` — sentinel-based injection for Claude Code, VS Code Copilot, Cursor |
 | `server/src/llm/repo-export-prompts.ts` | `REPO_SYSTEM_PROMPT`, `buildRepoExportContext()`, `buildRepoFrontmatter()` |
 
 **Modified Files:**
@@ -945,7 +995,7 @@ code-insights attach --check [--threshold <n>]
 | CI/automation | `--yes` / `-y` flag skips overwrite confirmation |
 | Hand-edited detection | Compare `generated` date in frontmatter to file mtime; warn if diverged >1hr |
 | Author attribution | `author` in YAML frontmatter + byline in markdown header |
-| CLAUDE.md bridge | Post-generation prompt; user decides; not automatic |
+| Agent bootstrap injection | Sentinel-based inline injection into detected bootstrap files (CLAUDE.md, .github/copilot-instructions.md, .cursorrules). Only injects into existing files. Opt-out via `--no-inject` or by deleting sentinels. |
 | LLM hallucination guard | "Do not infer reasoning not present in session data" in system prompt |
 | Staleness signal | `sessions_at_generation` in frontmatter |
 | Topic extraction | LLM tagging at analysis time; `topic-normalize.ts` prevents drift |
@@ -957,7 +1007,6 @@ code-insights attach --check [--threshold <n>]
 
 ## 11. Out of Scope (This Version)
 
-- `--inject-rules` flag to append rules to CLAUDE.md (deferred)
 - `--depth` levels (essential / comprehensive) — ship standard only
 - Per-module knowledge files (one file per package in a monorepo)
 - Export history tracking in the dashboard
