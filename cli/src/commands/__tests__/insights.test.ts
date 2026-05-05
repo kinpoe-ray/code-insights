@@ -518,6 +518,7 @@ describe('insightsCheckCommand — auto-analyze (1-2 sessions)', () => {
     runMigrations(mockDb);
     mockRunAnalysis.mockReset();
     mockValidate.mockReset();
+    mockFromConfig.mockReset();
     mockProviderRunAnalysis.mockReset();
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -533,29 +534,31 @@ describe('insightsCheckCommand — auto-analyze (1-2 sessions)', () => {
     db.exec(`INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count) VALUES ('${id}', 'pa1', 'proj', '/p', datetime('now'), datetime('now'), 10);`);
   }
 
-  it('auto-analyzes 1 unanalyzed session using native runner', async () => {
+  it('auto-analyzes 1 unanalyzed session using configured provider', async () => {
     seedOne(mockDb, 'auto-1');
-    mockRunAnalysis
-      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' });
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' });
     const { insightsCheckCommand } = await import('../insights.js');
     await insightsCheckCommand({ days: 7, quiet: false });
-    expect(mockValidate).toHaveBeenCalledTimes(1);
-    expect(mockRunAnalysis).toHaveBeenCalledTimes(2);
+    expect(mockValidate).not.toHaveBeenCalled();
+    expect(mockFromConfig).toHaveBeenCalledTimes(1);
+    expect(mockProviderRunAnalysis).toHaveBeenCalledTimes(2);
   });
 
-  it('auto-analyzes 2 unanalyzed sessions using native runner', async () => {
+  it('auto-analyzes 2 unanalyzed sessions using configured provider', async () => {
     seedOne(mockDb, 'auto-2a');
     seedOne(mockDb, 'auto-2b');
-    mockRunAnalysis
-      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' });
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 500, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 400, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' });
     const { insightsCheckCommand } = await import('../insights.js');
     await insightsCheckCommand({ days: 7, quiet: false });
-    expect(mockValidate).toHaveBeenCalled();
-    expect(mockRunAnalysis).toHaveBeenCalledTimes(4);
+    expect(mockValidate).not.toHaveBeenCalled();
+    expect(mockFromConfig).toHaveBeenCalledTimes(1);
+    expect(mockProviderRunAnalysis).toHaveBeenCalledTimes(4);
   });
 });
 
@@ -591,9 +594,9 @@ describe('insightsCheckCommand — --analyze flag', () => {
   it('processes all sessions with --analyze and shows [N/total] progress', async () => {
     seedSessions(mockDb, 3);
     for (let i = 0; i < 3; i++) {
-      mockRunAnalysis
-        .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-        .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' });
+      mockProviderRunAnalysis
+        .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+        .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' });
     }
     const { insightsCheckCommand } = await import('../insights.js');
     await insightsCheckCommand({ days: 7, quiet: false, analyze: true });
@@ -609,12 +612,12 @@ describe('insightsCheckCommand — --analyze flag', () => {
 
   it('continues processing after one session fails', async () => {
     seedSessions(mockDb, 3);
-    mockRunAnalysis
+    mockProviderRunAnalysis
       .mockRejectedValueOnce(new Error('fail on session 0'))
-      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' })
-      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'claude-native', provider: 'claude-code-native' });
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 1000, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 800, inputTokens: 0, outputTokens: 0, model: 'anthropic', provider: 'anthropic' });
     const { insightsCheckCommand } = await import('../insights.js');
     await insightsCheckCommand({ days: 7, quiet: false, analyze: true });
     const stdoutOutput = (stdoutSpy.mock.calls as Array<[unknown]>).map(c => String(c[0])).join('');
