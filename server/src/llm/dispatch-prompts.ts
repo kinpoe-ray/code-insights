@@ -42,9 +42,18 @@ export interface DispatchInput {
   insights: DispatchInsight[];
 }
 
+const TYPE_LABELS: Record<string, string> = {
+  learning: 'Learning',
+  decision: 'Decision',
+  technique: 'Technique',
+  summary: 'Summary',
+  prompt_quality: 'Observation',
+};
+
 export function buildDispatchContext(input: DispatchInput): string {
   const insightBlocks = input.insights.map((insight, i) => {
-    const typeLabel = insight.type.charAt(0).toUpperCase() + insight.type.slice(1);
+    const typeLabel = TYPE_LABELS[insight.type]
+      ?? (insight.type.charAt(0).toUpperCase() + insight.type.slice(1).replace(/_/g, ' '));
     const wordCount = insight.content.split(' ').length;
     const bulletLines = wordCount < 40 && insight.bullets.length > 0
       ? '\n' + insight.bullets.map(b => `- ${b}`).join('\n')
@@ -60,11 +69,15 @@ export function buildDispatchContext(input: DispatchInput): string {
 export interface DispatchParseResult {
   ok: boolean;
   markdown?: string;
+  /** The body text without frontmatter — use for word count to avoid re-parsing. */
+  body?: string;
   frontmatter?: {
     title: string;
     tags: string[];
     tldr: string;
   };
+  /** True when the parse failed and we returned raw content with a guessed title. */
+  degraded?: boolean;
   error?: 'missing-frontmatter' | 'malformed-frontmatter';
   raw?: string;
 }
@@ -105,16 +118,25 @@ export function parseDispatchOutput(raw: string): DispatchParseResult {
     console.warn(`[dispatch-prohibited-words] Prohibited words found in output: ${found.join(', ')}`);
   }
 
-  // Reconstruct full markdown with frontmatter
-  const markdown = `---\ntitle: ${titleMatch[1]}\ntags: [${tags.join(', ')}]\ntldr: ${tldrMatch[1]}\n---\n\n${body}`;
+  const title = titleMatch[1];
+  const tldr = tldrMatch[1];
+
+  // Escape special YAML characters so the output is valid when pasted into blog platforms.
+  // Titles/tldrs with ':' or '[' produce invalid unquoted YAML.
+  const escTitle = title.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const escTldr  = tldr.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+
+  // Reconstruct full markdown with properly quoted frontmatter
+  const markdown = `---\ntitle: "${escTitle}"\ntags: [${tags.join(', ')}]\ntldr: "${escTldr}"\n---\n\n${body}`;
 
   return {
     ok: true,
     markdown,
+    body,
     frontmatter: {
-      title: titleMatch[1],
+      title,
       tags,
-      tldr: tldrMatch[1],
+      tldr,
     },
   };
 }
@@ -127,6 +149,8 @@ export function buildDegradedResponse(raw: string): DispatchParseResult {
   return {
     ok: true,
     markdown: raw,
+    body: raw,
+    degraded: true,
     frontmatter: {
       title,
       tags: [],

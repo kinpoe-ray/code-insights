@@ -45,6 +45,8 @@ export interface LLMResponse {
 export interface ChatOptions {
   signal?: AbortSignal;
   temperature?: number;
+  /** Controls response format. Defaults to 'json' for backward compat; dispatch uses 'text' for markdown output. */
+  responseFormat?: 'json' | 'text';
 }
 
 export interface LLMClient {

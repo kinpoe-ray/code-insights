@@ -18,17 +18,20 @@ export function createGeminiClient(apiKey: string, model: string): LLMClient {
         parts: [{ text: flattenContent(m.content) }],
       }));
 
+      const generationConfig: Record<string, unknown> = {
+        temperature: options?.temperature ?? 0.7,
+        maxOutputTokens: 8192,
+      };
+
+      // JSON mode is the default for analysis calls (prevents markdown fences and prose prefixes).
+      // Dispatch and other text callers pass responseFormat: 'text' to get plain markdown output.
+      if (options?.responseFormat !== 'text') {
+        generationConfig.responseMimeType = 'application/json';
+      }
+
       const body: Record<string, unknown> = {
         contents,
-        generationConfig: {
-          temperature: options?.temperature ?? 0.7,
-          maxOutputTokens: 8192,
-          // Force valid JSON output at the decoding level.
-          // Without this, Gemini Flash often wraps JSON in markdown fences,
-          // prefixes prose, or produces structurally broken JSON that even
-          // jsonrepair cannot fix.
-          responseMimeType: 'application/json',
-        },
+        generationConfig,
       };
 
       if (systemMessage) {

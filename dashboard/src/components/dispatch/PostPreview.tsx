@@ -2,7 +2,7 @@ import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { toast } from 'sonner';
-import { Copy, Download, Check } from 'lucide-react';
+import { Copy, Download, Check, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import type { DispatchResponse } from '@/lib/api';
@@ -64,6 +64,13 @@ export function PostPreview({ result }: PostPreviewProps) {
           </Button>
         </div>
       </div>
+
+      {result.degraded && (
+        <div className="mx-4 mt-3 flex items-start gap-2 px-3 py-2.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-sm text-amber-700 dark:text-amber-400 shrink-0">
+          <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+          <span>The model returned unexpected formatting — post structure may be incomplete. Review before publishing.</span>
+        </div>
+      )}
 
       {result.frontmatter.tldr && (
         <div className="mx-4 mt-3 px-3 py-2 rounded-md bg-muted/50 border text-sm text-muted-foreground shrink-0">

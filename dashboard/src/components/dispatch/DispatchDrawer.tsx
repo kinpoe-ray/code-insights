@@ -17,7 +17,7 @@ import {
   arrayMove,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { GripVertical, Loader2, AlertCircle } from 'lucide-react';
+import { GripVertical, Loader2, AlertCircle, X } from 'lucide-react';
 import {
   Sheet,
   SheetContent,
@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/sheet';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Textarea } from '@/components/ui/textarea';
 import { generateDispatch } from '@/lib/api';
 import { PostPreview } from './PostPreview';
 import type { Insight } from '@/lib/types';
@@ -73,6 +74,7 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
         {...attributes}
         {...listeners}
         aria-label="Drag to reorder"
+        aria-description="Press Space or Enter to pick up, arrow keys to move, Space or Enter to drop"
       >
         <GripVertical className="h-4 w-4" />
       </button>
@@ -85,11 +87,11 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
         <p className="text-xs text-muted-foreground leading-snug line-clamp-2">{insight.summary || insight.title}</p>
       </div>
       <button
-        className="shrink-0 text-muted-foreground hover:text-destructive transition-colors text-xs mt-0.5"
+        className="shrink-0 text-muted-foreground hover:text-destructive transition-colors mt-0.5"
         onClick={() => onRemove(insight.id)}
         aria-label="Remove insight"
       >
-        ×
+        <X className="h-3.5 w-3.5" />
       </button>
     </div>
   );
@@ -208,13 +210,13 @@ export function DispatchDrawer({
               <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
                 {"What's the story?"}
               </label>
-              <textarea
-                className="w-full rounded-md border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring resize-none"
+              <Textarea
                 rows={4}
-                maxLength={600}
+                maxLength={500}
                 placeholder="2-3 sentences framing the narrative. What did you build or discover? Why does it matter?"
                 value={context}
                 onChange={(e) => setContext(e.target.value)}
+                className="resize-none"
               />
               <div className="flex justify-between mt-1">
                 <p className="text-xs text-muted-foreground">

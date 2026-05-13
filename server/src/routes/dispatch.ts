@@ -19,13 +19,7 @@ interface InsightRow {
   type: string;
   summary: string;
   content: string;
-  bullets: string; // JSON-encoded string[]
-}
-
-function countWords(text: string): number {
-  const bodyMatch = text.match(/---[\s\S]*?---\n([\s\S]*)/);
-  const body = bodyMatch ? bodyMatch[1] : text;
-  return body.trim().split(/\s+/).filter(Boolean).length;
+  bullets: string | null; // JSON-encoded string[], or null for legacy rows
 }
 
 // POST /api/dispatch/generate
@@ -88,9 +82,18 @@ app.post('/generate', requireLLM(), async (c) => {
     .filter((r): r is InsightRow => r !== undefined)
     .map((r) => {
       let bullets: string[] = [];
-      try { bullets = JSON.parse(r.bullets) as string[]; } catch { /* empty */ }
+      if (r.bullets) {
+        try {
+          const parsed = JSON.parse(r.bullets);
+          if (Array.isArray(parsed)) bullets = parsed as string[];
+        } catch { /* empty */ }
+      }
       return { id: r.id, type: r.type, summary: r.summary, content: r.content, bullets };
     });
+
+  if (orderedInsights.length < 3) {
+    return c.json({ error: 'Select at least 3 insights to generate a post' }, 400);
+  }
 
   const systemPrompt = buildDispatchSystemPrompt(tone);
   const userMessage = buildDispatchContext({ userContext: contextText, insights: orderedInsights });
@@ -101,13 +104,14 @@ app.post('/generate', requireLLM(), async (c) => {
     { role: 'user' as const, content: userMessage },
   ];
 
-  let response = await client.chat(messages, { temperature: 0.7 });
+  const chatOptions = { temperature: 0.7, responseFormat: 'text' as const };
+  let response = await client.chat(messages, chatOptions);
 
   let parsed = parseDispatchOutput(response.content);
 
   // Single retry on parse failure
   if (!parsed.ok) {
-    response = await client.chat(messages, { temperature: 0.7 });
+    response = await client.chat(messages, chatOptions);
     parsed = parseDispatchOutput(response.content);
 
     if (!parsed.ok) {
@@ -117,12 +121,14 @@ app.post('/generate', requireLLM(), async (c) => {
   }
 
   const markdown = parsed.markdown ?? response.content;
-  const wordCount = countWords(markdown);
+  const bodyText = parsed.body ?? markdown;
+  const wordCount = bodyText.trim().split(/\s+/).filter(Boolean).length;
 
   return c.json({
     markdown,
     frontmatter: parsed.frontmatter ?? { title: 'Untitled', tags: [], tldr: '' },
     wordCount,
+    degraded: parsed.degraded ?? false,
     model: client.model,
     tokensUsed: {
       input: response.usage?.inputTokens ?? 0,

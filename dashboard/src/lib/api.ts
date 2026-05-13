@@ -475,6 +475,8 @@ export interface DispatchResponse {
     tldr: string;
   };
   wordCount: number;
+  /** True when frontmatter parse failed and we returned raw content with a guessed title. */
+  degraded?: boolean;
   model: string;
   tokensUsed: {
     input: number;
