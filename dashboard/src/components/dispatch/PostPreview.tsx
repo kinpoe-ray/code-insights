@@ -1,0 +1,89 @@
+import { useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { toast } from 'sonner';
+import { Copy, Download, Check } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import type { DispatchResponse } from '@/lib/api';
+
+interface PostPreviewProps {
+  result: DispatchResponse;
+}
+
+export function PostPreview({ result }: PostPreviewProps) {
+  const [tab, setTab] = useState<'preview' | 'markdown'>('preview');
+  const [copied, setCopied] = useState(false);
+
+  function handleCopy() {
+    void navigator.clipboard.writeText(result.markdown).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+      toast.success('Copied to clipboard');
+    });
+  }
+
+  function handleDownload() {
+    const slug = result.frontmatter.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 60);
+    const filename = `${slug || 'dispatch-post'}.md`;
+    const blob = new Blob([result.markdown], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+    toast.success(`Downloaded ${filename}`);
+  }
+
+  // Strip frontmatter for the preview tab — show clean prose
+  const bodyOnly = result.markdown.replace(/^---[\s\S]*?---\n\n?/, '');
+
+  return (
+    <div className="flex flex-col h-full">
+      <div className="flex items-center justify-between gap-2 px-4 py-2 border-b shrink-0">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as 'preview' | 'markdown')}>
+          <TabsList variant="default" className="h-8">
+            <TabsTrigger value="preview" className="text-xs px-3">Preview</TabsTrigger>
+            <TabsTrigger value="markdown" className="text-xs px-3">Markdown</TabsTrigger>
+          </TabsList>
+        </Tabs>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-muted-foreground">{result.wordCount} words</span>
+          <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={handleCopy}>
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            {copied ? 'Copied' : 'Copy'}
+          </Button>
+          <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={handleDownload}>
+            <Download className="h-3.5 w-3.5" />
+            Download .md
+          </Button>
+        </div>
+      </div>
+
+      {result.frontmatter.tldr && (
+        <div className="mx-4 mt-3 px-3 py-2 rounded-md bg-muted/50 border text-sm text-muted-foreground shrink-0">
+          <span className="font-medium text-foreground">TL;DR:</span> {result.frontmatter.tldr}
+        </div>
+      )}
+
+      <div className="flex-1 overflow-y-auto px-4 py-3">
+        {tab === 'preview' ? (
+          <div className="prose prose-sm dark:prose-invert max-w-none">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {bodyOnly}
+            </ReactMarkdown>
+          </div>
+        ) : (
+          <pre className="text-xs font-mono whitespace-pre-wrap break-words text-muted-foreground">
+            {result.markdown}
+          </pre>
+        )}
+      </div>
+    </div>
+  );
+}
