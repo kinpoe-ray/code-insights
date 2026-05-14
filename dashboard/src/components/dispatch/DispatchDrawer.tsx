@@ -241,7 +241,7 @@ export function DispatchDrawer({
             </div>
 
             {/* Format selector */}
-            <fieldset className="space-y-2">
+            <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
               <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Format</legend>
               <div className="space-y-1.5">
                 {FORMAT_OPTIONS.map((opt) => (
@@ -271,7 +271,7 @@ export function DispatchDrawer({
             </fieldset>
 
             {/* Tone selector */}
-            <fieldset className="space-y-2">
+            <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
               <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tone</legend>
               <div className="space-y-1.5">
                 {TONE_OPTIONS.map((opt) => (
