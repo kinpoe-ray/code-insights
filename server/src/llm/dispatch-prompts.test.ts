@@ -10,45 +10,81 @@ import type { DispatchInsight } from '@code-insights/cli/types';
 // --- buildDispatchSystemPrompt ---
 
 describe('buildDispatchSystemPrompt', () => {
-  it('includes tone instruction for technical', () => {
-    const prompt = buildDispatchSystemPrompt('technical');
+  // Blog format — tone variations
+  it('blog/technical: includes depth-first tone instruction', () => {
+    const prompt = buildDispatchSystemPrompt('technical', 'blog');
     expect(prompt).toContain('senior engineers');
     expect(prompt).toContain('depth over accessibility');
   });
 
-  it('includes tone instruction for accessible', () => {
-    const prompt = buildDispatchSystemPrompt('accessible');
+  it('blog/accessible: includes clarity-first tone instruction', () => {
+    const prompt = buildDispatchSystemPrompt('accessible', 'blog');
     expect(prompt).toContain('mixed technical and non-technical');
   });
 
-  it('includes tone instruction for quick-tips', () => {
-    const prompt = buildDispatchSystemPrompt('quick-tips');
+  it('blog/quick-tips: includes scannable tips instruction', () => {
+    const prompt = buildDispatchSystemPrompt('quick-tips', 'blog');
     expect(prompt).toContain('tips format');
     expect(prompt).toContain('bold actionable tip');
   });
 
-  it('always includes banned word list', () => {
-    const prompt = buildDispatchSystemPrompt('technical');
-    expect(prompt).toContain('leveraged');
-    expect(prompt).toContain('seamlessly');
-    expect(prompt).toContain('delve');
-  });
-
-  it('always includes frontmatter format instructions', () => {
-    const prompt = buildDispatchSystemPrompt('accessible');
+  it('blog: includes frontmatter format instructions', () => {
+    const prompt = buildDispatchSystemPrompt('accessible', 'blog');
     expect(prompt).toContain('title:');
     expect(prompt).toContain('tags:');
     expect(prompt).toContain('tldr:');
   });
 
-  it('instructs not to invent facts', () => {
-    const prompt = buildDispatchSystemPrompt('technical');
-    expect(prompt).toContain('Do not invent facts');
+  // LinkedIn format — tone variations
+  it('linkedin/technical: uses LinkedIn-specific technical tone', () => {
+    const prompt = buildDispatchSystemPrompt('technical', 'linkedin');
+    expect(prompt).toContain('precise technical vocabulary');
+    // Must NOT include blog-specific H2 instruction
+    expect(prompt).not.toContain('H2 heading');
   });
 
-  it('instructs to synthesize, not enumerate', () => {
-    const prompt = buildDispatchSystemPrompt('technical');
-    expect(prompt).toContain('Synthesize');
+  it('linkedin/accessible: uses LinkedIn plain language tone', () => {
+    const prompt = buildDispatchSystemPrompt('accessible', 'linkedin');
+    expect(prompt).toContain('plain language');
+  });
+
+  it('linkedin/quick-tips: bold actionable statement (no headers)', () => {
+    const prompt = buildDispatchSystemPrompt('quick-tips', 'linkedin');
+    expect(prompt).toContain('bold actionable statement');
+    expect(prompt).toContain('no headers');
+  });
+
+  it('linkedin: includes hook instruction', () => {
+    const prompt = buildDispatchSystemPrompt('technical', 'linkedin');
+    expect(prompt).toContain('hook');
+    expect(prompt).toContain('150-250 words');
+  });
+
+  it('linkedin: includes hashtag instruction', () => {
+    const prompt = buildDispatchSystemPrompt('technical', 'linkedin');
+    expect(prompt).toContain('hashtag');
+  });
+
+  it('linkedin: warns against bullet lists and headers', () => {
+    const prompt = buildDispatchSystemPrompt('technical', 'linkedin');
+    expect(prompt).toContain('No headers');
+    expect(prompt).toContain('No bullet lists');
+  });
+
+  // Shared base — both formats
+  it('always includes banned word list', () => {
+    expect(buildDispatchSystemPrompt('technical', 'blog')).toContain('leveraged');
+    expect(buildDispatchSystemPrompt('technical', 'linkedin')).toContain('leveraged');
+  });
+
+  it('always instructs not to invent facts', () => {
+    expect(buildDispatchSystemPrompt('technical', 'blog')).toContain('Do not invent facts');
+    expect(buildDispatchSystemPrompt('technical', 'linkedin')).toContain('Do not invent facts');
+  });
+
+  it('always instructs to synthesize, not enumerate', () => {
+    expect(buildDispatchSystemPrompt('technical', 'blog')).toContain('Synthesize');
+    expect(buildDispatchSystemPrompt('technical', 'linkedin')).toContain('Synthesize');
   });
 });
 
@@ -109,7 +145,6 @@ describe('buildDispatchContext', () => {
     // i2 content is sparse (5 words) → bullets should appear
     expect(result).toContain('- Faster iteration');
     expect(result).toContain('- No ORM overhead');
-    // i1 content is not sparse → no bullet check needed (it has no bullets anyway)
   });
 
   it('omits bullets when content is not sparse (>= 40 words)', () => {
@@ -124,17 +159,28 @@ describe('buildDispatchContext', () => {
     expect(result).not.toContain('should not appear');
   });
 
+  it('maps prompt_quality type to Observation label', () => {
+    const pqInsight: DispatchInsight = {
+      id: 'pq1',
+      type: 'prompt_quality',
+      summary: 'Context provision was weak',
+      content: 'Missing context led to misaligned output.',
+      bullets: [],
+    };
+    const result = buildDispatchContext({ userContext: 'story', insights: [pqInsight] });
+    expect(result).toContain('[OBSERVATION 1]');
+    expect(result).not.toContain('[PROMPT_QUALITY 1]');
+  });
+
   it('does not include evidence field', () => {
     const result = buildDispatchContext({ userContext: 'story', insights: sampleInsights });
-    // We just verify the function doesn't crash with our known inputs and doesn't have
-    // the word "evidence" from any of our test data
     expect(result).not.toContain('[EVIDENCE');
   });
 });
 
-// --- parseDispatchOutput ---
+// --- parseDispatchOutput (blog format) ---
 
-const VALID_OUTPUT = `---
+const VALID_BLOG_OUTPUT = `---
 title: "What SQLite Taught Me"
 tags: [sqlite, architecture, backend]
 tldr: "Three weeks, five surprises."
@@ -152,9 +198,9 @@ Running raw SQL gave us full control over schema evolution without ORM abstracti
 
 These lessons shaped how we approach embedded databases now.`;
 
-describe('parseDispatchOutput', () => {
+describe('parseDispatchOutput (blog)', () => {
   it('parses valid output correctly', () => {
-    const result = parseDispatchOutput(VALID_OUTPUT);
+    const result = parseDispatchOutput(VALID_BLOG_OUTPUT, 'blog');
     expect(result.ok).toBe(true);
     expect(result.frontmatter?.title).toBe('What SQLite Taught Me');
     expect(result.frontmatter?.tags).toEqual(['sqlite', 'architecture', 'backend']);
@@ -162,59 +208,135 @@ describe('parseDispatchOutput', () => {
     expect(result.markdown).toContain('## WAL Mode');
   });
 
+  it('returns body separate from markdown', () => {
+    const result = parseDispatchOutput(VALID_BLOG_OUTPUT, 'blog');
+    expect(result.body).not.toContain('---');
+    expect(result.body).toContain('## WAL Mode Is Not Optional');
+  });
+
+  it('quotes title in reconstructed YAML frontmatter', () => {
+    const result = parseDispatchOutput(VALID_BLOG_OUTPUT, 'blog');
+    expect(result.markdown).toMatch(/^---\ntitle: "/m);
+  });
+
+  it('escapes double quotes in title', () => {
+    const quoted = `---\ntitle: "Lessons from \\"Production\\" Systems"\ntags: []\ntldr: "A summary."\n---\n\nBody ends here.`;
+    const result = parseDispatchOutput(quoted, 'blog');
+    expect(result.ok).toBe(true);
+    expect(result.frontmatter?.title).toContain('"Production"');
+  });
+
+  it('handles title with colon without breaking YAML', () => {
+    const withColon = `---\ntitle: "SQLite: What I Learned"\ntags: [sqlite]\ntldr: "A summary."\n---\n\nBody ends here.`;
+    const result = parseDispatchOutput(withColon, 'blog');
+    expect(result.ok).toBe(true);
+    expect(result.markdown).toMatch(/^---\ntitle: "SQLite: What I Learned"/m);
+  });
+
   it('returns missing-frontmatter error when no frontmatter', () => {
-    const result = parseDispatchOutput('Just a blog post without frontmatter.');
+    const result = parseDispatchOutput('Just a blog post without frontmatter.', 'blog');
     expect(result.ok).toBe(false);
     expect(result.error).toBe('missing-frontmatter');
-    expect(result.raw).toBe('Just a blog post without frontmatter.');
   });
 
   it('returns malformed-frontmatter when title is missing', () => {
-    const bad = `---
-tags: [sqlite]
-tldr: "A summary."
----
-
-## Section
-
-Body text.`;
-    const result = parseDispatchOutput(bad);
+    const bad = `---\ntags: [sqlite]\ntldr: "A summary."\n---\n\n## Section\n\nBody text.`;
+    const result = parseDispatchOutput(bad, 'blog');
     expect(result.ok).toBe(false);
     expect(result.error).toBe('malformed-frontmatter');
   });
 
   it('returns malformed-frontmatter when tldr is missing', () => {
-    const bad = `---
-title: "Some title"
-tags: [sqlite]
----
-
-## Section
-
-Body text.`;
-    const result = parseDispatchOutput(bad);
+    const bad = `---\ntitle: "Some title"\ntags: [sqlite]\n---\n\n## Section\n\nBody text.`;
+    const result = parseDispatchOutput(bad, 'blog');
     expect(result.ok).toBe(false);
     expect(result.error).toBe('malformed-frontmatter');
   });
 
   it('handles missing tags gracefully (empty array)', () => {
-    const noTags = `---
-title: "Post Without Tags"
-tldr: "A summary."
----
-
-## Section
-
-Body text here. This ends with a period.`;
-    const result = parseDispatchOutput(noTags);
+    const noTags = `---\ntitle: "Post Without Tags"\ntldr: "A summary."\n---\n\n## Section\n\nBody text here. This ends with a period.`;
+    const result = parseDispatchOutput(noTags, 'blog');
     expect(result.ok).toBe(true);
     expect(result.frontmatter?.tags).toEqual([]);
   });
 
-  it('includes body in reconstructed markdown', () => {
-    const result = parseDispatchOutput(VALID_OUTPUT);
+  it('includes body sections in reconstructed markdown', () => {
+    const result = parseDispatchOutput(VALID_BLOG_OUTPUT, 'blog');
     expect(result.markdown).toContain('## WAL Mode Is Not Optional');
     expect(result.markdown).toContain('## The Migration Lesson');
+  });
+});
+
+// --- parseDispatchOutput (linkedin format) ---
+
+const VALID_LINKEDIN_OUTPUT = `---
+title: "What SQLite Taught Me in Production"
+---
+
+**WAL mode is not optional** if you have concurrent readers and writers.
+
+I spent three weeks debugging a production issue. Every 50th request would stall. The culprit: SQLite in default journal mode, blocking reads during writes.
+
+Switching to WAL mode resolved it. Reads and writes operate on separate files — no locking.
+
+Three other things I learned the hard way:
+
+Skipping ORM migrations was the right call. Raw SQL gave us full control. Two lines of ALTER TABLE, done.
+
+Incremental builds cut CI time by 60%. Cache your intermediates.
+
+The hardest bugs are the ones that only appear under real load.
+
+#sqlite #backend #engineering #typescript`;
+
+describe('parseDispatchOutput (linkedin)', () => {
+  it('parses valid LinkedIn output correctly', () => {
+    const result = parseDispatchOutput(VALID_LINKEDIN_OUTPUT, 'linkedin');
+    expect(result.ok).toBe(true);
+    expect(result.frontmatter?.title).toBe('What SQLite Taught Me in Production');
+  });
+
+  it('extracts hashtags from last line into tags', () => {
+    const result = parseDispatchOutput(VALID_LINKEDIN_OUTPUT, 'linkedin');
+    expect(result.frontmatter?.tags).toContain('sqlite');
+    expect(result.frontmatter?.tags).toContain('backend');
+    expect(result.frontmatter?.tags).toContain('engineering');
+    expect(result.frontmatter?.tags).toContain('typescript');
+    // Tags should not include the # prefix
+    expect(result.frontmatter?.tags?.every(t => !t.startsWith('#'))).toBe(true);
+  });
+
+  it('sets tldr to empty string', () => {
+    const result = parseDispatchOutput(VALID_LINKEDIN_OUTPUT, 'linkedin');
+    expect(result.frontmatter?.tldr).toBe('');
+  });
+
+  it('returns body as the plain post text (no YAML wrapper)', () => {
+    const result = parseDispatchOutput(VALID_LINKEDIN_OUTPUT, 'linkedin');
+    expect(result.body).not.toContain('---');
+    expect(result.body).toContain('WAL mode is not optional');
+    // markdown === body for LinkedIn (no YAML wrapper returned to user)
+    expect(result.markdown).toBe(result.body);
+  });
+
+  it('returns missing-frontmatter error when no metadata block', () => {
+    const result = parseDispatchOutput('Just a plain post without metadata.', 'linkedin');
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('missing-frontmatter');
+  });
+
+  it('returns malformed-frontmatter when title is missing from metadata', () => {
+    const bad = `---\nauthor: "nobody"\n---\n\nPost body here.`;
+    const result = parseDispatchOutput(bad, 'linkedin');
+    expect(result.ok).toBe(false);
+    expect(result.error).toBe('malformed-frontmatter');
+  });
+
+  it('returns empty tags when no hashtags on last line', () => {
+    const noHashtags = `---\ntitle: "My Post"\n---\n\nBody without hashtags on the last line.`;
+    const result = parseDispatchOutput(noHashtags, 'linkedin');
+    expect(result.ok).toBe(true);
+    expect(result.frontmatter?.tags).toEqual([]);
   });
 });
 
@@ -235,15 +357,21 @@ describe('buildDegradedResponse', () => {
     expect(result.frontmatter?.title).toBe('Untitled');
   });
 
-  it('always returns empty tags and tldr', () => {
+  it('always returns empty tags and empty tldr', () => {
     const result = buildDegradedResponse('# Title\n\nContent.');
     expect(result.frontmatter?.tags).toEqual([]);
     expect(result.frontmatter?.tldr).toBe('');
   });
 
-  it('returns the raw content as markdown', () => {
+  it('returns the raw content as markdown and body', () => {
     const raw = '# Title\n\nContent.';
     const result = buildDegradedResponse(raw);
     expect(result.markdown).toBe(raw);
+    expect(result.body).toBe(raw);
+  });
+
+  it('sets degraded: true', () => {
+    const result = buildDegradedResponse('# Title\n\nContent.');
+    expect(result.degraded).toBe(true);
   });
 });

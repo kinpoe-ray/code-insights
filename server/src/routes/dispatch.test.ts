@@ -35,6 +35,20 @@ const { createApp } = await import('../index.js');
 // Fixtures
 // ──────────────────────────────────────────────────────
 
+const VALID_LINKEDIN_OUTPUT = `---
+title: "What SQLite Taught Me in Production"
+---
+
+**WAL mode is not optional** if you have concurrent readers and writers.
+
+I spent three weeks debugging a production issue that only appeared under real load. The culprit was SQLite in default journal mode blocking all reads during a write.
+
+Switching to WAL mode resolved it immediately. Reads and writes operate on separate file segments — no locking.
+
+Three other things I learned the hard way working on this system.
+
+#sqlite #backend #engineering`;
+
 const VALID_MARKDOWN = `---
 title: "What SQLite Taught Me About Production Systems"
 tags: [sqlite, backend, lessons-learned]
@@ -107,6 +121,7 @@ const BASE_BODY = {
   insightIds: ['ins-1', 'ins-2', 'ins-3'],
   context: 'I spent three weeks debugging our SQLite setup.',
   tone: 'technical',
+  format: 'blog',
 };
 
 // ──────────────────────────────────────────────────────
@@ -187,6 +202,18 @@ describe('POST /api/dispatch/generate', () => {
       body: JSON.stringify({ ...BASE_BODY, tone: 'marketing' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for invalid format', async () => {
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...BASE_BODY, format: 'newsletter' }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json() as { error: string };
+    expect(json.error).toMatch(/format must be one of/);
   });
 
   it('returns 404 when no insights found in DB', async () => {
@@ -329,5 +356,94 @@ describe('POST /api/dispatch/generate', () => {
       expect.any(Array),
       expect.objectContaining({ responseFormat: 'text' }),
     );
+  });
+
+  it('linkedin happy path: returns 200 with hashtags in tags, empty tldr, body=markdown', async () => {
+    seedPrerequisites();
+    seedInsight('ins-1', 'learning', 'WAL mode matters', 'WAL mode allows concurrent readers.');
+    seedInsight('ins-2', 'decision', 'Avoid ORM migrations', 'Manual SQL is safer for column renames.');
+    seedInsight('ins-3', 'technique', 'Incremental builds', 'Cache intermediates to reduce CI time.');
+
+    const mockClient = makeMockLLMClient(VALID_LINKEDIN_OUTPUT);
+    mockCreateLLMClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...BASE_BODY, format: 'linkedin' }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as {
+      format: string;
+      frontmatter: { title: string; tags: string[]; tldr: string };
+      body: string;
+      markdown: string;
+      characterCount: number;
+      degraded: boolean;
+    };
+    expect(json.format).toBe('linkedin');
+    expect(json.frontmatter.title).toBe('What SQLite Taught Me in Production');
+    expect(json.frontmatter.tags).toContain('sqlite');
+    expect(json.frontmatter.tags).toContain('backend');
+    expect(json.frontmatter.tags).toContain('engineering');
+    // Tags must not include # prefix
+    expect(json.frontmatter.tags.every((t: string) => !t.startsWith('#'))).toBe(true);
+    expect(json.frontmatter.tldr).toBe('');
+    // For LinkedIn, markdown === body (no YAML wrapper)
+    expect(json.markdown).toBe(json.body);
+    expect(json.body).toContain('WAL mode is not optional');
+    expect(json.characterCount).toBeGreaterThan(0);
+    expect(json.degraded).toBe(false);
+  });
+
+  it('format is echoed back correctly in response', async () => {
+    seedPrerequisites();
+    seedInsight('ins-1', 'learning', 'Summary one', 'Content one');
+    seedInsight('ins-2', 'decision', 'Summary two', 'Content two');
+    seedInsight('ins-3', 'technique', 'Summary three', 'Content three');
+
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient(VALID_MARKDOWN));
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...BASE_BODY, format: 'blog' }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { format: string };
+    expect(json.format).toBe('blog');
+  });
+
+  it('blog regression: blog format unchanged, includes YAML frontmatter in markdown', async () => {
+    seedPrerequisites();
+    seedInsight('ins-1', 'learning', 'WAL mode matters', 'WAL mode allows concurrent readers.');
+    seedInsight('ins-2', 'decision', 'Avoid ORM migrations', 'Manual SQL is safer for column renames.');
+    seedInsight('ins-3', 'technique', 'Incremental builds', 'Cache intermediates to reduce CI time.');
+
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient(VALID_MARKDOWN));
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...BASE_BODY, format: 'blog' }),
+    });
+
+    expect(res.status).toBe(200);
+    const json = await res.json() as {
+      markdown: string;
+      body: string;
+      frontmatter: { title: string; tags: string[]; tldr: string };
+      wordCount: number;
+    };
+    // Blog markdown includes YAML frontmatter
+    expect(json.markdown).toContain('---');
+    expect(json.markdown).toContain('title:');
+    // Body is prose-only (no YAML)
+    expect(json.body).not.toContain('---\ntitle:');
+    expect(json.frontmatter.title).toBe('What SQLite Taught Me About Production Systems');
+    expect(json.frontmatter.tldr).toMatch(/WAL/);
+    expect(json.wordCount).toBeGreaterThan(0);
   });
 });
