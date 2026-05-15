@@ -1,7 +1,7 @@
 // Prompt construction and output parsing for the Dispatch post generator.
 // Supports two output formats: 'blog' (markdown + YAML frontmatter) and 'linkedin' (plain text + metadata block).
 
-import type { DispatchTone, DispatchInsight, DispatchFormat } from '@code-insights/cli/types';
+import type { DispatchTone, DispatchInsight, DispatchFormat, SessionBackground } from '@code-insights/cli/types';
 
 // --- System prompt ---
 
@@ -12,7 +12,8 @@ Do not use the words: "leveraged", "utilized", "seamlessly", "delve".
 Do not invent facts not present in the insights.
 Do not mention AI coding sessions, Code Insights, or any tool names.
 Synthesize — do not enumerate insights one by one as a list.
-Output only the requested format — no preamble, no meta-commentary.`;
+Output only the requested format — no preamble, no meta-commentary.
+If session background is provided, use it only to inform tone and framing — do not quote or paraphrase session summaries directly in the post.`;
 
 const FORMAT_INSTRUCTIONS: Record<DispatchFormat, string> = {
   blog: `Write a blog post of 800-1000 words in markdown (body only, excluding frontmatter).
@@ -73,6 +74,7 @@ export function buildDispatchSystemPrompt(tone: DispatchTone, format: DispatchFo
 export interface DispatchInput {
   userContext: string;
   insights: DispatchInsight[];
+  sessionBackgrounds?: SessionBackground[];
 }
 
 const TYPE_LABELS: Record<string, string> = {
@@ -94,7 +96,16 @@ export function buildDispatchContext(input: DispatchInput): string {
     return `[${typeLabel.toUpperCase()} ${i + 1}]\nSummary: ${insight.summary}\n${insight.content}${bulletLines}`;
   });
 
-  return `Context from the author:\n${input.userContext}\n\n---\n\nINSIGHTS (${input.insights.length} selected by author):\n\n${insightBlocks.join('\n\n')}`;
+  const backgroundBlock = input.sessionBackgrounds && input.sessionBackgrounds.length > 0
+    ? `---\n\nSESSION BACKGROUND (${input.sessionBackgrounds.length} session${input.sessionBackgrounds.length > 1 ? 's' : ''} contributed these insights):\n\n${
+        input.sessionBackgrounds.map((s) => {
+          const charLabel = s.sessionCharacter ? ` (${s.sessionCharacter.replace(/_/g, ' ')})` : '';
+          return `[Session: "${s.title}"${charLabel}]\n${s.summary}`;
+        }).join('\n\n')
+      }\n\n`
+    : '';
+
+  return `Context from the author:\n${input.userContext}\n\n${backgroundBlock}---\n\nINSIGHTS (${input.insights.length} selected by author):\n\n${insightBlocks.join('\n\n')}`;
 }
 
 // --- Output parser ---

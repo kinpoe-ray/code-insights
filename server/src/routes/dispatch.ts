@@ -8,7 +8,7 @@ import {
   parseDispatchOutput,
   buildDegradedResponse,
 } from '../llm/dispatch-prompts.js';
-import type { DispatchTone, DispatchInsight, DispatchFormat } from '@code-insights/cli/types';
+import type { DispatchTone, DispatchInsight, DispatchFormat, SessionBackground } from '@code-insights/cli/types';
 
 const app = new Hono();
 
@@ -23,14 +23,22 @@ const TEMPERATURES: Record<DispatchFormat, number> = {
 
 interface InsightRow {
   id: string;
+  session_id: string;
   type: string;
   summary: string;
   content: string;
   bullets: string | null; // JSON-encoded string[], or null for legacy rows
 }
 
+interface SessionRow {
+  id: string;
+  title: string;
+  session_character: string | null;
+  summary: string;
+}
+
 // POST /api/dispatch/generate
-// Body: { insightIds: string[], context: string, tone: DispatchTone, format: DispatchFormat }
+// Body: { insightIds: string[], context: string, tone: DispatchTone, format: DispatchFormat, includeSessionBackground?: boolean }
 // Returns: { markdown, body, format, frontmatter, wordCount, characterCount, degraded, model, tokensUsed }
 app.post('/generate', requireLLM(), async (c) => {
   const body = await c.req.json<{
@@ -38,6 +46,7 @@ app.post('/generate', requireLLM(), async (c) => {
     context?: unknown;
     tone?: unknown;
     format?: unknown;
+    includeSessionBackground?: unknown;
   }>();
 
   // Validate insightIds
@@ -77,12 +86,13 @@ app.post('/generate', requireLLM(), async (c) => {
   const format = body.format as DispatchFormat;
   const contextText = body.context.trim();
   const typedIds = insightIds as string[];
+  const includeSessionBackground = body.includeSessionBackground === true;
 
   // Fetch insights from DB — respects provided order
   const db = getDb();
   const placeholders = typedIds.map(() => '?').join(', ');
   const rows = db.prepare(
-    `SELECT id, type, summary, content, bullets FROM insights WHERE id IN (${placeholders})`
+    `SELECT id, session_id, type, summary, content, bullets FROM insights WHERE id IN (${placeholders})`
   ).all(...typedIds) as InsightRow[];
 
   if (rows.length === 0) {
@@ -109,8 +119,45 @@ app.post('/generate', requireLLM(), async (c) => {
     return c.json({ error: 'Select at least 3 insights to generate a post' }, 400);
   }
 
+  // Fetch session backgrounds when requested
+  let sessionBackgrounds: SessionBackground[] | undefined;
+  if (includeSessionBackground) {
+    // Count insights per session to pick the top 4 by contribution
+    const sessionInsightCount = new Map<string, number>();
+    for (const r of rows) {
+      sessionInsightCount.set(r.session_id, (sessionInsightCount.get(r.session_id) ?? 0) + 1);
+    }
+
+    // Sort sessions by insight count descending, take top 4
+    const topSessionIds = [...sessionInsightCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 4)
+      .map(([id]) => id);
+
+    if (topSessionIds.length > 0) {
+      const sessionPlaceholders = topSessionIds.map(() => '?').join(', ');
+      const sessionRows = db.prepare(
+        `SELECT id,
+                COALESCE(custom_title, generated_title, 'Untitled') as title,
+                session_character,
+                summary
+         FROM sessions
+         WHERE id IN (${sessionPlaceholders})
+           AND summary IS NOT NULL
+           AND summary != ''`
+      ).all(...topSessionIds) as SessionRow[];
+
+      sessionBackgrounds = sessionRows.map((s) => ({
+        sessionId: s.id,
+        title: s.title,
+        summary: s.summary,
+        sessionCharacter: s.session_character,
+      }));
+    }
+  }
+
   const systemPrompt = buildDispatchSystemPrompt(tone, format);
-  const userMessage = buildDispatchContext({ userContext: contextText, insights: orderedInsights });
+  const userMessage = buildDispatchContext({ userContext: contextText, insights: orderedInsights, sessionBackgrounds });
 
   const client = createLLMClient();
   const messages = [

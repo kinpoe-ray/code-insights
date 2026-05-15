@@ -467,6 +467,7 @@ export interface DispatchRequest {
   context: string;
   tone: DispatchTone;
   format: DispatchFormat;
+  includeSessionBackground?: boolean;
 }
 
 export interface DispatchResponse {

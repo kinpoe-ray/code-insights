@@ -392,11 +392,18 @@ export interface DispatchInsight {
   bullets: string[];
 }
 
+export interface SessionBackground {
+  title: string;
+  sessionCharacter: string | null;
+  summary: string;
+}
+
 export interface DispatchRequest {
   insightIds: string[];
   context: string;
   tone: DispatchTone;
   format: DispatchFormat;
+  includeSessionBackground?: boolean;
 }
 
 export interface DispatchResponse {

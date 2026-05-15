@@ -94,12 +94,16 @@ function seedPrerequisites() {
   testDb
     .prepare(`INSERT OR IGNORE INTO projects (id, name, path, last_activity, session_count) VALUES ('proj-1', 'test', '/test', datetime('now'), 1)`)
     .run();
+  seedSession('sess-1', 'Untitled');
+}
+
+function seedSession(id: string, title: string, summary: string | null = null, character: string | null = null) {
   testDb
     .prepare(
-      `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool)
-       VALUES ('sess-1', 'proj-1', 'test', '/test', '2025-06-15T10:00:00Z', '2025-06-15T11:00:00Z', 10, 'claude-code')`,
+      `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool, generated_title, summary, session_character)
+       VALUES (?, 'proj-1', 'test', '/test', '2025-06-15T10:00:00Z', '2025-06-15T11:00:00Z', 10, 'claude-code', ?, ?, ?)`,
     )
-    .run();
+    .run(id, title, summary, character);
 }
 
 function seedInsight(
@@ -108,13 +112,14 @@ function seedInsight(
   summary: string,
   content: string,
   bullets: string | null = null,
+  sessionId = 'sess-1',
 ) {
   testDb
     .prepare(
       `INSERT INTO insights (id, session_id, project_id, project_name, type, title, content, summary, confidence, timestamp, bullets)
-       VALUES (?, 'sess-1', 'proj-1', 'test', ?, ?, ?, ?, 0.9, datetime('now'), ?)`,
+       VALUES (?, ?, 'proj-1', 'test', ?, ?, ?, ?, 0.9, datetime('now'), ?)`,
     )
-    .run(id, type, summary, content, summary, bullets);
+    .run(id, sessionId, type, summary, content, summary, bullets);
 }
 
 const BASE_BODY = {
@@ -450,5 +455,111 @@ describe('POST /api/dispatch/generate', () => {
     expect(json.frontmatter.title).toBe('What SQLite Taught Me About Production Systems');
     expect(json.frontmatter.tldr).toMatch(/WAL/);
     expect(json.wordCount).toBeGreaterThan(0);
+  });
+
+  it('includeSessionBackground: session summaries fetched and sent in user message; capped at 4', async () => {
+    testDb.prepare(`INSERT OR IGNORE INTO projects (id, name, path, last_activity, session_count) VALUES ('proj-1', 'test', '/test', datetime('now'), 5)`).run();
+    // Seed 5 sessions, each with a summary
+    for (let i = 1; i <= 5; i++) {
+      testDb.prepare(
+        `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool, summary, generated_title, session_character)
+         VALUES (?, 'proj-1', 'test', '/test', datetime('now'), datetime('now'), 10, 'claude-code', ?, ?, ?)`,
+      ).run(`sess-bg${i}`, `Summary for session ${i}`, `Session ${i}`, 'feature_build');
+    }
+
+    // Seed insights spread across all 5 sessions — sess-bg1 contributes most (3)
+    const seedBg = (id: string, sessionId: string) =>
+      testDb.prepare(
+        `INSERT INTO insights (id, session_id, project_id, project_name, type, title, content, summary, confidence, timestamp)
+         VALUES (?, ?, 'proj-1', 'test', 'learning', ?, ?, ?, 0.9, datetime('now'))`,
+      ).run(id, sessionId, `Summary ${id}`, `Content ${id}`, `Summary ${id}`);
+
+    seedBg('bg-1', 'sess-bg1'); seedBg('bg-2', 'sess-bg1'); seedBg('bg-3', 'sess-bg1');
+    seedBg('bg-4', 'sess-bg2'); seedBg('bg-5', 'sess-bg2');
+    seedBg('bg-6', 'sess-bg3');
+    seedBg('bg-7', 'sess-bg4');
+    seedBg('bg-8', 'sess-bg5');
+
+    const mockClient = makeMockLLMClient(VALID_MARKDOWN);
+    mockCreateLLMClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        insightIds: ['bg-1', 'bg-2', 'bg-3', 'bg-4', 'bg-5', 'bg-6', 'bg-7', 'bg-8'],
+        context: 'A story across many sessions.',
+        tone: 'technical',
+        format: 'blog',
+        includeSessionBackground: true,
+      }),
+    });
+
+    const callArgs = mockClient.chat.mock.calls[0][0] as Array<{ role: string; content: string }>;
+    const userMsg = callArgs.find(m => m.role === 'user')?.content ?? '';
+    expect(userMsg).toContain('SESSION BACKGROUND');
+    // Cap at 4 — sess-bg5 (least contributing) should not appear
+    const sessionCount = (userMsg.match(/\[Session:/g) ?? []).length;
+    expect(sessionCount).toBeLessThanOrEqual(4);
+    expect(userMsg).toContain('Session 1');
+  });
+
+  it('includeSessionBackground: omitted from user message when false', async () => {
+    seedPrerequisites();
+    seedInsight('ins-1', 'learning', 'Summary one', 'Content one');
+    seedInsight('ins-2', 'decision', 'Summary two', 'Content two');
+    seedInsight('ins-3', 'technique', 'Summary three', 'Content three');
+
+    const mockClient = makeMockLLMClient(VALID_MARKDOWN);
+    mockCreateLLMClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...BASE_BODY, includeSessionBackground: false }),
+    });
+
+    const callArgs = mockClient.chat.mock.calls[0][0] as Array<{ role: string; content: string }>;
+    const userMsg = callArgs.find(m => m.role === 'user')?.content ?? '';
+    expect(userMsg).not.toContain('SESSION BACKGROUND');
+  });
+
+  it('includeSessionBackground: sessions without summary are silently skipped', async () => {
+    testDb.prepare(`INSERT OR IGNORE INTO projects (id, name, path, last_activity, session_count) VALUES ('proj-1', 'test', '/test', datetime('now'), 1)`).run();
+    testDb.prepare(
+      `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool)
+       VALUES ('sess-nosummary', 'proj-1', 'test', '/test', datetime('now'), datetime('now'), 5, 'claude-code')`,
+    ).run();
+
+    const seedNs = (id: string) =>
+      testDb.prepare(
+        `INSERT INTO insights (id, session_id, project_id, project_name, type, title, content, summary, confidence, timestamp)
+         VALUES (?, 'sess-nosummary', 'proj-1', 'test', 'learning', ?, ?, ?, 0.9, datetime('now'))`,
+      ).run(id, `Summary ${id}`, `Content ${id}`, `Summary ${id}`);
+    seedNs('ns-1'); seedNs('ns-2'); seedNs('ns-3');
+
+    const mockClient = makeMockLLMClient(VALID_MARKDOWN);
+    mockCreateLLMClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        insightIds: ['ns-1', 'ns-2', 'ns-3'],
+        context: 'Context.',
+        tone: 'technical',
+        format: 'blog',
+        includeSessionBackground: true,
+      }),
+    });
+
+    // Should succeed — sessions without summary are filtered in the SQL WHERE clause
+    expect(res.status).toBe(200);
+    const callArgs = mockClient.chat.mock.calls[0][0] as Array<{ role: string; content: string }>;
+    const userMsg = callArgs.find(m => m.role === 'user')?.content ?? '';
+    expect(userMsg).not.toContain('SESSION BACKGROUND');
   });
 });

@@ -28,6 +28,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
 import { generateDispatch } from '@/lib/api';
 import { PostPreview } from './PostPreview';
 import type { Insight } from '@/lib/types';
@@ -120,6 +121,7 @@ export function DispatchDrawer({
   const [context, setContext] = useState('');
   const [format, setFormat] = useState<DispatchFormat>('blog');
   const [tone, setTone] = useState<DispatchTone>('technical');
+  const [includeSessionBackground, setIncludeSessionBackground] = useState(false);
   const [result, setResult] = useState<DispatchResponse | null>(null);
 
   const mutation = useMutation({
@@ -147,6 +149,7 @@ export function DispatchDrawer({
       context,
       tone,
       format,
+      includeSessionBackground,
     });
   }
 
@@ -157,6 +160,7 @@ export function DispatchDrawer({
     setFormat('blog');
     setTone('technical');
     setContext('');
+    setIncludeSessionBackground(false);
   }
 
   const canGenerate = selectedInsights.length >= 3 && context.trim().length > 0 && !mutation.isPending;
@@ -240,6 +244,22 @@ export function DispatchDrawer({
               </div>
             </div>
 
+            {/* Session background toggle */}
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-medium text-foreground">Include session background</p>
+                <p className="text-xs text-muted-foreground">
+                  Adds session summaries to help the model understand context (up to 4 sessions).
+                </p>
+              </div>
+              <Switch
+                id="session-background"
+                checked={includeSessionBackground}
+                onCheckedChange={setIncludeSessionBackground}
+                aria-label="Include session background"
+              />
+            </div>
+
             {/* Format selector */}
             <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
               <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Format</legend>
@@ -299,6 +319,18 @@ export function DispatchDrawer({
                 ))}
               </div>
             </fieldset>
+
+            {/* Session background toggle */}
+            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
+              <div className="min-w-0">
+                <p className="text-sm font-medium">Include session background</p>
+                <p className="text-xs text-muted-foreground">Adds session context to help the model understand how insights connect</p>
+              </div>
+              <Switch
+                checked={includeSessionBackground}
+                onCheckedChange={setIncludeSessionBackground}
+              />
+            </div>
 
             {/* Error */}
             {mutation.isError && (

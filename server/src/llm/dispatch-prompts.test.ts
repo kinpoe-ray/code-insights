@@ -176,6 +176,61 @@ describe('buildDispatchContext', () => {
     const result = buildDispatchContext({ userContext: 'story', insights: sampleInsights });
     expect(result).not.toContain('[EVIDENCE');
   });
+
+  it('includes SESSION BACKGROUND block when sessionBackgrounds provided', () => {
+    const result = buildDispatchContext({
+      userContext: 'story',
+      insights: sampleInsights,
+      sessionBackgrounds: [
+        { title: 'WAL Mode Investigation', summary: 'Three weeks debugging writes.', sessionCharacter: 'bug_hunt' },
+      ],
+    });
+    expect(result).toContain('SESSION BACKGROUND');
+    expect(result).toContain('WAL Mode Investigation');
+    expect(result).toContain('Three weeks debugging writes.');
+    expect(result).toContain('bug hunt'); // session_character with underscores replaced
+  });
+
+  it('includes session character parenthetical when present', () => {
+    const result = buildDispatchContext({
+      userContext: 'story',
+      insights: sampleInsights,
+      sessionBackgrounds: [
+        { title: 'Feature Work', summary: 'Built the auth flow.', sessionCharacter: 'feature_build' },
+      ],
+    });
+    expect(result).toContain('(feature build)');
+  });
+
+  it('omits session character parenthetical when null', () => {
+    const result = buildDispatchContext({
+      userContext: 'story',
+      insights: sampleInsights,
+      sessionBackgrounds: [
+        { title: 'Quick Task', summary: 'Fixed a typo.', sessionCharacter: null },
+      ],
+    });
+    expect(result).toContain('[Session: "Quick Task"]');
+    expect(result).not.toContain('(null)');
+  });
+
+  it('omits SESSION BACKGROUND block when no sessionBackgrounds', () => {
+    const result = buildDispatchContext({ userContext: 'story', insights: sampleInsights });
+    expect(result).not.toContain('SESSION BACKGROUND');
+  });
+
+  it('puts SESSION BACKGROUND between user context and insights', () => {
+    const result = buildDispatchContext({
+      userContext: 'story',
+      insights: sampleInsights,
+      sessionBackgrounds: [
+        { title: 'Session', summary: 'A summary.', sessionCharacter: null },
+      ],
+    });
+    const bgIdx = result.indexOf('SESSION BACKGROUND');
+    const insightsIdx = result.indexOf('INSIGHTS');
+    expect(bgIdx).toBeLessThan(insightsIdx);
+  });
 });
 
 // --- parseDispatchOutput (blog format) ---
