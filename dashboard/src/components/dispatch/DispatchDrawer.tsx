@@ -244,22 +244,6 @@ export function DispatchDrawer({
               </div>
             </div>
 
-            {/* Session background toggle */}
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-medium text-foreground">Include session background</p>
-                <p className="text-xs text-muted-foreground">
-                  Adds session summaries to help the model understand context (up to 4 sessions).
-                </p>
-              </div>
-              <Switch
-                id="session-background"
-                checked={includeSessionBackground}
-                onCheckedChange={setIncludeSessionBackground}
-                aria-label="Include session background"
-              />
-            </div>
-
             {/* Format selector */}
             <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
               <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Format</legend>
@@ -321,14 +305,20 @@ export function DispatchDrawer({
             </fieldset>
 
             {/* Session background toggle */}
-            <div className="flex items-center justify-between gap-3 rounded-md border px-3 py-2.5">
-              <div className="min-w-0">
-                <p className="text-sm font-medium">Include session background</p>
-                <p className="text-xs text-muted-foreground">Adds session context to help the model understand how insights connect</p>
+            <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
+              <div className="space-y-0.5">
+                <label htmlFor="session-background" className="text-sm font-medium cursor-pointer">
+                  Include session background
+                </label>
+                <p id="session-bg-desc" className="text-xs text-muted-foreground">
+                  Adds session summaries to help the model understand context (up to 4 sessions).
+                </p>
               </div>
               <Switch
+                id="session-background"
                 checked={includeSessionBackground}
                 onCheckedChange={setIncludeSessionBackground}
+                aria-describedby="session-bg-desc"
               />
             </div>
 

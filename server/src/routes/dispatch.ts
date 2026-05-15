@@ -122,20 +122,16 @@ app.post('/generate', requireLLM(), async (c) => {
   // Fetch session backgrounds when requested
   let sessionBackgrounds: SessionBackground[] | undefined;
   if (includeSessionBackground) {
-    // Count insights per session to pick the top 4 by contribution
+    // Count insights per session (all selected insights, before filtering)
     const sessionInsightCount = new Map<string, number>();
     for (const r of rows) {
       sessionInsightCount.set(r.session_id, (sessionInsightCount.get(r.session_id) ?? 0) + 1);
     }
 
-    // Sort sessions by insight count descending, take top 4
-    const topSessionIds = [...sessionInsightCount.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 4)
-      .map(([id]) => id);
-
-    if (topSessionIds.length > 0) {
-      const sessionPlaceholders = topSessionIds.map(() => '?').join(', ');
+    const allSessionIds = [...sessionInsightCount.keys()];
+    if (allSessionIds.length > 0) {
+      // Fetch only sessions that have summaries — filter FIRST, then rank and cap
+      const sessionPlaceholders = allSessionIds.map(() => '?').join(', ');
       const sessionRows = db.prepare(
         `SELECT id,
                 COALESCE(custom_title, generated_title, 'Untitled') as title,
@@ -145,14 +141,18 @@ app.post('/generate', requireLLM(), async (c) => {
          WHERE id IN (${sessionPlaceholders})
            AND summary IS NOT NULL
            AND summary != ''`
-      ).all(...topSessionIds) as SessionRow[];
+      ).all(...allSessionIds) as SessionRow[];
 
-      sessionBackgrounds = sessionRows.map((s) => ({
-        sessionId: s.id,
-        title: s.title,
-        summary: s.summary,
-        sessionCharacter: s.session_character,
-      }));
+      // Rank by insight count descending, cap at 4
+      sessionBackgrounds = sessionRows
+        .sort((a, b) => (sessionInsightCount.get(b.id) ?? 0) - (sessionInsightCount.get(a.id) ?? 0))
+        .slice(0, 4)
+        .map((s) => ({
+          sessionId: s.id,
+          title: s.title,
+          sessionCharacter: s.session_character,
+          summary: s.summary,
+        }));
     }
   }
 

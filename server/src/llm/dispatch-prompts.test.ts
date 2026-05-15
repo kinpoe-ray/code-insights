@@ -182,7 +182,7 @@ describe('buildDispatchContext', () => {
       userContext: 'story',
       insights: sampleInsights,
       sessionBackgrounds: [
-        { title: 'WAL Mode Investigation', summary: 'Three weeks debugging writes.', sessionCharacter: 'bug_hunt' },
+        { sessionId: 's1', title: 'WAL Mode Investigation', summary: 'Three weeks debugging writes.', sessionCharacter: 'bug_hunt' },
       ],
     });
     expect(result).toContain('SESSION BACKGROUND');
@@ -196,7 +196,7 @@ describe('buildDispatchContext', () => {
       userContext: 'story',
       insights: sampleInsights,
       sessionBackgrounds: [
-        { title: 'Feature Work', summary: 'Built the auth flow.', sessionCharacter: 'feature_build' },
+        { sessionId: 's1', title: 'Feature Work', summary: 'Built the auth flow.', sessionCharacter: 'feature_build' },
       ],
     });
     expect(result).toContain('(feature build)');
@@ -207,7 +207,7 @@ describe('buildDispatchContext', () => {
       userContext: 'story',
       insights: sampleInsights,
       sessionBackgrounds: [
-        { title: 'Quick Task', summary: 'Fixed a typo.', sessionCharacter: null },
+        { sessionId: 's1', title: 'Quick Task', summary: 'Fixed a typo.', sessionCharacter: null },
       ],
     });
     expect(result).toContain('[Session: "Quick Task"]');
@@ -224,7 +224,7 @@ describe('buildDispatchContext', () => {
       userContext: 'story',
       insights: sampleInsights,
       sessionBackgrounds: [
-        { title: 'Session', summary: 'A summary.', sessionCharacter: null },
+        { sessionId: 's1', title: 'Session', summary: 'A summary.', sessionCharacter: null },
       ],
     });
     const bgIdx = result.indexOf('SESSION BACKGROUND');

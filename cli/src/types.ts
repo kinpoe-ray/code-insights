@@ -393,6 +393,7 @@ export interface DispatchInsight {
 }
 
 export interface SessionBackground {
+  sessionId: string;
   title: string;
   sessionCharacter: string | null;
   summary: string;

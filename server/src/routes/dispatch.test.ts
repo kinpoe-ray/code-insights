@@ -562,4 +562,67 @@ describe('POST /api/dispatch/generate', () => {
     const userMsg = callArgs.find(m => m.role === 'user')?.content ?? '';
     expect(userMsg).not.toContain('SESSION BACKGROUND');
   });
+
+  it('includeSessionBackground: filter-then-rank — top-ranked sessions with no summary do not block lower-ranked sessions that have summaries', async () => {
+    // Regression for cap-before-filter bug: previously top-2 sessions by insight count
+    // were selected first, then filtered for summaries, silently returning 0 backgrounds
+    // even though sessions ranked 3-5 had summaries.
+    testDb.prepare(`INSERT OR IGNORE INTO projects (id, name, path, last_activity, session_count) VALUES ('proj-1', 'test', '/test', datetime('now'), 5)`).run();
+
+    // Sessions ranked 1+2 by insight count: NO summary
+    testDb.prepare(
+      `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool)
+       VALUES ('sess-nosumA', 'proj-1', 'test', '/test', datetime('now'), datetime('now'), 10, 'claude-code')`,
+    ).run();
+    testDb.prepare(
+      `INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count, source_tool)
+       VALUES ('sess-nosumB', 'proj-1', 'test', '/test', datetime('now'), datetime('now'), 10, 'claude-code')`,
+    ).run();
+    // Sessions ranked 3-5 by insight count: HAVE summaries
+    seedSession('sess-sum1', 'Alpha Summary', 'Alpha session summary text.', 'feature_build');
+    seedSession('sess-sum2', 'Beta Summary', 'Beta session summary text.', 'bug_hunt');
+    seedSession('sess-sum3', 'Gamma Summary', 'Gamma session summary text.', 'refactor');
+
+    const seedFor = (id: string, sessionId: string) =>
+      testDb.prepare(
+        `INSERT INTO insights (id, session_id, project_id, project_name, type, title, content, summary, confidence, timestamp)
+         VALUES (?, ?, 'proj-1', 'test', 'learning', ?, ?, ?, 0.9, datetime('now'))`,
+      ).run(id, sessionId, `Summary ${id}`, `Content ${id}`, `Summary ${id}`);
+
+    // Give sess-nosumA 3 insights and sess-nosumB 2 insights (top by count but no summary)
+    seedFor('fr-1', 'sess-nosumA'); seedFor('fr-2', 'sess-nosumA'); seedFor('fr-3', 'sess-nosumA');
+    seedFor('fr-4', 'sess-nosumB'); seedFor('fr-5', 'sess-nosumB');
+    // Give the summary sessions 1 insight each
+    seedFor('fr-6', 'sess-sum1');
+    seedFor('fr-7', 'sess-sum2');
+    seedFor('fr-8', 'sess-sum3');
+
+    const mockClient = makeMockLLMClient(VALID_MARKDOWN);
+    mockCreateLLMClient.mockReturnValue(mockClient);
+
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        insightIds: ['fr-1', 'fr-2', 'fr-3', 'fr-4', 'fr-5', 'fr-6', 'fr-7', 'fr-8'],
+        context: 'Context across sessions.',
+        tone: 'technical',
+        format: 'blog',
+        includeSessionBackground: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const callArgs = mockClient.chat.mock.calls[0][0] as Array<{ role: string; content: string }>;
+    const userMsg = callArgs.find(m => m.role === 'user')?.content ?? '';
+    // The 3 sessions with summaries must appear — filter-first ensures they are not displaced
+    expect(userMsg).toContain('SESSION BACKGROUND');
+    expect(userMsg).toContain('Alpha Summary');
+    expect(userMsg).toContain('Beta Summary');
+    expect(userMsg).toContain('Gamma Summary');
+    // The sessions without summaries must not appear
+    expect(userMsg).not.toContain('sess-nosumA');
+    expect(userMsg).not.toContain('sess-nosumB');
+  });
 });
