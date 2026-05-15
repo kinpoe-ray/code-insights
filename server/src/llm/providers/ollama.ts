@@ -24,7 +24,7 @@ export function createOllamaClient(model: string, baseUrl?: string): LLMClient {
             // flattenContent converts ContentBlock[] to string; strings pass through unchanged.
             messages: messages.map(m => ({ role: m.role, content: flattenContent(m.content) })),
             stream: false,
-            options: { temperature: 0.7 },
+            options: { temperature: options?.temperature ?? 0.7 },
           }),
         });
       } catch (err) {

@@ -48,10 +48,11 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
               model,
               // flattenContent converts ContentBlock[] to string; strings pass through unchanged.
               messages: messages.map(m => ({ role: m.role, content: flattenContent(m.content) })),
-              temperature: 0.3,
+              temperature: options?.temperature ?? 0.3,
               max_tokens: 4096,
-              // Grammar-constrained JSON output — llama-server honours OpenAI's response_format.
-              response_format: { type: 'json_object' },
+              // Grammar-constrained JSON output — only when caller expects JSON.
+              // Text-format callers (e.g. Dispatch) return markdown/YAML, not JSON.
+              ...(options?.responseFormat !== 'text' && { response_format: { type: 'json_object' } }),
             }),
           });
         } catch (err) {
@@ -116,6 +117,15 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
           outputTokens: data.usage?.completion_tokens ?? 0,
         };
       };
+
+      // Text-format callers (e.g. Dispatch) return markdown/YAML — skip JSON validation entirely.
+      if (options?.responseFormat === 'text') {
+        const result = await attempt();
+        return {
+          content: result.content,
+          usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+        };
+      }
 
       // Perform the chat call with a single retry on JSON parse failure.
       // Small quantized models occasionally emit malformed JSON even with response_format: json_object.

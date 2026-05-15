@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import { format } from 'date-fns';
 import { useSearchParams, Link } from 'react-router';
 import { useInsights } from '@/hooks/useInsights';
@@ -15,6 +15,7 @@ import { ErrorCard } from '@/components/ErrorCard';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Select,
@@ -33,6 +34,8 @@ import { SavedFiltersDropdown } from '@/components/filters/SavedFiltersDropdown'
 import { SourceToolSelect } from '@/components/filters/SourceToolSelect';
 import { useSavedFilters } from '@/hooks/useSavedFilters';
 import { LlmNudgeBanner } from '@/components/LlmNudgeBanner';
+import { DispatchDrawer } from '@/components/dispatch/DispatchDrawer';
+import { FloatingActionBar } from '@/components/dispatch/FloatingActionBar';
 
 const INSIGHT_TYPES: InsightType[] = ['summary', 'decision', 'learning', 'technique', 'prompt_quality'];
 
@@ -58,6 +61,8 @@ interface InsightGroup {
   insights: Insight[];
 }
 
+const MAX_DISPATCH_INSIGHTS = 8;
+
 export default function InsightsPage() {
   const [filters, setFilter, setFilters, clearFilters] = useFilterParams({
     q: '',
@@ -67,6 +72,36 @@ export default function InsightsPage() {
     pattern: '',
     source: 'all',
   });
+
+  // Dispatch selection state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedInsights, setSelectedInsights] = useState<Insight[]>([]);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const handleToggleSelect = useCallback((insight: Insight) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(insight.id)) {
+        next.delete(insight.id);
+        setSelectedInsights((ins) => ins.filter((i) => i.id !== insight.id));
+      } else {
+        if (next.size >= MAX_DISPATCH_INSIGHTS) return prev;
+        next.add(insight.id);
+        setSelectedInsights((ins) => [...ins, insight]);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleReorder = useCallback((reordered: Insight[]) => {
+    setSelectedInsights(reordered);
+    setSelectedIds(new Set(reordered.map((i) => i.id)));
+  }, []);
+
+  const handleRemoveFromDrawer = useCallback((id: string) => {
+    setSelectedIds((prev) => { const next = new Set(prev); next.delete(id); return next; });
+    setSelectedInsights((ins) => ins.filter((i) => i.id !== id));
+  }, []);
 
   const { savedFilters, saveFilter, deleteFilter } = useSavedFilters('insights');
 
@@ -200,7 +235,7 @@ export default function InsightsPage() {
   }, [filtered, filters.view]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+    <div className="flex flex-col h-[calc(100vh-3.5rem)] relative">
       {/* Sticky header: title + filters */}
       <div className="shrink-0 sticky top-0 z-10 bg-background border-b px-6 pt-5 pb-3 space-y-3">
         <div>
@@ -346,16 +381,37 @@ export default function InsightsPage() {
                   {group.label} ({group.count})
                 </h2>
                 <div className="rounded-md border overflow-hidden">
-                  {group.insights.map((insight) => (
-                    <InsightListItem
-                      key={insight.id}
-                      insight={insight}
-                      showProject={filters.view !== 'project'}
-                      allInsightIds={allInsightIds}
-                      highlighted={insight.id === highlightedInsightId}
-                      defaultExpanded={insight.id === highlightedInsightId}
-                    />
-                  ))}
+                  {group.insights.map((insight) => {
+                    const isSelected = selectedIds.has(insight.id);
+                    const atMax = selectedIds.size >= MAX_DISPATCH_INSIGHTS;
+                    return (
+                      <div
+                        key={insight.id}
+                        className={`relative group/dispatch ${isSelected ? 'bg-primary/5' : ''}`}
+                      >
+                        <div
+                          className="absolute left-2 top-3 z-10 opacity-0 group-hover/dispatch:opacity-100 transition-opacity"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <Checkbox
+                            checked={isSelected}
+                            disabled={!isSelected && atMax}
+                            onCheckedChange={() => handleToggleSelect(insight)}
+                            aria-label={`Select insight: ${insight.title}`}
+                          />
+                        </div>
+                        <div className={`transition-[padding-left] ${isSelected ? 'pl-8' : 'group-hover/dispatch:pl-8'}`}>
+                          <InsightListItem
+                            insight={insight}
+                            showProject={filters.view !== 'project'}
+                            allInsightIds={allInsightIds}
+                            highlighted={insight.id === highlightedInsightId}
+                            defaultExpanded={insight.id === highlightedInsightId}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             );
@@ -363,6 +419,19 @@ export default function InsightsPage() {
         </div>
       )}
       </div>
+
+      <FloatingActionBar
+        count={selectedIds.size}
+        onOpen={() => setDrawerOpen(true)}
+      />
+
+      <DispatchDrawer
+        open={drawerOpen}
+        onOpenChange={setDrawerOpen}
+        selectedInsights={selectedInsights}
+        onReorder={handleReorder}
+        onRemove={handleRemoveFromDrawer}
+      />
     </div>
   );
 }

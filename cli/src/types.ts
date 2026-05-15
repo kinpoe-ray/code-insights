@@ -379,3 +379,51 @@ export interface FileSyncState {
   syncedSessionIds?: string[];  // For providers where 1 file = N sessions (e.g., Cursor SQLite)
 }
 
+// ── Dispatch feature (blog post generator) ───────────────────────────────────
+
+export type DispatchTone = 'technical' | 'accessible' | 'quick-tips';
+export type DispatchFormat = 'blog' | 'linkedin';
+
+export interface DispatchInsight {
+  id: string;
+  type: string;
+  summary: string;
+  content: string;
+  bullets: string[];
+}
+
+export interface SessionBackground {
+  sessionId: string;
+  title: string;
+  sessionCharacter: string | null;
+  summary: string;
+}
+
+export interface DispatchRequest {
+  insightIds: string[];
+  context: string;
+  tone: DispatchTone;
+  format: DispatchFormat;
+  includeSessionBackground?: boolean;
+}
+
+export interface DispatchResponse {
+  markdown: string;
+  /** Plain text body without YAML frontmatter — use for LinkedIn copy and word/char count. */
+  body: string;
+  format: DispatchFormat;
+  frontmatter: {
+    title: string;
+    tags: string[];
+    tldr: string;
+  };
+  wordCount: number;
+  characterCount: number;
+  degraded: boolean;
+  model: string;
+  tokensUsed: {
+    input: number;
+    output: number;
+  };
+}
+

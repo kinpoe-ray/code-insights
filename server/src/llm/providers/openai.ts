@@ -21,7 +21,7 @@ export function createOpenAIClient(apiKey: string, model: string): LLMClient {
           // flattenContent converts ContentBlock[] to string; strings pass through unchanged.
           // OpenAI gets automatic prefix caching for free when prefixes match — no extra config needed.
           messages: messages.map(m => ({ role: m.role, content: flattenContent(m.content) })),
-          temperature: 0.7,
+          temperature: options?.temperature ?? 0.7,
           max_tokens: 8192,
         }),
       });

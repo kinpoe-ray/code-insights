@@ -28,6 +28,7 @@ export function createAnthropicClient(apiKey: string, model: string): LLMClient 
         body: JSON.stringify({
           model,
           max_tokens: 8192,
+          ...(options?.temperature !== undefined && { temperature: options.temperature }),
           // System message: pass ContentBlock[] through natively, or string as-is.
           system: systemMessage?.content,
           // Chat messages: pass ContentBlock[] content arrays natively (Anthropic supports this).
