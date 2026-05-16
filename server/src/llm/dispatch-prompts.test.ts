@@ -521,6 +521,13 @@ describe('buildImagePromptContext', () => {
     expect(blog).toContain('Tone:');
     expect(linkedin).toContain('Tone:');
   });
+
+  it('maps blog → technical tone and linkedin → accessible tone', () => {
+    const blog = buildImagePromptContext({ title: 'T', tldr: 'D', tags: [], format: 'blog' });
+    const linkedin = buildImagePromptContext({ title: 'T', tldr: 'D', tags: [], format: 'linkedin' });
+    expect(blog).toContain('Tone: technical');
+    expect(linkedin).toContain('Tone: accessible');
+  });
 });
 
 // --- parseImagePromptOutput ---
@@ -532,11 +539,21 @@ describe('parseImagePromptOutput', () => {
     expect(result.prompt).toBe('A moody blue palette scene with floating code.');
   });
 
-  it('strips "Here\'s your prompt:" style preamble', () => {
+  it('strips "Here\'s your prompt:" style preamble (straight apostrophe)', () => {
     const result = parseImagePromptOutput("Here's your prompt: A clean isometric scene.");
     expect(result.ok).toBe(true);
     expect(result.prompt).not.toContain("Here's your prompt:");
     expect(result.prompt).toContain('A clean isometric scene.');
+  });
+
+  it('strips curly-apostrophe preamble (U+2019 as used by Claude/GPT-4o)', () => {
+    // U+2019 right single quotation mark — NOT matched by straight apostrophe regex
+    const result = parseImagePromptOutput('’Here’s your prompt: A scene.');
+    expect(result.ok).toBe(true);
+    // The main case: GPT-4o/Claude output with curly apostrophe
+    const result2 = parseImagePromptOutput('Here’s your prompt: A scene.');
+    expect(result2.ok).toBe(true);
+    expect(result2.prompt).toBe('A scene.');
   });
 
   it('strips "Sure, here is..." style preamble', () => {

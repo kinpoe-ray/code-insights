@@ -33,9 +33,10 @@ export function PostOverlay({ open, onClose, result }: PostOverlayProps) {
           <div className="shrink-0 flex items-center justify-between border-b px-4 py-3">
             <p className="text-sm font-medium truncate max-w-[80%]">{title || 'Generated post'}</p>
             <button
+              type="button"
               onClick={onClose}
               aria-label="Close preview"
-              className="rounded-xs text-muted-foreground hover:text-foreground opacity-70 hover:opacity-100 transition-opacity"
+              className="rounded-xs text-muted-foreground hover:text-foreground opacity-70 hover:opacity-100 transition-opacity focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background"
             >
               <X className="h-5 w-5" />
             </button>

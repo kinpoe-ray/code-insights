@@ -87,7 +87,8 @@ export function CoverImagePromptSection({ title, tags, tldr, format }: CoverImag
               {copied ? 'Copied' : 'Copy prompt'}
             </Button>
             <button
-              className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline transition-colors"
+              type="button"
+              className="text-xs text-muted-foreground hover:text-foreground underline-offset-2 hover:underline transition-colors rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               onClick={handleRegenerate}
             >
               Regenerate

@@ -241,8 +241,8 @@ export function buildImagePromptSystemPrompt(): string {
 }
 
 const FORMAT_TONE_LABELS: Record<string, string> = {
-  blog: 'technical long-form',
-  linkedin: 'professional social',
+  blog: 'technical',
+  linkedin: 'accessible',
 };
 
 export interface ImagePromptInput {
@@ -263,10 +263,10 @@ export type ImagePromptParseResult =
   | { ok: false; error: string };
 
 const PREAMBLE_PATTERNS = [
-  /^here['']s your prompt:\s*/i,
+  /^here['''’]s your prompt:\s*/i,
   /^here is(?: a)?(?: prompt| the prompt)?(?:\s+for[^:]*)?:\s*/i,
-  /^sure,?\s+here(?:'s|\s+is)(?: a)?(?: prompt[^:]*)?:\s*/i,
-  /^(?:of course|certainly),?\s+here(?:'s|\s+is)[^:]*:\s*/i,
+  /^sure,?\s+here(?:['''’]s|\s+is)(?: a)?(?: prompt[^:]*)?:\s*/i,
+  /^(?:of course|certainly),?\s+here(?:['''’]s|\s+is)[^:]*:\s*/i,
 ];
 
 export function parseImagePromptOutput(raw: string): ImagePromptParseResult {
