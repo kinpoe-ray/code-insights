@@ -427,3 +427,16 @@ export interface DispatchResponse {
   };
 }
 
+export interface DispatchImagePromptRequest {
+  title: string;
+  tags: string[];
+  tldr: string;
+  format: DispatchFormat;
+}
+
+export interface DispatchImagePromptResponse {
+  prompt: string;
+  model: string;
+  tokensUsed: { input: number; output: number };
+}
+
