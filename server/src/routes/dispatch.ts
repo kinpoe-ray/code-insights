@@ -7,6 +7,9 @@ import {
   buildDispatchContext,
   parseDispatchOutput,
   buildDegradedResponse,
+  buildImagePromptSystemPrompt,
+  buildImagePromptContext,
+  parseImagePromptOutput,
 } from '../llm/dispatch-prompts.js';
 import type { DispatchTone, DispatchInsight, DispatchFormat, SessionBackground } from '@code-insights/cli/types';
 
@@ -194,6 +197,59 @@ app.post('/generate', requireLLM(), async (c) => {
     wordCount,
     characterCount,
     degraded: parsed.degraded ?? false,
+    model: client.model,
+    tokensUsed: {
+      input: response.usage?.inputTokens ?? 0,
+      output: response.usage?.outputTokens ?? 0,
+    },
+  });
+});
+
+// POST /api/dispatch/image-prompt
+// Body: { title: string, tags: string[], tldr: string, format: DispatchFormat }
+// Returns: { prompt: string, model: string, tokensUsed: { input: number, output: number } }
+app.post('/image-prompt', requireLLM(), async (c) => {
+  const body = await c.req.json<{
+    title?: unknown;
+    tags?: unknown;
+    tldr?: unknown;
+    format?: unknown;
+  }>();
+
+  if (typeof body.title !== 'string' || body.title.trim().length === 0) {
+    return c.json({ error: 'title is required' }, 400);
+  }
+  if (typeof body.tldr !== 'string' || body.tldr.trim().length === 0) {
+    return c.json({ error: 'tldr is required' }, 400);
+  }
+  if (!VALID_FORMATS.includes(body.format as DispatchFormat)) {
+    return c.json({ error: `format must be one of: ${VALID_FORMATS.join(', ')}` }, 400);
+  }
+  const tags = Array.isArray(body.tags) ? (body.tags as unknown[]).filter((t): t is string => typeof t === 'string') : [];
+
+  const systemPrompt = buildImagePromptSystemPrompt();
+  const userMessage = buildImagePromptContext({
+    title: body.title.trim(),
+    tldr: body.tldr.trim(),
+    tags,
+    format: body.format as string,
+  });
+
+  const client = createLLMClient();
+  const messages = [
+    { role: 'system' as const, content: systemPrompt },
+    { role: 'user' as const, content: userMessage },
+  ];
+
+  const response = await client.chat(messages, { temperature: 0.85, responseFormat: 'text' as const });
+  const parsed = parseImagePromptOutput(response.content);
+
+  if (!parsed.ok) {
+    return c.json({ error: 'Failed to generate image prompt', detail: parsed.error }, 500);
+  }
+
+  return c.json({
+    prompt: parsed.prompt,
     model: client.model,
     tokensUsed: {
       input: response.usage?.inputTokens ?? 0,

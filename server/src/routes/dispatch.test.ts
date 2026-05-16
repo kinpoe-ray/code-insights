@@ -626,3 +626,149 @@ describe('POST /api/dispatch/generate', () => {
     expect(userMsg).not.toContain('sess-nosumB');
   });
 });
+
+// ──────────────────────────────────────────────────────
+// POST /api/dispatch/image-prompt
+// ──────────────────────────────────────────────────────
+
+const IMAGE_PROMPT_BODY = {
+  title: 'SQLite WAL Mode in Production',
+  tags: ['sqlite', 'backend'],
+  tldr: 'WAL mode enables concurrent reads without blocking writers.',
+  format: 'blog',
+};
+
+describe('POST /api/dispatch/image-prompt', () => {
+  beforeEach(() => {
+    testDb = initTestDb();
+    mockIsLLMConfigured.mockReturnValue(true);
+    mockCreateLLMClient.mockReset();
+  });
+
+  it('returns 400 when LLM is not configured', async () => {
+    mockIsLLMConfigured.mockReturnValue(false);
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json() as { error: string };
+    expect(json.error).toMatch(/LLM not configured/);
+  });
+
+  it('returns 400 when title is missing', async () => {
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...IMAGE_PROMPT_BODY, title: '' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 when tldr is missing', async () => {
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...IMAGE_PROMPT_BODY, tldr: '' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 for invalid format', async () => {
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...IMAGE_PROMPT_BODY, format: 'newsletter' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('accepts empty tags array without error', async () => {
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient('Moody blue-grey photograph of floating code.'));
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...IMAGE_PROMPT_BODY, tags: [] }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('happy path: returns 200 with prompt, model, tokensUsed', async () => {
+    const promptText = 'Isometric illustration of a database with glowing write-ahead log file. Blue and grey palette, clean technical aesthetic, no text.';
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient(promptText));
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { prompt: string; model: string; tokensUsed: { input: number; output: number } };
+    expect(json.prompt).toBe(promptText);
+    expect(json.model).toBe('gpt-4o');
+    expect(json.tokensUsed.input).toBe(500);
+    expect(json.tokensUsed.output).toBe(800);
+  });
+
+  it('passes responseFormat text to prevent JSON mode', async () => {
+    const mockClient = makeMockLLMClient('A prompt.');
+    mockCreateLLMClient.mockReturnValue(mockClient);
+    const app = createApp();
+    await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(mockClient.chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ responseFormat: 'text' }),
+    );
+  });
+
+  it('uses temperature 0.85', async () => {
+    const mockClient = makeMockLLMClient('A prompt.');
+    mockCreateLLMClient.mockReturnValue(mockClient);
+    const app = createApp();
+    await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(mockClient.chat).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ temperature: 0.85 }),
+    );
+  });
+
+  it('no retry — chat called exactly once', async () => {
+    const mockClient = makeMockLLMClient('A prompt.');
+    mockCreateLLMClient.mockReturnValue(mockClient);
+    const app = createApp();
+    await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(mockClient.chat).toHaveBeenCalledTimes(1);
+  });
+
+  it('strips LLM preamble commentary from prompt', async () => {
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient("Here's your prompt: A clean isometric scene."));
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json() as { prompt: string };
+    expect(json.prompt).not.toContain("Here's your prompt:");
+    expect(json.prompt).toContain('A clean isometric scene.');
+  });
+});
