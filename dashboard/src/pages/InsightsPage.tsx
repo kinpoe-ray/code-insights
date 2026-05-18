@@ -30,7 +30,8 @@ import {
 import { Sparkles, SearchX, X, FileText, GitCommit, BookOpen, Target } from 'lucide-react';
 import { getDateGroup, sortDateGroups } from '@/lib/utils';
 import { INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
-import type { Insight, InsightType, DispatchPrefill, SessionCharacter } from '@/lib/types';
+import { parseJsonField } from '@/lib/types';
+import type { Insight, InsightType, DispatchPrefill, SessionCharacter, EffectivePattern, FrictionPoint } from '@/lib/types';
 import { InsightTypePills } from '@/components/filters/InsightTypePills';
 import { SaveFilterPopover } from '@/components/filters/SaveFilterPopover';
 import { SavedFiltersDropdown } from '@/components/filters/SavedFiltersDropdown';
@@ -155,14 +156,27 @@ export default function InsightsPage() {
     return map;
   }, [facetsData]);
 
-  // Primary qualifying session: most recent session with a qualifying character that has facets
+  // Primary qualifying session: most recent session with a qualifying character that has facets,
+  // at least 3 insights (so canGenerate can be satisfied after auto-select), and non-empty
+  // prefill content (so contextMarkdown won't be empty when the drawer opens).
   const primarySession = useMemo(() => {
-    const qualifying = allSessions.filter(
-      (s) => s.session_character && QUALIFYING_SESSION_TYPES.has(s.session_character as SessionCharacter) && facetsBySessionId.has(s.id)
-    );
+    const qualifying = allSessions.filter((s) => {
+      if (!s.session_character || !QUALIFYING_SESSION_TYPES.has(s.session_character as SessionCharacter)) return false;
+      const facetRow = facetsBySessionId.get(s.id);
+      if (!facetRow) return false;
+      // Require ≥3 insights so canGenerate can be satisfied after auto-select
+      const sessionInsightCount = insights.filter((i) => i.session_id === s.id).length;
+      if (sessionInsightCount < 3) return false;
+      // Require non-empty prefill content so contextMarkdown isn't empty
+      const patterns = parseJsonField<EffectivePattern[]>(facetRow.effective_patterns, []);
+      const friction = parseJsonField<FrictionPoint[]>(facetRow.friction_points, []).filter(
+        (f) => f.attribution === 'user-actionable'
+      );
+      return patterns.length > 0 || friction.length > 0;
+    });
     if (qualifying.length === 0) return null;
     return qualifying.sort((a, b) => new Date(b.started_at).getTime() - new Date(a.started_at).getTime())[0];
-  }, [allSessions, facetsBySessionId]);
+  }, [allSessions, facetsBySessionId, insights]);
 
   const allInsightIds = useMemo(() => new Set(insights.map((i) => i.id)), [insights]);
 
