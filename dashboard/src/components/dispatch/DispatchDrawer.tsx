@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import {
   DndContext,
@@ -31,7 +31,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
 import { generateDispatch } from '@/lib/api';
 import { PostOverlay } from './PostOverlay';
-import type { Insight } from '@/lib/types';
+import type { Insight, DispatchPrefill } from '@/lib/types';
 import type { DispatchTone, DispatchFormat, DispatchResponse } from '@/lib/api';
 
 const FORMAT_OPTIONS: { value: DispatchFormat; label: string; description: string }[] = [
@@ -109,6 +109,7 @@ interface DispatchDrawerProps {
   selectedInsights: Insight[];
   onReorder: (insights: Insight[]) => void;
   onRemove: (id: string) => void;
+  prefill?: DispatchPrefill;
 }
 
 export function DispatchDrawer({
@@ -117,13 +118,38 @@ export function DispatchDrawer({
   selectedInsights,
   onReorder,
   onRemove,
+  prefill,
 }: DispatchDrawerProps) {
   const [context, setContext] = useState('');
+  const [contextEdited, setContextEdited] = useState(false);
   const [format, setFormat] = useState<DispatchFormat>('blog');
   const [tone, setTone] = useState<DispatchTone>('technical');
   const [includeSessionBackground, setIncludeSessionBackground] = useState(false);
   const [result, setResult] = useState<DispatchResponse | null>(null);
   const [overlayOpen, setOverlayOpen] = useState(false);
+  const titleInputRef = useRef<HTMLInputElement>(null);
+  const [titleValue, setTitleValue] = useState('');
+
+  // When drawer opens with a prefill, apply it
+  useEffect(() => {
+    if (open && prefill) {
+      setContext(prefill.contextMarkdown);
+      setContextEdited(false);
+      setFormat(prefill.format);
+      setTitleValue(prefill.title);
+      // Select all text in title input on next frame
+      requestAnimationFrame(() => {
+        if (titleInputRef.current) {
+          titleInputRef.current.focus();
+          titleInputRef.current.select();
+        }
+      });
+    }
+    if (!open) {
+      setContextEdited(false);
+      setTitleValue('');
+    }
+  }, [open, prefill]);
 
   const mutation = useMutation({
     mutationFn: generateDispatch,
@@ -162,6 +188,7 @@ export function DispatchDrawer({
     setFormat('blog');
     setTone('technical');
     setContext('');
+    setContextEdited(false);
     setIncludeSessionBackground(false);
   }
 
@@ -178,11 +205,29 @@ export function DispatchDrawer({
         <SheetHeader className="px-4 py-3 border-b shrink-0">
           <SheetTitle>Create Post</SheetTitle>
           <SheetDescription>
-            Curate insights and context, then generate a publishable post.
+            {prefill
+              ? `Drafting from ${prefill.title}`
+              : 'Curate insights and context, then generate a publishable post.'}
           </SheetDescription>
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-4">
+            {/* Title input — only shown when prefill provides session context */}
+            {prefill && (
+              <div>
+                <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
+                  Post title
+                </label>
+                <input
+                  ref={titleInputRef}
+                  type="text"
+                  value={titleValue}
+                  onChange={(e) => setTitleValue(e.target.value)}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                />
+              </div>
+            )}
+
             {/* Selected insights with drag-to-reorder */}
             <div>
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
@@ -231,7 +276,7 @@ export function DispatchDrawer({
                 maxLength={500}
                 placeholder="2-3 sentences framing the narrative. What did you build or discover? Why does it matter?"
                 value={context}
-                onChange={(e) => setContext(e.target.value)}
+                onChange={(e) => { setContext(e.target.value); if (prefill) setContextEdited(true); }}
                 className="resize-none"
               />
               <div className="flex justify-between mt-1">
@@ -242,6 +287,16 @@ export function DispatchDrawer({
                   {context.length}/500
                 </span>
               </div>
+              {prefill && contextEdited && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="mt-1 h-7 text-xs text-muted-foreground"
+                  onClick={() => { setContext(prefill.contextMarkdown); setContextEdited(false); }}
+                >
+                  Reset to defaults
+                </Button>
+              )}
             </div>
 
             {/* Format selector */}
