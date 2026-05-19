@@ -231,6 +231,8 @@ This roadmap outlines the development phases for Code Insights. Timelines are fl
 | 4.7.0 | — | Ollama auto-detection, LlmNudgeBanner for unconfigured LLM | ✅ Done |
 | 4.8.0 | 12 | Native analysis via Claude Code hooks, unified `insights` command, runner interface, V8 schema | ✅ Done |
 | 4.9.0 | — | llama.cpp provider + Gemma 4 model support, provider-aware token limits, JSON reliability | ✅ Done |
+| 4.10.x | — | Multi-source filter on dashboard, doctor command, reliability fixes, native analysis improvements | ✅ Done |
+| 4.11.0 | — | Dispatch — LLM-powered blog/LinkedIn post generator, AI cover image prompts, discoverability improvements | ✅ Done |
 
 ---
 

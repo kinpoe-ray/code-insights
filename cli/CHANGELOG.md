@@ -2,6 +2,28 @@
 
 All notable changes to `@code-insights/cli` will be documented in this file.
 
+## [4.11.0] - 2026-05-19
+
+### Added
+
+- **Dispatch — LLM-powered post generator** — A new Dispatch panel on the
+  Insights page generates shareable blog posts and LinkedIn updates from your
+  session insights. Select insights, choose a format (Blog or LinkedIn), pick a
+  tone, and optionally include session background context. The generator uses
+  your configured LLM provider (Anthropic, OpenAI, Gemini, Ollama, llama.cpp)
+  and produces a formatted post you can preview, copy, or download as Markdown.
+
+- **AI Cover Image Prompts** — Inside the Dispatch post preview, generate a
+  Midjourney/DALL-E-ready image prompt for your post's cover image via the
+  `/api/dispatch/image-prompt` endpoint.
+
+- **"Write about this" discoverability** — Qualifying high-value sessions
+  (feature_build, deep_focus, bug_hunt, refactor) now surface a contextual
+  "Write about this" button on the Insights page. Clicking it opens Dispatch
+  pre-populated with the session title, format mapping, and a context block
+  derived from the top effective patterns and user-actionable friction points.
+  A dismissible discovery callout nudges first-time users toward the feature.
+
 ## [4.10.4] - 2026-05-06
 
 ### Fixed

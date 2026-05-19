@@ -116,6 +116,34 @@ Cross-session pattern detection and synthesis, powered by session facets:
 
 **Upcoming:** Progress tracking — "Am I getting better?" Weekly snapshots comparing friction trends and pattern emergence over time, helping developers see how their AI collaboration skills evolve.
 
+### Dispatch — LLM-Powered Post Generator
+
+Turn session insights into shareable content. Dispatch generates blog posts and LinkedIn updates from the insights you've extracted, using your configured LLM provider.
+
+**How it works:**
+1. Open Dispatch from the floating action bar on the Insights page, or click "Write about this" on any qualifying high-value session (feature_build, deep_focus, bug_hunt, refactor)
+2. Select the insights to include (minimum 3), choose a format and tone, and optionally add session background context
+3. Generate a formatted post — preview it, copy to clipboard, or download as Markdown
+
+**Formats and tones:**
+- **Blog** — Long-form technical post with narrative structure, code context, and lessons learned
+- **LinkedIn** — Concise professional update optimized for engagement (~250 words, 3-5 key points)
+- Tones: Technical, Storytelling, Educational, Reflective
+
+**AI Cover Image Prompts** — Inside the post preview, generate a Midjourney/DALL-E-ready prompt for your cover image via the `/api/dispatch/image-prompt` endpoint.
+
+**Discoverability:**
+- Qualifying sessions surface a contextual "Write about this" button on the Insights page
+- Clicking it opens Dispatch pre-populated with the session title, detected format, and a context block built from top effective patterns + user-actionable friction points
+- A dismissible discovery callout nudges first-time users toward the feature (persisted in localStorage)
+
+**Technical details:**
+- `POST /api/dispatch/generate` — format-aware prompt builder, output parser, retry logic
+- `POST /api/dispatch/image-prompt` — cover image prompt generation
+- Multi-provider: uses the same LLM abstraction as analysis (OpenAI, Anthropic, Gemini, Ollama, llama.cpp)
+- Temperature 0.7 for blog/LinkedIn generation; per-format prompt tuning
+- `buildDispatchPrefill` pure function maps session + facets → pre-populated drawer context
+
 ### Share Card (AI Fluency Score)
 
 A shareable 1200×630 PNG image (OG standard for Twitter/X, LinkedIn, Slack, Discord) that visualizes a developer's AI coding fluency. Downloaded from the Patterns page.
