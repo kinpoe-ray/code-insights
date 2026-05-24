@@ -1,0 +1,35 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "4c69ac669934",
+  "session_id": "f5bac496-5c8b-4a3b-9983-1bfa7f6ef8b9",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-24T10:56:19.344177Z",
+  "branch": "docs/plan-audit-cleanup",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "docs/implementation/CURRENT_SPRINT.md",
+    "docs/implementation/handover-llamacpp-provider.md",
+    "docs/plans/2026-03-08-gamification-shareable-badges.md",
+    "docs/plans/2026-03-09-effective-pattern-normalization.md",
+    "docs/plans/2026-05-09-session-writeup-dispatch-ideation.md",
+    "docs/plans/2026-05-10-dispatch-learnings-curated-design.md"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "4d044b8cd3d0",
+  "token_usage": {
+    "input_tokens": 34,
+    "cache_creation_tokens": 64453,
+    "cache_read_tokens": 1242570,
+    "output_tokens": 9709,
+    "api_call_count": 26
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-24T10:56:19.271617Z",
+    "agent_lines": 0,
+    "human_added": 0,
+    "human_modified": 5,
+    "human_removed": 354,
+    "total_committed": 0,
+    "agent_percentage": 0
+  }
+}
