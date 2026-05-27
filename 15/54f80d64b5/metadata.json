@@ -1,0 +1,26 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "1554f80d64b5",
+  "strategy": "manual-commit",
+  "branch": "feature/fix-dashboard-bulkanalyze-tests",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "dashboard/src/components/analysis/BulkAnalyzeButton.test.tsx"
+  ],
+  "sessions": [
+    {
+      "metadata": "/15/54f80d64b5/0/metadata.json",
+      "transcript": "/15/54f80d64b5/0/full.jsonl",
+      "context": "/15/54f80d64b5/0/context.md",
+      "content_hash": "/15/54f80d64b5/0/content_hash.txt",
+      "prompt": "/15/54f80d64b5/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 3,
+    "cache_creation_tokens": 365,
+    "cache_read_tokens": 107423,
+    "output_tokens": 109,
+    "api_call_count": 1
+  }
+}

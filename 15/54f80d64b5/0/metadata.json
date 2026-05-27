@@ -1,0 +1,32 @@
+{
+  "cli_version": "0.4.8",
+  "checkpoint_id": "1554f80d64b5",
+  "session_id": "ac8d5915-9b57-4846-a9d3-4a16a12d98b0",
+  "strategy": "manual-commit",
+  "created_at": "2026-05-27T02:27:46.968092Z",
+  "branch": "feature/fix-dashboard-bulkanalyze-tests",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "dashboard/src/components/analysis/BulkAnalyzeButton.test.tsx"
+  ],
+  "agent": "Claude Code",
+  "turn_id": "addb9593c097",
+  "checkpoint_transcript_start": 420,
+  "transcript_lines_at_start": 420,
+  "token_usage": {
+    "input_tokens": 3,
+    "cache_creation_tokens": 365,
+    "cache_read_tokens": 107423,
+    "output_tokens": 109,
+    "api_call_count": 1
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-05-27T02:27:46.831271Z",
+    "agent_lines": 0,
+    "human_added": 130,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 130,
+    "agent_percentage": 0
+  }
+}
