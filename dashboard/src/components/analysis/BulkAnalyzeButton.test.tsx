@@ -197,4 +197,134 @@ describe('BulkAnalyzeButton', () => {
   });
 
   // UI rendering and interaction tests authored by ux-agent
+  describe('UI rendering', () => {
+    it('renders analyzing spinner and "Analyzing session X of Y" text during analysis', async () => {
+      mockAnalyzeSession.mockReturnValue(new Promise(() => {}));
+
+      setup([makeSession('s1'), makeSession('s2')]);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 2 sessions/i }));
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+      await waitFor(() => {
+        expect(screen.getByText(/analyzing session 0 of 2/i)).toBeInTheDocument();
+      });
+
+      // Spinner present — Lucide renders an SVG inside the progress row
+      const progressText = screen.getByText(/analyzing session/i);
+      expect(progressText.closest('div')?.querySelector('svg')).not.toBeNull();
+
+      // Start Analysis button is gone — replaced by progress UI
+      expect(screen.queryByRole('button', { name: /start analysis/i })).not.toBeInTheDocument();
+      // Done button not yet shown
+      expect(screen.queryByRole('button', { name: /^done$/i })).not.toBeInTheDocument();
+    });
+
+    it('progress bar width reflects completed/total ratio', async () => {
+      // Deferred for first session — lets us advance to "1 of 4 done" state
+      let resolveFirst!: (v: { success: true }) => void;
+      const firstPromise = new Promise<{ success: true }>((res) => {
+        resolveFirst = res;
+      });
+      mockAnalyzeSession
+        .mockReturnValueOnce(firstPromise)
+        // Subsequent calls hang — freezes us at completed=1, total=4 (25%)
+        .mockReturnValue(new Promise(() => {}));
+
+      const sessions = [makeSession('s1'), makeSession('s2'), makeSession('s3'), makeSession('s4')];
+      setup(sessions);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 4 sessions/i }));
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+      // Initial state: 0 / 4 → width 0%
+      await waitFor(() => {
+        expect(screen.getByText(/analyzing session 0 of 4/i)).toBeInTheDocument();
+      });
+      // Progress fill div is the only element in the dialog with an inline width style
+      let fill = screen.getByRole('dialog').querySelector('[style*="width"]') as HTMLDivElement | null;
+      expect(fill).not.toBeNull();
+      expect(fill!.style.width).toBe('0%');
+
+      // Resolve first session → progress should tick to 1 / 4 (25%)
+      await act(async () => {
+        resolveFirst({ success: true });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(/analyzing session 1 of 4/i)).toBeInTheDocument();
+      });
+      fill = screen.getByRole('dialog').querySelector('[style*="width"]') as HTMLDivElement | null;
+      expect(fill!.style.width).toBe('25%');
+    });
+
+    it('error list truncates at 5 items with "+N more" footer', async () => {
+      // 7 sessions, all fail → 7 errors, list should show 5 + "and 2 more"
+      mockAnalyzeSession.mockRejectedValue(new Error('boom'));
+
+      const sessions = Array.from({ length: 7 }, (_, i) => makeSession(`s${i + 1}`));
+      setup(sessions);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 7 sessions/i }));
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument();
+      });
+
+      // Find the error list <ul> — dialog content is portaled
+      const list = screen.getByRole('dialog').querySelector('ul.list-disc') as HTMLUListElement | null;
+      expect(list).not.toBeNull();
+      const items = list!.querySelectorAll('li');
+
+      // 5 error rows + 1 "...and 2 more" footer row = 6 total
+      expect(items).toHaveLength(6);
+      expect(items[items.length - 1].textContent).toMatch(/and 2 more/i);
+      // First 5 are the truncated error rows
+      for (let i = 0; i < 5; i++) {
+        expect(items[i].textContent).toBe('boom');
+      }
+    });
+
+    it('success count text renders correctly with plural and singular forms', async () => {
+      // Case 1: singular — exactly 1 success
+      mockAnalyzeSession.mockResolvedValue({ success: true });
+      const { unmount } = setup([makeSession('s1')]);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/^1 session analyzed successfully$/i)).toBeInTheDocument();
+      });
+      unmount();
+
+      // Case 2: plural — 3 successes
+      mockAnalyzeSession.mockReset();
+      mockAnalyzeSession.mockResolvedValue({ success: true });
+      setup([makeSession('s1'), makeSession('s2'), makeSession('s3')]);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 3 sessions/i }));
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+      await waitFor(() => {
+        expect(screen.getByText(/^3 sessions analyzed successfully$/i)).toBeInTheDocument();
+      });
+    });
+
+    it('"Done" button appears in result state and clicking it closes the dialog', async () => {
+      mockAnalyzeSession.mockResolvedValue({ success: true });
+
+      setup([makeSession('s1')]);
+      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
+
+      // Pre-analysis: no Done button visible
+      expect(screen.queryByRole('button', { name: /^done$/i })).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
+
+      // Post-analysis: Done button rendered
+      const doneBtn = await screen.findByRole('button', { name: /^done$/i });
+      expect(doneBtn).toBeInTheDocument();
+
+      // Clicking unmounts the dialog
+      await userEvent.click(doneBtn);
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      });
+    });
+  });
 });
