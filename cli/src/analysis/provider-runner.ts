@@ -65,11 +65,14 @@ function makeOpenAIChat(apiKey: string, model: string): LLMChatFn {
   };
 }
 
-function makeAnthropicChat(apiKey: string, model: string): LLMChatFn {
+function makeAnthropicChat(apiKey: string, model: string, baseUrl?: string): LLMChatFn {
+  // baseUrl allows Anthropic-compatible endpoints (e.g. Zhipu BigModel's /api/anthropic).
+  // Defaults to the official Anthropic API when unset.
+  const base = (baseUrl || 'https://api.anthropic.com').trim().replace(/\/$/, '');
   return async (messages) => {
     const systemMsg = messages.find(m => m.role === 'system');
     const chatMsgs = messages.filter(m => m.role !== 'system');
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch(`${base}/v1/messages`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -236,7 +239,7 @@ function makeLlamaCppChat(model: string, baseUrl?: string): LLMChatFn {
 function makeChatFn(config: LLMProviderConfig): LLMChatFn {
   switch (config.provider) {
     case 'openai':    return makeOpenAIChat(config.apiKey ?? '', config.model);
-    case 'anthropic': return makeAnthropicChat(config.apiKey ?? '', config.model);
+    case 'anthropic': return makeAnthropicChat(config.apiKey ?? '', config.model, config.baseUrl);
     case 'gemini':    return makeGeminiChat(config.apiKey ?? '', config.model);
     case 'ollama':    return makeOllamaChat(config.model, config.baseUrl);
     case 'llamacpp':  return makeLlamaCppChat(config.model, config.baseUrl);

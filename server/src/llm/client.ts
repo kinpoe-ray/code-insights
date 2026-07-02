@@ -50,7 +50,7 @@ export function createClientFromConfig(config: LLMProviderConfig): LLMClient {
     case 'openai':
       return createOpenAIClient(config.apiKey ?? '', config.model);
     case 'anthropic':
-      return createAnthropicClient(config.apiKey ?? '', config.model);
+      return createAnthropicClient(config.apiKey ?? '', config.model, config.baseUrl);
     case 'gemini':
       return createGeminiClient(config.apiKey ?? '', config.model);
     case 'ollama':

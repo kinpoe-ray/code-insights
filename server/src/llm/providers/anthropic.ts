@@ -4,7 +4,10 @@
 
 import type { LLMClient, LLMMessage, LLMResponse, ChatOptions } from '../types.js';
 
-export function createAnthropicClient(apiKey: string, model: string): LLMClient {
+export function createAnthropicClient(apiKey: string, model: string, baseUrl?: string): LLMClient {
+  // baseUrl allows Anthropic-compatible endpoints (e.g. Zhipu BigModel's /api/anthropic).
+  // Defaults to the official Anthropic API when unset.
+  const base = (baseUrl || 'https://api.anthropic.com').trim().replace(/\/$/, '');
   return {
     provider: 'anthropic',
     model,
@@ -14,7 +17,7 @@ export function createAnthropicClient(apiKey: string, model: string): LLMClient 
       const systemMessage = messages.find(m => m.role === 'system');
       const chatMessages = messages.filter(m => m.role !== 'system');
 
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      const response = await fetch(`${base}/v1/messages`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

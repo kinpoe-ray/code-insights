@@ -249,35 +249,36 @@ async function runInteractiveLLMConfig(): Promise<void> {
   }
 
   // Step 4: Base URL (Ollama, llamacpp, or custom)
-  if (provider === 'ollama') {
+  if (provider === 'ollama' || provider === 'llamacpp') {
+    const defaultUrl = provider === 'ollama' ? 'http://localhost:11434' : 'http://localhost:8080';
     const { baseUrl } = await inquirer.prompt<{ baseUrl: string }>([
       {
         type: 'input',
         name: 'baseUrl',
-        message: 'Ollama URL (leave blank for default http://localhost:11434):',
+        message: `${providerInfo.name} URL (leave blank for default ${defaultUrl}):`,
         default: existing?.baseUrl ?? '',
       },
     ]);
 
-    if (baseUrl && baseUrl !== 'http://localhost:11434') {
-      llmConfig.baseUrl = baseUrl;
-    }
-  }
-
-  if (provider === 'llamacpp') {
-    const { baseUrl } = await inquirer.prompt<{ baseUrl: string }>([
-      {
-        type: 'input',
-        name: 'baseUrl',
-        message: 'llama-server URL (leave blank for default http://localhost:8080):',
-        default: existing?.baseUrl ?? '',
-      },
-    ]);
-
-    if (baseUrl && baseUrl !== 'http://localhost:8080') {
+    if (baseUrl && baseUrl !== defaultUrl) {
       llmConfig.baseUrl = baseUrl;
     }
     // No API key prompt for llamacpp — llama-server runs locally without authentication
+  } else if (provider === 'anthropic' || provider === 'openai' || provider === 'gemini') {
+    // Optional custom base URL for Anthropic-/OpenAI-/Gemini-compatible endpoints
+    // (e.g. Zhipu BigModel's /api/anthropic). Leave blank to use the official API.
+    const { baseUrl } = await inquirer.prompt<{ baseUrl: string }>([
+      {
+        type: 'input',
+        name: 'baseUrl',
+        message: `Custom base URL (leave blank for official ${providerInfo.name} API):`,
+        default: existing?.baseUrl ?? '',
+      },
+    ]);
+
+    if (baseUrl) {
+      llmConfig.baseUrl = baseUrl;
+    }
   }
 
   saveLLMConfig(llmConfig);
