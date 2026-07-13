@@ -349,6 +349,46 @@ describe('Database read/write operations', () => {
       expect(rows.cnt).toBe(1);
     });
 
+    it('replaces the complete message set during a force sync', () => {
+      const original = makeParsedSession({
+        id: 'sess-force',
+        messages: [
+          makeParsedMessage({ id: 'old-1', sessionId: 'sess-force' }),
+          makeParsedMessage({ id: 'old-2', sessionId: 'sess-force' }),
+        ],
+      });
+      const reparsed = makeParsedSession({
+        id: 'sess-force',
+        messages: [makeParsedMessage({ id: 'new-1', sessionId: 'sess-force' })],
+      });
+
+      insertSessionWithProject(original);
+      insertMessages(original);
+      insertMessages(reparsed, true);
+
+      const rows = testDb
+        .prepare('SELECT id FROM messages WHERE session_id = ? ORDER BY id')
+        .all('sess-force') as Array<{ id: string }>;
+      expect(rows).toEqual([{ id: 'new-1' }]);
+    });
+
+    it('clears stale messages when a force-sync snapshot is empty', () => {
+      const original = makeParsedSession({
+        id: 'sess-force-empty',
+        messages: [makeParsedMessage({ id: 'old-message', sessionId: 'sess-force-empty' })],
+      });
+      const empty = makeParsedSession({ id: 'sess-force-empty', messages: [] });
+
+      insertSessionWithProject(original);
+      insertMessages(original);
+      insertMessages(empty, true);
+
+      const row = testDb
+        .prepare('SELECT COUNT(*) AS count FROM messages WHERE session_id = ?')
+        .get('sess-force-empty') as { count: number };
+      expect(row.count).toBe(0);
+    });
+
     it('stores tool_calls as JSON when present', () => {
       const msg = makeParsedMessage({
         id: 'msg-tools',

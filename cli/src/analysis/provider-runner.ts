@@ -36,6 +36,27 @@ interface LLMResponse {
 
 type LLMChatFn = (messages: LLMMessage[]) => Promise<LLMResponse>;
 
+function replaceIsolatedSurrogates(value: string): string {
+  let result = '';
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(i + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        result += value[i] + value[i + 1];
+        i++;
+      } else {
+        result += '\ufffd';
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      result += '\ufffd';
+    } else {
+      result += value[i];
+    }
+  }
+  return result;
+}
+
 // ── Provider implementations ──────────────────────────────────────────────────
 
 function makeOpenAIChat(apiKey: string, model: string): LLMChatFn {
@@ -285,8 +306,8 @@ export class ProviderRunner implements AnalysisRunner {
     const start = Date.now();
 
     const messages: LLMMessage[] = [
-      { role: 'system', content: params.systemPrompt },
-      { role: 'user', content: params.userPrompt },
+      { role: 'system', content: replaceIsolatedSurrogates(params.systemPrompt) },
+      { role: 'user', content: replaceIsolatedSurrogates(params.userPrompt) },
     ];
 
     const response = await this.chat(messages);

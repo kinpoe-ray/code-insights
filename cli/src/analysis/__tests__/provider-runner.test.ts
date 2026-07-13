@@ -171,6 +171,23 @@ describe('ProviderRunner.runAnalysis() — Anthropic message shaping', () => {
     expect(body.system).toBe('BE HELPFUL');
     expect(body.messages).toEqual([{ role: 'user', content: 'analyze' }]);
   });
+
+  it('replaces isolated UTF-16 surrogates while preserving valid emoji', async () => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      content: [{ text: '{}' }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }));
+
+    const runner = new ProviderRunner(makeConfig({ provider: 'anthropic', model: 'glm-4.7', apiKey: 'ak' }));
+    await runner.runAnalysis({
+      systemPrompt: 'system \ud800 prompt',
+      userPrompt: 'valid 🧪 and isolated \udc00 text',
+    });
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.system).toBe('system � prompt');
+    expect(body.messages[0].content).toBe('valid 🧪 and isolated � text');
+  });
 });
 
 describe('ProviderRunner.runAnalysis() — missing usage', () => {

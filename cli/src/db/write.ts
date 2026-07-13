@@ -303,16 +303,19 @@ function upsertSession(
 
 /**
  * Insert messages for a session.
- * isForce: when true (--force sync), uses INSERT OR REPLACE so existing message
- * content is overwritten with the freshly-parsed result (e.g. after a parsing fix).
+ * isForce: when true (--force sync), replaces the session's complete message set
+ * with the freshly parsed snapshot, including clearing stale rows for an empty set.
  */
 export function insertMessages(session: ParsedSession, isForce = false): void {
-  if (session.messages.length === 0) return;
+  if (session.messages.length === 0 && !isForce) return;
 
   const db = getDb();
   const stmts = getStmts();
 
   const tx = db.transaction((messages: ParsedMessage[]) => {
+    if (isForce) {
+      db.prepare('DELETE FROM messages WHERE session_id = ?').run(session.id);
+    }
     const stmt = isForce ? stmts.replaceMessage : stmts.insertMessage;
     for (const msg of messages) {
       stmt.run(

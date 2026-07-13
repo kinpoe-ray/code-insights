@@ -326,7 +326,8 @@ describe('runInsightsCommand — resume detection', () => {
 
     mockDb.prepare(`
       INSERT INTO analysis_usage (session_id, analysis_type, provider, model, session_message_count)
-        VALUES ('sess1', 'session', 'openai', 'gpt-4', 10)
+        VALUES ('sess1', 'session', 'openai', 'gpt-4', 10),
+               ('sess1', 'prompt_quality', 'openai', 'gpt-4', 10)
     `).run();
 
     const { runInsightsCommand } = await import('../insights.js');
@@ -337,6 +338,22 @@ describe('runInsightsCommand — resume detection', () => {
     });
 
     expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+  });
+
+  it('restarts analysis when only the session pass was recorded', async () => {
+    seedSession(mockDb, 'sess1', 10);
+    mockDb.prepare(`
+      INSERT INTO analysis_usage (session_id, analysis_type, provider, model, session_message_count)
+        VALUES ('sess1', 'session', 'openai', 'gpt-4', 10)
+    `).run();
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 100, inputTokens: 50, outputTokens: 50, model: 'gpt-4', provider: 'openai' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 80, inputTokens: 30, outputTokens: 30, model: 'gpt-4', provider: 'openai' });
+
+    const { runInsightsCommand } = await import('../insights.js');
+    await runInsightsCommand({ sessionId: 'sess1', native: false, quiet: true });
+
+    expect(mockProviderRunAnalysis).toHaveBeenCalledTimes(2);
   });
 
   it('proceeds when message_count differs from analysis_usage', async () => {

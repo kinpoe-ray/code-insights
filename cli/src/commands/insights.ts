@@ -77,12 +77,14 @@ function loadSessionMessages(sessionId: string): SQLiteMessageRow[] {
 function isAlreadyAnalyzed(sessionId: string, currentMessageCount: number): boolean {
   const db = getDb();
   const row = db.prepare(`
-    SELECT session_message_count FROM analysis_usage
-    WHERE session_id = ? AND analysis_type = 'session'
-  `).get(sessionId) as { session_message_count: number | null } | undefined;
+    SELECT COUNT(DISTINCT analysis_type) AS completed_passes
+    FROM analysis_usage
+    WHERE session_id = ?
+      AND analysis_type IN ('session', 'prompt_quality')
+      AND session_message_count = ?
+  `).get(sessionId, currentMessageCount) as { completed_passes: number };
 
-  if (!row) return false;
-  return row.session_message_count === currentMessageCount;
+  return row.completed_passes === 2;
 }
 
 // ── Command options ───────────────────────────────────────────────────────────
@@ -403,4 +405,3 @@ export async function insightsCheckCommand(opts: {
     process.exit(1);
   }
 }
-

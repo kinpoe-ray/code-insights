@@ -77,6 +77,33 @@ describe('CodexProvider — Format A system context filtering', () => {
     expect(session!.assistantMessageCount).toBe(1);
   });
 
+  it('keeps message IDs unique across different Codex sessions', async () => {
+    const firstPath = path.join(tempDir, 'rollout-first.jsonl');
+    const secondPath = path.join(tempDir, 'rollout-second.jsonl');
+    fs.writeFileSync(firstPath, buildJSONL([
+      sessionMeta('session-one'),
+      userMessageLine('First question'),
+      assistantLine('First answer'),
+      taskCompleteLine(),
+    ]));
+    fs.writeFileSync(secondPath, buildJSONL([
+      sessionMeta('session-two'),
+      userMessageLine('Second question'),
+      assistantLine('Second answer'),
+      taskCompleteLine(),
+    ]));
+
+    const provider = new CodexProvider();
+    const first = await provider.parse(firstPath);
+    const second = await provider.parse(secondPath);
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    const firstIds = new Set(first!.messages.map(message => message.id));
+    const secondIds = second!.messages.map(message => message.id);
+    expect(secondIds.every(id => !firstIds.has(id))).toBe(true);
+  });
+
   it('filters out <permissions> system context messages', async () => {
     const content = buildJSONL([
       sessionMeta(),
