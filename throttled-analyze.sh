@@ -8,9 +8,12 @@ LOOKBACK=14
 BATCH_SIZE=10
 SOURCE=""
 DRY_RUN=false
+RETRY_FAILED=false
 MAX_RETRIES=4
+GENERIC_RETRIES=2
 DB="${CODE_INSIGHTS_DB:-$HOME/.code-insights/data.db}"
 LOG="${CODE_INSIGHTS_LOG:-$HOME/.code-insights/throttled-analyze.log}"
+FAIL_LOG="${CODE_INSIGHTS_FAIL_LOG:-$HOME/.code-insights/throttled-analyze.failures}"
 LOCK_DIR="${TMPDIR:-/tmp}/code-insights-analysis.lock"
 LEGACY_POSITION=0
 
@@ -23,6 +26,7 @@ Options:
   --batch-size N    Analyze at most N sessions in this run (default: 10)
   --delay N         Seconds between sessions (default: 8)
   --source NAME     Limit to claude-code, codex-cli, cursor, copilot-cli, or copilot
+  --retry-failed    Only retry sessions quarantined by previous batches
   --dry-run         List the selected sessions without calling the LLM
   -h, --help        Show this help
 
@@ -50,6 +54,8 @@ while [[ $# -gt 0 ]]; do
       SOURCE="$2"; shift 2 ;;
     --dry-run)
       DRY_RUN=true; shift ;;
+    --retry-failed)
+      RETRY_FAILED=true; shift ;;
     -h|--help)
       usage; exit 0 ;;
     --*)
@@ -101,7 +107,7 @@ QUERY="
     )
     $SOURCE_SQL
   ORDER BY julianday(s.started_at) DESC
-  LIMIT ${BATCH_SIZE};
+  ;
 "
 
 if ! IDS_STR=$(sqlite3 "$DB" "$QUERY"); then
@@ -112,13 +118,20 @@ IDS=()
 while IFS= read -r line; do
   if [[ -n "$line" ]]; then
     [[ "$line" =~ ^[A-Za-z0-9:._-]+$ ]] || { echo "Unsafe session ID returned by database" >&2; exit 65; }
+    if [[ "$RETRY_FAILED" == true ]]; then
+      [[ -f "$FAIL_LOG" ]] && grep -Fqx "$line" "$FAIL_LOG" || continue
+    elif [[ -f "$FAIL_LOG" ]] && grep -Fqx "$line" "$FAIL_LOG"; then
+      continue
+    fi
     IDS+=("$line")
+    [[ "${#IDS[@]}" -ge "$BATCH_SIZE" ]] && break
   fi
 done <<< "$IDS_STR"
 TOTAL=${#IDS[@]}
 
 echo "=== Bounded analysis | newest first | days ${LOOKBACK} | batch ${BATCH_SIZE} | delay ${DELAY}s ==="
 [[ -n "$SOURCE" ]] && echo "Source: $SOURCE"
+[[ "$RETRY_FAILED" == true ]] && echo "Mode: retry quarantined failures"
 echo "Selected: $TOTAL session(s)"
 
 if [[ "$TOTAL" -eq 0 ]]; then
@@ -204,6 +217,10 @@ for i in "${!IDS[@]}"; do
         continue
       fi
       RATE_LIMITED=true
+    elif [[ "$ATTEMPT" -lt "$GENERIC_RETRIES" ]]; then
+      printf 'invalid/transient response; retry in 5s ... '
+      sleep 5
+      continue
     fi
     break
   done
@@ -212,11 +229,18 @@ for i in "${!IDS[@]}"; do
     echo "ok"
     OK=$((OK + 1))
     printf '[%s] %s OK\n' "$(date -Iseconds)" "$SID" >> "$LOG"
+    if [[ -f "$FAIL_LOG" ]]; then
+      grep -Fvx "$SID" "$FAIL_LOG" > "$FAIL_LOG.tmp" || true
+      mv "$FAIL_LOG.tmp" "$FAIL_LOG"
+    fi
   else
     echo "failed"
     FAILED=$((FAILED + 1))
     ERROR_LINE=$(printf '%s\n' "$LAST_OUTPUT" | tail -n 1)
     printf '[%s] %s FAIL %s\n' "$(date -Iseconds)" "$SID" "$ERROR_LINE" >> "$LOG"
+    if [[ ! -f "$FAIL_LOG" ]] || ! grep -Fqx "$SID" "$FAIL_LOG"; then
+      printf '%s\n' "$SID" >> "$FAIL_LOG"
+    fi
     [[ -n "$ERROR_LINE" ]] && echo "  $ERROR_LINE"
   fi
 
