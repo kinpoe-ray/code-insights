@@ -68,6 +68,9 @@ export function parseAnalysisResponse(response: string): ParseResult<AnalysisRes
   if (parsed.facets) {
     if (!Array.isArray(parsed.facets.friction_points)) parsed.facets.friction_points = [];
     if (!Array.isArray(parsed.facets.effective_patterns)) parsed.facets.effective_patterns = [];
+    parsed.facets.friction_points = parsed.facets.friction_points.filter(
+      fp => typeof fp?.category === 'string' && fp.category.trim() !== '',
+    );
   }
 
   // Observability: two-tier tooling-limitation monitor.

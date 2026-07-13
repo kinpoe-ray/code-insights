@@ -287,6 +287,14 @@ export function saveFacetsToDb(
 ): void {
   const db = getDb();
 
+  // Facet-only and chunked analysis paths can bypass parseAnalysisResponse(),
+  // so enforce the friction category invariant at the shared persistence boundary.
+  const sanitizedFrictionPoints = Array.isArray(facets.friction_points)
+    ? facets.friction_points.filter(
+        fp => typeof fp?.category === 'string' && fp.category.trim() !== '',
+      )
+    : [];
+
   // Normalize pattern categories at write time so stored data is always clean.
   // This handles LLM variants (e.g., "task-decomposition" → "structured-planning")
   // before they hit the database, keeping aggregation queries simple.
@@ -317,7 +325,7 @@ export function saveFacetsToDb(
     facets.had_course_correction ? 1 : 0,
     facets.course_correction_reason,
     facets.iteration_count,
-    JSON.stringify(Array.isArray(facets.friction_points) ? facets.friction_points : []),
+    JSON.stringify(sanitizedFrictionPoints),
     JSON.stringify(normalizedPatterns),
     analysisVersion,
   );

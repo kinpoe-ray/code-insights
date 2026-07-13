@@ -184,14 +184,26 @@ export function getAggregatedData(
 
   const frictionCategories = db.prepare(`
     SELECT
-      json_extract(je.value, '$.category') as category,
+      CASE
+        WHEN json_type(
+          sf.friction_points,
+          '$[' || CAST(je.key AS INTEGER) || '].category'
+        ) = 'text'
+        THEN json_extract(
+          sf.friction_points,
+          '$[' || CAST(je.key AS INTEGER) || '].category'
+        )
+        ELSE NULL
+      END as category,
       COUNT(*) as count,
       AVG(CASE
-        WHEN json_extract(je.value, '$.severity') = 'high' THEN 3
-        WHEN json_extract(je.value, '$.severity') = 'medium' THEN 2
+        WHEN json_extract(sf.friction_points, '$[' || CAST(je.key AS INTEGER) || '].severity') = 'high' THEN 3
+        WHEN json_extract(sf.friction_points, '$[' || CAST(je.key AS INTEGER) || '].severity') = 'medium' THEN 2
         ELSE 1
       END) as avg_severity,
-      json_group_array(json_extract(je.value, '$.description')) as examples,
+      json_group_array(
+        json_extract(sf.friction_points, '$[' || CAST(je.key AS INTEGER) || '].description')
+      ) as examples,
       json_group_array(sf.session_id) as session_ids
     FROM session_facets sf
     JOIN sessions s ON sf.session_id = s.id
@@ -199,7 +211,7 @@ export function getAggregatedData(
     ${where}
     GROUP BY category
     ORDER BY count DESC, avg_severity DESC
-  `).all(...params) as Array<{ category: string; count: number; avg_severity: number; examples: string; session_ids: string }>;
+  `).all(...params) as Array<{ category: string | null; count: number; avg_severity: number; examples: string; session_ids: string }>;
 
   // Fetch effective patterns with confidence >= 50.
   // Category-based grouping happens in code (post-query) after normalizePatternCategory()
@@ -259,6 +271,10 @@ export function getAggregatedData(
 
   const normalizedFriction = new Map<string, { count: number; total_severity: number; examples: string[]; session_ids: string[] }>();
   for (const fc of parsedFriction) {
+    // Older or non-schema-enforcing providers can persist reasoning-only entries
+    // or explicit null categories. They are not friction observations and must not
+    // reach the string normalizer.
+    if (typeof fc.category !== 'string' || fc.category.trim() === '') continue;
     const normalized = normalizeFrictionCategory(fc.category);
     const existing = normalizedFriction.get(normalized);
     if (existing) {

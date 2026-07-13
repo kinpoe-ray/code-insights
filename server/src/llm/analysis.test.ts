@@ -506,6 +506,34 @@ describe('extractFacetsOnly', () => {
     expect(facetRow!.iteration_count).toBe(3);
   });
 
+  it('filters invalid friction categories before facet-only persistence', async () => {
+    mockChat.mockResolvedValue({
+      content: JSON.stringify({
+        ...validFacetResponse,
+        friction_points: [
+          'reasoning-only primitive',
+          { _reasoning: 'No friction occurred.' },
+          { category: null, description: 'N/A' },
+          { category: 42, description: 'N/A' },
+          { category: { nested: true }, description: 'N/A' },
+          { category: ['wrong-approach'], description: 'N/A' },
+          { category: '   ', description: 'N/A' },
+          { category: 'wrong-approach', description: 'Valid friction', severity: 'medium', resolution: 'resolved' },
+        ],
+      }),
+      usage: null,
+    });
+
+    const result = await extractFacetsOnly(makeSession(), [makeMessage()]);
+
+    expect(result.success).toBe(true);
+    const facetRow = testDb.prepare('SELECT friction_points FROM session_facets WHERE session_id = ?')
+      .get('sess-test') as { friction_points: string } | undefined;
+    expect(JSON.parse(facetRow!.friction_points)).toEqual([
+      expect.objectContaining({ category: 'wrong-approach', description: 'Valid friction' }),
+    ]);
+  });
+
   it('pattern normalization — task-decomposition saved as structured-planning', async () => {
     const response = {
       ...validFacetResponse,

@@ -236,6 +236,28 @@ describe('getAggregatedData', () => {
     expect(knowledgeGap!.examples).toHaveLength(2);
   });
 
+  it('skips malformed friction points without a string category', () => {
+    seedSessionWithFacets(testDb, 'sess-1', {
+      frictionPoints: [
+        'reasoning-only primitive',
+        { _reasoning: 'No friction occurred, so this entry should have been omitted.' },
+        { category: null, description: 'N/A', severity: null, resolution: null },
+        { category: 42, description: 'N/A' },
+        { category: { nested: true }, description: 'N/A' },
+        { category: ['wrong-approach'], description: 'N/A' },
+        { category: '   ', description: 'N/A' },
+        { category: 'wrong-approach', description: 'Valid friction', severity: 'medium', resolution: 'resolved' },
+      ],
+    });
+
+    const result = getAggregatedData(testDb, '', []);
+
+    expect(result.frictionTotal).toBe(1);
+    expect(result.frictionCategories).toEqual([
+      expect.objectContaining({ category: 'wrong-approach', count: 1 }),
+    ]);
+  });
+
   it('aggregates effective patterns with frequency', () => {
     seedSessionWithFacets(testDb, 'sess-1', {
       effectivePatterns: [

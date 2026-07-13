@@ -30,6 +30,7 @@ vi.mock('../llm/client.js', () => ({
 }));
 
 const { createApp } = await import('../index.js');
+const { formatIsoWeek } = await import('./shared-aggregation.js');
 
 // ──────────────────────────────────────────────────────
 // Helpers
@@ -379,6 +380,28 @@ describe('Reflect routes', () => {
       // The first entry in weeks is the most recent week (current)
       const currentWeekEntry = body.weeks[0];
       expect(currentWeekEntry.sessionCount).toBeGreaterThanOrEqual(2);
+    });
+
+    it('counts a Sunday session in the previous ISO week', async () => {
+      const now = new Date();
+      const nowDay = now.getUTCDay();
+      const daysToMonday = nowDay === 0 ? 6 : nowDay - 1;
+      const thisMondayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+        - daysToMonday * 86400000;
+      const thisMonday = new Date(thisMondayMs);
+      const previousMonday = new Date(thisMondayMs - 7 * 86400000);
+      const previousSundayNoon = new Date(thisMondayMs - 12 * 3600000);
+
+      seedSessionWithFacets('sess-previous-sunday', { startedAt: previousSundayNoon.toISOString() });
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/weeks');
+      const body = await res.json();
+      const currentWeek = body.weeks.find((w: { week: string }) => w.week === formatIsoWeek(thisMonday));
+      const previousWeek = body.weeks.find((w: { week: string }) => w.week === formatIsoWeek(previousMonday));
+
+      expect(previousWeek.sessionCount).toBe(1);
+      expect(currentWeek.sessionCount).toBe(0);
     });
   });
 

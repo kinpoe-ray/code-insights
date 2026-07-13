@@ -311,16 +311,16 @@ app.get('/weeks', (c) => {
   const projectKey = project || '__all__';
 
   // Query 1: session counts per ISO week using GROUP BY.
-  // The Thursday trick: 'weekday 4' advances to the ISO week's Thursday (or stays if already
-  // Thursday), then '-3 days' gives that week's Monday. This handles all 7 days correctly —
-  // unlike 'weekday 1, -7 days' which overshoots by one week for sessions starting on Monday.
+  // Shift back three days before advancing to Thursday so Friday-Sunday stay in their
+  // current ISO week. Advancing directly to Thursday would move them into the next week.
+  // The final '-3 days' converts the selected Thursday to that ISO week's Monday.
   // Returns one row per week that has sessions — O(sessions), not O(weeks).
   const rangeStart = weekEntries[weekEntries.length - 1].start;
   const rangeEnd = weekEntries[0].end;
 
   const sessionCountRaw = db.prepare(`
     SELECT
-      date(s.started_at, 'weekday 4', '-3 days') as week_monday,
+      date(s.started_at, '-3 days', 'weekday 4', '-3 days') as week_monday,
       COUNT(*) as cnt
     FROM sessions s
     WHERE s.deleted_at IS NULL

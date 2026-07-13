@@ -572,6 +572,35 @@ describe('parseAnalysisResponse', () => {
     expect(Array.isArray(result.data.facets?.friction_points)).toBe(true);
     expect(Array.isArray(result.data.facets?.effective_patterns)).toBe(true);
   });
+
+  it('filters friction points without a non-empty string category', () => {
+    const response = `<json>{
+      "summary": { "title": "Test", "content": "c", "bullets": [] },
+      "decisions": [],
+      "learnings": [],
+      "facets": {
+        "friction_points": [
+          "reasoning-only primitive",
+          { "_reasoning": "No friction occurred." },
+          { "category": null, "description": "N/A", "severity": null, "resolution": null },
+          { "category": 42, "description": "N/A" },
+          { "category": { "nested": true }, "description": "N/A" },
+          { "category": ["wrong-approach"], "description": "N/A" },
+          { "category": "   ", "description": "N/A" },
+          { "category": "wrong-approach", "description": "Valid", "severity": "medium", "resolution": "Resolved" }
+        ],
+        "effective_patterns": []
+      }
+    }</json>`;
+
+    const result = parseAnalysisResponse(response);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.facets?.friction_points).toEqual([
+      expect.objectContaining({ category: 'wrong-approach', description: 'Valid' }),
+    ]);
+  });
 });
 
 // ──────────────────────────────────────────────────────
