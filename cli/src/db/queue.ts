@@ -67,7 +67,7 @@ export function claimNext(): QueueItem | null {
      WHERE session_id = (
        SELECT session_id FROM analysis_queue
        WHERE status = 'pending'
-       ORDER BY enqueued_at ASC
+       ORDER BY enqueued_at DESC, rowid DESC
        LIMIT 1
      )
      RETURNING *`
@@ -82,7 +82,7 @@ export function markCompleted(sessionId: string): void {
   db.prepare(
     `UPDATE analysis_queue
      SET status = 'completed', completed_at = datetime('now'), error_message = NULL
-     WHERE session_id = ?`
+     WHERE session_id = ? AND status = 'processing'`
   ).run(sessionId);
 }
 
@@ -103,7 +103,7 @@ export function markFailed(sessionId: string, errorMessage: string): void {
            ELSE 'pending'
          END,
          started_at = NULL
-     WHERE session_id = ?`
+     WHERE session_id = ? AND status = 'processing'`
   ).run(errorMessage, sessionId);
 }
 

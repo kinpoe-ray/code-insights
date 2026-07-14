@@ -7,6 +7,7 @@ import { formatKnowledgeBase } from '../export/knowledge-base.js';
 import { formatAgentRules } from '../export/agent-rules.js';
 import type { SessionRow, InsightRow } from '../export/knowledge-base.js';
 import { createLLMClient, loadLLMConfig } from '../llm/client.js';
+import { acquireServerLlmLock, llmBusyPayload } from '../llm/llm-lock.js';
 import { requireLLM } from './route-helpers.js';
 import {
   applyDepthCap,
@@ -218,6 +219,8 @@ app.post('/generate', requireLLM(), async (c) => {
   const db = getDb();
   const llmConfig = loadLLMConfig();
   const startTime = Date.now();
+  const lock = acquireServerLlmLock(c);
+  if (!lock) return c.json(llmBusyPayload(), 409);
 
   try {
     const rawInsights = fetchScopedInsights(db, scope, projectId);
@@ -284,6 +287,8 @@ app.post('/generate', requireLLM(), async (c) => {
       error_message: message,
     });
     return c.json({ error: message }, 422);
+  } finally {
+    lock.release();
   }
 });
 
@@ -316,6 +321,15 @@ app.get('/generate/stream', requireLLM(), async (c) => {
 
   return streamSSE(c, async (stream) => {
     const streamStart = Date.now();
+    const lock = acquireServerLlmLock(c);
+    if (!lock) {
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify(llmBusyPayload()),
+      });
+      return;
+    }
+
     try {
       const abortSignal = c.req.raw.signal;
 
@@ -410,6 +424,8 @@ app.get('/generate/stream', requireLLM(), async (c) => {
         event: 'error',
         data: JSON.stringify({ error: message }),
       }).catch(() => {});
+    } finally {
+      lock.release();
     }
   });
 });

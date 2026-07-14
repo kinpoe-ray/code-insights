@@ -19,10 +19,7 @@ const mockUnlinkSync = vi.mocked(unlinkSync);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Build the JSON envelope that `claude -p --output-format json` actually returns.
- * The LLM text lives in the result event's `result` field.
- */
+/** Build the legacy stream-style envelope returned by older Claude versions. */
 function makeEnvelope(llmText: string, isError = false): string {
   return JSON.stringify([
     { type: 'system', subtype: 'init', session_id: 'test-session' },
@@ -34,6 +31,51 @@ function makeEnvelope(llmText: string, isError = false): string {
       is_error: isError,
     },
   ]);
+}
+
+/** Build the single result object returned by current `--output-format json`. */
+function makeSingleResult(
+  llmText: string,
+  options?: { isError?: boolean; structuredOutput?: object }
+): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype: options?.isError ? 'error_during_execution' : 'success',
+    result: llmText,
+    is_error: options?.isError ?? false,
+    ...(options?.structuredOutput ? { structured_output: options.structuredOutput } : {}),
+  });
+}
+
+/** Mirror the non-zero execFileSync error shape exposed by Node.js. */
+function makeExecFailure(stdout: string, stderr = 'claude exited with status 1'): Error {
+  return Object.assign(new Error('Command failed: claude -p'), {
+    status: 1,
+    signal: null,
+    output: [null, stdout, stderr],
+    pid: 4242,
+    stdout,
+    stderr,
+  });
+}
+
+/** Build the single error result emitted by Claude Code 2.1.168. */
+function makeCurrentErrorResult(subtype: string, errors: string[]): string {
+  return JSON.stringify({
+    type: 'result',
+    subtype,
+    is_error: true,
+    duration_ms: 25,
+    duration_api_ms: 0,
+    num_turns: 0,
+    session_id: 'test-session',
+    total_cost_usd: 0,
+    usage: {},
+    modelUsage: {},
+    permission_denials: [],
+    errors,
+    uuid: 'test-result-id',
+  });
 }
 
 // ── validate() ────────────────────────────────────────────────────────────────
@@ -110,7 +152,7 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
     expect(result.model).toBe('sonnet');
   });
 
-  it('includes --json-schema arg when jsonSchema is provided', async () => {
+  it('passes --json-schema as inline JSON when jsonSchema is provided', async () => {
     const llmJson = '{"summary": {"title": "t", "content": "c", "bullets": []}}';
     mockExecFileSync.mockReturnValueOnce(makeEnvelope(llmJson) as unknown as Buffer);
     const runner = new ClaudeNativeRunner();
@@ -125,7 +167,12 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
     expect(callArgs).toContain('--json-schema');
 
     const schemaIndex = callArgs.indexOf('--json-schema');
-    expect(callArgs[schemaIndex + 1]).toContain('ci-schema-');
+    expect(callArgs[schemaIndex + 1]).toBe('{"type":"object","properties":{}}');
+    expect(mockWriteFileSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('ci-schema-'),
+      expect.anything(),
+      expect.anything()
+    );
   });
 
   it('extracts rawJson from the result event (not the full envelope)', async () => {
@@ -138,6 +185,32 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
     // Must be the extracted LLM text, not the raw event array
     expect(result.rawJson).toBe(llmJson);
     expect(result.rawJson).not.toContain('"type":"result"');
+  });
+
+  it('extracts rawJson from the single result object returned by current Claude CLI', async () => {
+    const llmJson = '{"summary":{"title":"Current","content":"C","bullets":[]}}';
+    mockExecFileSync.mockReturnValueOnce(makeSingleResult(llmJson) as unknown as Buffer);
+    const runner = new ClaudeNativeRunner();
+
+    const result = await runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' });
+
+    expect(result.rawJson).toBe(llmJson);
+  });
+
+  it('serializes structured_output when Claude returns validated structured data', async () => {
+    const structuredOutput = { summary: { title: 'Structured', content: 'C', bullets: [] } };
+    mockExecFileSync.mockReturnValueOnce(
+      makeSingleResult('The structured response is attached.', { structuredOutput }) as unknown as Buffer
+    );
+    const runner = new ClaudeNativeRunner();
+
+    const result = await runner.runAnalysis({
+      systemPrompt: 's',
+      userPrompt: 'u',
+      jsonSchema: { type: 'object' },
+    });
+
+    expect(JSON.parse(result.rawJson)).toEqual(structuredOutput);
   });
 
   it('returns correct result shape with zero tokens', async () => {
@@ -164,6 +237,42 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
       .rejects.toThrow(/claude -p reported an error/);
   });
 
+  it('preserves errors from a current single-result response on non-zero exit', async () => {
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw makeExecFailure(makeCurrentErrorResult(
+        'error_during_execution',
+        ['API Error: 429 rate limit exceeded'],
+      ));
+    });
+    const runner = new ClaudeNativeRunner();
+
+    await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
+      .rejects.toThrow(/error_during_execution.*429 rate limit exceeded/);
+  });
+
+  it('preserves the legacy result message from an event-array response on non-zero exit', async () => {
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw makeExecFailure(makeEnvelope('Context window exceeded', true));
+    });
+    const runner = new ClaudeNativeRunner();
+
+    await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
+      .rejects.toThrow(/error_during_execution.*Context window exceeded/);
+  });
+
+  it.each([
+    'error_max_budget_usd',
+    'error_max_structured_output_retries',
+  ])('preserves the %s subtype from a non-zero Claude result', async (subtype) => {
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw makeExecFailure(makeCurrentErrorResult(subtype, ['Configured limit reached']));
+    });
+    const runner = new ClaudeNativeRunner();
+
+    await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
+      .rejects.toThrow(new RegExp(`${subtype}.*Configured limit reached`));
+  });
+
   it('throws when output is not a JSON array', async () => {
     mockExecFileSync.mockReturnValueOnce('not json at all' as unknown as Buffer);
     const runner = new ClaudeNativeRunner();
@@ -172,12 +281,12 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
       .rejects.toThrow(/non-JSON output/);
   });
 
-  it('throws when output is JSON but not an array', async () => {
-    mockExecFileSync.mockReturnValueOnce('{"type":"result"}' as unknown as Buffer);
+  it('throws when output is JSON but is not a result object or event array', async () => {
+    mockExecFileSync.mockReturnValueOnce('{"status":"ok"}' as unknown as Buffer);
     const runner = new ClaudeNativeRunner();
 
     await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
-      .rejects.toThrow(/not an array/);
+      .rejects.toThrow(/no result event/);
   });
 
   it('throws when event array is empty', async () => {
@@ -265,7 +374,7 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
     expect(mockUnlinkSync).toHaveBeenCalledWith(expect.stringContaining('ci-prompt-'));
   });
 
-  it('cleans up both temp files when schema is provided and execFileSync throws', async () => {
+  it('does not create a schema temp file when schema is provided and execFileSync throws', async () => {
     mockExecFileSync.mockImplementationOnce(() => { throw new Error('fail'); });
     const runner = new ClaudeNativeRunner();
 
@@ -275,7 +384,7 @@ describe('ClaudeNativeRunner.runAnalysis()', () => {
 
     const unlinkCalls = mockUnlinkSync.mock.calls.map(c => c[0] as string);
     expect(unlinkCalls.some(p => p.includes('ci-prompt-'))).toBe(true);
-    expect(unlinkCalls.some(p => p.includes('ci-schema-'))).toBe(true);
+    expect(unlinkCalls.some(p => p.includes('ci-schema-'))).toBe(false);
   });
 
   it('has the correct runner name', () => {

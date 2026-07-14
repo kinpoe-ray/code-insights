@@ -6,6 +6,7 @@ export interface MigrationResult {
   v7Applied: boolean;
   v8Applied: boolean;
   v9Applied: boolean;
+  v10Applied: boolean;
 }
 
 /**
@@ -21,6 +22,7 @@ export interface MigrationResult {
  * Version 7: Add analysis_usage table for tracking LLM analysis costs per session
  * Version 8: Add session_message_count to analysis_usage for resume detection
  * Version 9: Add analysis_queue table for async hook-triggered analysis
+ * Version 10: Add persistent per-database identity metadata
  */
 export function runMigrations(db: Database.Database): MigrationResult {
   // Create schema_version table first if it doesn't exist.
@@ -78,7 +80,13 @@ export function runMigrations(db: Database.Database): MigrationResult {
     v9Applied = true;
   }
 
-  return { v6Applied, v7Applied, v8Applied, v9Applied };
+  let v10Applied = false;
+  if (currentVersion < 10) {
+    applyV10(db);
+    v10Applied = true;
+  }
+
+  return { v6Applied, v7Applied, v8Applied, v9Applied, v10Applied };
 }
 
 function getCurrentVersion(db: Database.Database): number {
@@ -202,4 +210,22 @@ function applyV9(db: Database.Database): void {
     `CREATE INDEX IF NOT EXISTS idx_analysis_queue_enqueued_at ON analysis_queue(enqueued_at ASC)`
   );
   db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (?)').run(9);
+}
+
+function applyV10(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS code_insights_metadata (
+      key   TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )
+  `);
+  db.prepare(`
+    INSERT OR IGNORE INTO code_insights_metadata (key, value)
+    VALUES ('database_id', lower(hex(randomblob(16))))
+  `).run();
+  db.prepare(`
+    INSERT OR IGNORE INTO code_insights_metadata (key, value)
+    VALUES ('sync_generation', lower(hex(randomblob(16))))
+  `).run();
+  db.prepare('INSERT OR IGNORE INTO schema_version (version) VALUES (?)').run(10);
 }

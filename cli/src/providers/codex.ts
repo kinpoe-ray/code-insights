@@ -173,20 +173,16 @@ interface FormatBItem {
 // ---------------------------------------------------------------------------
 
 function parseCodexSession(filePath: string): ParsedSession | null {
-  try {
-    const content = fs.readFileSync(filePath, 'utf-8').trim();
-    if (!content) return null;
+  const content = fs.readFileSync(filePath, 'utf-8').trim();
+  if (!content) return null;
 
-    // Detect format by file extension — content-sniffing is unreliable because
-    // JSONL files also start with '{' on line 1 (the session_meta object).
-    if (filePath.endsWith('.json')) {
-      return parseFormatB(content);
-    }
-
-    return parseFormatA(content);
-  } catch {
-    return null;
+  // Detect format by file extension — content-sniffing is unreliable because
+  // JSONL files also start with '{' on line 1 (the session_meta object).
+  if (filePath.endsWith('.json')) {
+    return parseFormatB(content);
   }
+
+  return parseFormatA(content);
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +195,9 @@ function parseFormatA(content: string): ParsedSession | null {
 
   // Parse first line — session metadata
   const meta = parseSessionMeta(lines[0]);
-  if (!meta) return null;
+  if (!meta?.id || !meta.timestamp) {
+    throw new Error('Invalid Codex JSONL session metadata on line 1');
+  }
 
   const sessionId = `codex:${meta.id}`;
 
@@ -255,8 +253,12 @@ function parseFormatA(content: string): ParsedSession | null {
     let event: CodexRolloutLine;
     try {
       event = JSON.parse(line) as CodexRolloutLine;
-    } catch {
-      continue;
+    } catch (error) {
+      // Codex appends to active JSONL transcripts. A truncated final line is
+      // expected while the process is writing and will be picked up after the
+      // file mtime changes. Corruption in any completed line must not be hidden.
+      if (i === lines.length - 1 && isLikelyTruncatedJson(line, error)) continue;
+      throw new Error(`Invalid Codex JSONL event on line ${i + 1}`);
     }
 
     // Unwrap RolloutLine envelope if present
@@ -458,6 +460,23 @@ function parseFormatA(content: string): ParsedSession | null {
   return buildSession(sessionId, meta.cwd || 'codex://unknown', meta.cli_version || null, meta.timestamp, messages, usageEntries, model);
 }
 
+function isLikelyTruncatedJson(line: string, error: unknown): boolean {
+  if (!(error instanceof SyntaxError)) return false;
+
+  const trimmed = line.trimEnd();
+  // A closed JSON object/array is not an in-progress append. Syntax errors at
+  // its final character (for example {"a":1,}) are complete corruption.
+  if (trimmed.endsWith('}') || trimmed.endsWith(']')) return false;
+
+  const message = error.message;
+  if (/unexpected end|unterminated string/i.test(message)) return true;
+
+  const position = /position (\d+)/i.exec(message);
+  if (position && Number(position[1]) >= line.length) return true;
+
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Format B parser (pre-2025 single JSON object: { session, items })
 // ---------------------------------------------------------------------------
@@ -467,10 +486,12 @@ function parseFormatB(content: string): ParsedSession | null {
   try {
     parsed = JSON.parse(content) as FormatBSession;
   } catch {
-    return null;
+    throw new Error('Invalid Codex JSON document');
   }
 
-  if (!parsed.session?.id || !Array.isArray(parsed.items)) return null;
+  if (!parsed.session?.id || !Array.isArray(parsed.items)) {
+    throw new Error('Invalid Codex JSON document structure');
+  }
 
   const meta = parsed.session;
   const sessionId = `codex:${meta.id}`;

@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming';
 import { getDb } from '@code-insights/cli/db/client';
 import { jsonrepair } from 'jsonrepair';
 import { createLLMClient } from '../llm/client.js';
+import { acquireServerLlmLock, llmBusyPayload } from '../llm/llm-lock.js';
 import { requireLLM } from './route-helpers.js';
 import { extractJsonPayload } from '../llm/response-parsers.js';
 import {
@@ -66,6 +67,14 @@ app.post('/generate', requireLLM(), async (c) => {
 
   return streamSSE(c, async (stream) => {
     const abortSignal = c.req.raw.signal;
+    const lock = acquireServerLlmLock(c);
+    if (!lock) {
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify(llmBusyPayload()),
+      });
+      return;
+    }
 
     try {
       await stream.writeSSE({
@@ -236,6 +245,8 @@ app.post('/generate', requireLLM(), async (c) => {
         event: 'error',
         data: JSON.stringify({ error: message }),
       }).catch(() => {});
+    } finally {
+      lock.release();
     }
   });
 });

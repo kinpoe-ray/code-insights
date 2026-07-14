@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as os from 'os';
 import type { ClaudeInsightConfig, SyncState } from '../types.js';
 
-const CONFIG_DIR = path.join(os.homedir(), '.code-insights');
+const CONFIG_DIR = process.env.CODE_INSIGHTS_CONFIG_DIR
+  || path.join(os.homedir(), '.code-insights');
 const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 const SYNC_STATE_FILE = path.join(CONFIG_DIR, 'sync-state.json');
 

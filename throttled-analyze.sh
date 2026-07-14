@@ -3,6 +3,8 @@
 
 set -uo pipefail
 
+ORIGINAL_ARGS=("$@")
+
 DELAY=8
 LOOKBACK=14
 BATCH_SIZE=10
@@ -11,10 +13,10 @@ DRY_RUN=false
 RETRY_FAILED=false
 MAX_RETRIES=4
 GENERIC_RETRIES=2
-DB="${CODE_INSIGHTS_DB:-$HOME/.code-insights/data.db}"
-LOG="${CODE_INSIGHTS_LOG:-$HOME/.code-insights/throttled-analyze.log}"
-FAIL_LOG="${CODE_INSIGHTS_FAIL_LOG:-$HOME/.code-insights/throttled-analyze.failures}"
-LOCK_DIR="${TMPDIR:-/tmp}/code-insights-analysis.lock"
+CONFIG_DIR="${CODE_INSIGHTS_CONFIG_DIR:-$HOME/.code-insights}"
+DB="${CODE_INSIGHTS_DB:-$CONFIG_DIR/data.db}"
+LOG="${CODE_INSIGHTS_LOG:-$CONFIG_DIR/throttled-analyze.log}"
+FAIL_LOG="${CODE_INSIGHTS_FAIL_LOG:-$CONFIG_DIR/throttled-analyze.failures}"
 LEGACY_POSITION=0
 
 usage() {
@@ -153,28 +155,9 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-  LOCK_PID=""
-  [[ -f "$LOCK_DIR/pid" ]] && read -r LOCK_PID < "$LOCK_DIR/pid"
-  if [[ -n "$LOCK_PID" ]] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
-    rm -f "$LOCK_DIR/pid"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-  fi
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "Another analysis batch is already running: $LOCK_DIR" >&2
-    exit 75
-  fi
+if [[ "${CODE_INSIGHTS_LOCK_HELD:-}" != "1" ]]; then
+  exec code-insights lock-run /bin/bash "$0" "${ORIGINAL_ARGS[@]}"
 fi
-printf '%s\n' "$$" > "$LOCK_DIR/pid"
-cleanup() {
-  OWNER_PID=""
-  [[ -f "$LOCK_DIR/pid" ]] && read -r OWNER_PID < "$LOCK_DIR/pid"
-  if [[ "$OWNER_PID" == "$$" ]]; then
-    rm -f "$LOCK_DIR/pid"
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT
 
 OK=0
 FAILED=0

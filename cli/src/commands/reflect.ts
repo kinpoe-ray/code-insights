@@ -4,6 +4,7 @@ import ora from 'ora';
 import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { getCurrentIsoWeek } from '../utils/date-utils.js';
+import { LLM_LOCK_TOKEN_HEADER } from '../analysis/llm-lock.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -20,9 +21,19 @@ function confirmPrompt(message: string): Promise<boolean> {
 }
 
 function getBaseUrl(): string {
+  const dashboardUrl = process.env.CODE_INSIGHTS_DASHBOARD_URL?.trim();
+  if (dashboardUrl) return dashboardUrl.replace(/\/+$/, '');
+
   const config = loadConfig();
   const port = config?.dashboard?.port || 7890;
   return `http://localhost:${port}`;
+}
+
+function getLlmRequestHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const lockToken = process.env.CODE_INSIGHTS_LOCK_TOKEN;
+  if (lockToken) headers[LLM_LOCK_TOKEN_HEADER] = lockToken;
+  return headers;
 }
 
 async function checkServer(baseUrl: string): Promise<void> {
@@ -60,7 +71,7 @@ async function checkLlmConfigured(baseUrl: string): Promise<void> {
 async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getLlmRequestHeaders(),
     body: JSON.stringify(body),
     signal,
   });
@@ -77,6 +88,8 @@ async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?:
   let currentEvent = '';
   let currentData = '';
   let result: Record<string, unknown> = {};
+  let completed = false;
+  let streamError: Error | undefined;
 
   const spinner = ora({ text: 'Starting...', indent: 2 }).start();
 
@@ -103,8 +116,13 @@ async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?:
             } else if (currentEvent === 'complete') {
               spinner.succeed('Analysis complete');
               result = data;
+              completed = true;
             } else if (currentEvent === 'error') {
-              spinner.fail((data.error as string) || 'Generation failed');
+              const message = typeof data.error === 'string' && data.error.trim()
+                ? data.error
+                : 'Generation failed';
+              spinner.fail(message);
+              streamError = new Error(message);
             }
           } catch {
             // Skip malformed SSE events (e.g., truncated JSON from network issues)
@@ -112,11 +130,19 @@ async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?:
 
           currentEvent = '';
           currentData = '';
+
+          if (streamError) throw streamError;
         }
       }
     }
   } finally {
     reader.releaseLock();
+  }
+
+  if (!completed) {
+    const message = 'SSE stream ended without a complete event';
+    spinner.fail(message);
+    throw new Error(message);
   }
 
   return result;
@@ -142,7 +168,7 @@ async function backfillPqBatch(
   return backfillBatchToEndpoint(baseUrl, '/api/facets/backfill-pq', sessionIds, offset, total, signal);
 }
 
-async function backfillBatchToEndpoint(
+export async function backfillBatchToEndpoint(
   baseUrl: string,
   endpoint: string,
   sessionIds: string[],
@@ -152,7 +178,7 @@ async function backfillBatchToEndpoint(
 ): Promise<{ completed: number; failed: number }> {
   const res = await fetch(`${baseUrl}${endpoint}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getLlmRequestHeaders(),
     // force=true so outdated sessions (which already have facets) are re-processed.
     // Missing sessions are unaffected — the guard only fires when a row exists.
     body: JSON.stringify({ sessionIds, force: true }),
@@ -170,6 +196,8 @@ async function backfillBatchToEndpoint(
   let currentEvent = '';
   let currentData = '';
   let result = { completed: 0, failed: 0 };
+  let completed = false;
+  let streamError: Error | undefined;
 
   const spinner = ora({ text: `  Backfilling ${offset + 1}-${offset + sessionIds.length} of ${total}...`, indent: 2 }).start();
 
@@ -194,15 +222,28 @@ async function backfillBatchToEndpoint(
             } else if (currentEvent === 'complete') {
               result = { completed: data.completed as number, failed: data.failed as number };
               spinner.succeed(`  Batch complete: ${result.completed} extracted, ${result.failed} failed`);
+              completed = true;
+            } else if (currentEvent === 'error') {
+              const message = typeof data.error === 'string' && data.error.trim()
+                ? data.error
+                : 'Backfill failed';
+              spinner.fail(message);
+              streamError = new Error(message);
             }
           } catch { /* skip malformed */ }
           currentEvent = '';
           currentData = '';
+          if (streamError) throw streamError;
         }
       }
     }
   } finally {
     reader.releaseLock();
+  }
+  if (!completed) {
+    const message = 'Backfill SSE stream ended without a complete event';
+    spinner.fail(message);
+    throw new Error(message);
   }
   return result;
 }

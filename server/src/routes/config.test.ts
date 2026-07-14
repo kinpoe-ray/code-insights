@@ -1,4 +1,7 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 import { saveConfig } from '@code-insights/cli/utils/config';
@@ -8,6 +11,13 @@ import { saveConfig } from '@code-insights/cli/utils/config';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -23,10 +33,12 @@ vi.mock('@code-insights/cli/utils/config', () => ({
   saveConfig: vi.fn(),
 }));
 
+const mockTestLLMConfig = vi.fn().mockResolvedValue({ success: true });
+
 vi.mock('../llm/client.js', () => ({
   loadLLMConfig: () => null,
   isLLMConfigured: () => false,
-  testLLMConfig: vi.fn().mockResolvedValue({ success: true }),
+  testLLMConfig: (...args: unknown[]) => mockTestLLMConfig(...args),
 }));
 
 vi.mock('../llm/providers/ollama.js', () => ({
@@ -51,11 +63,16 @@ function initTestDb(): Database.Database {
 
 describe('Config routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
+    mockTestLLMConfig.mockClear();
   });
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   describe('GET /api/config/llm', () => {
@@ -193,6 +210,21 @@ describe('Config routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.success).toBe(true);
+    });
+
+    it('returns a recognizable busy response without testing the provider', async () => {
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/config/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'ollama', model: 'llama3' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'LLM_BUSY' });
+      expect(mockTestLLMConfig).not.toHaveBeenCalled();
     });
   });
 

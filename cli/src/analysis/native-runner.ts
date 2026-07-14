@@ -14,8 +14,8 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import type { AnalysisRunner, RunAnalysisParams, RunAnalysisResult } from './runner-types.js';
 
-// `claude -p --output-format json` returns a JSON array of typed event objects.
-// We care only about the final result event.
+// Current Claude versions return a single result object for `--output-format
+// json`; older versions returned an array of typed event objects. Support both.
 interface ClaudeEvent {
   type: string;
   subtype?: string;
@@ -23,41 +23,85 @@ interface ClaudeEvent {
 
 interface ClaudeResultEvent extends ClaudeEvent {
   type: 'result';
-  subtype: 'success' | 'error_max_turns' | 'error_during_execution';
-  result: string;
-  is_error: boolean;
+  subtype?: string;
+  result?: unknown;
+  errors?: unknown;
+  is_error?: boolean;
+  structured_output?: unknown;
 }
 
-function isResultEvent(e: ClaudeEvent): e is ClaudeResultEvent {
-  return e.type === 'result';
+class ClaudeReportedError extends Error {}
+
+function isClaudeEvent(value: unknown): value is ClaudeEvent {
+  return typeof value === 'object' && value !== null && 'type' in value &&
+    typeof (value as { type?: unknown }).type === 'string';
+}
+
+function isResultEvent(value: unknown): value is ClaudeResultEvent {
+  return isClaudeEvent(value) && value.type === 'result';
+}
+
+function isErrorResult(event: ClaudeResultEvent): boolean {
+  return event.is_error === true ||
+    (typeof event.subtype === 'string' && event.subtype.startsWith('error_'));
+}
+
+function formatClaudeError(event: ClaudeResultEvent): string {
+  const errors = Array.isArray(event.errors)
+    ? event.errors.filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+    : [];
+  if (errors.length === 0 && typeof event.result === 'string' && event.result.trim() !== '') {
+    errors.push(event.result);
+  }
+
+  const subtype = typeof event.subtype === 'string' && event.subtype.trim() !== ''
+    ? ` (${event.subtype})`
+    : '';
+  const detail = errors.length > 0 ? `: ${errors.join('; ')}` : '';
+  return `claude -p reported an error${subtype}${detail}`;
+}
+
+function getCapturedOutput(error: unknown, field: 'stdout' | 'stderr'): string | null {
+  if (typeof error !== 'object' || error === null || !(field in error)) return null;
+  const value = (error as Record<'stdout' | 'stderr', unknown>)[field];
+  if (typeof value === 'string') return value;
+  if (Buffer.isBuffer(value)) return value.toString('utf-8');
+  return null;
 }
 
 /**
  * Extract the LLM text payload from a `claude -p --output-format json` response.
- * The output is an array of event objects; the actual content lives in the
- * `result` event's `result` field.
+ * The actual content lives in the result object's `result` field. When a JSON
+ * schema is supplied, current Claude versions also provide the validated value
+ * in `structured_output`; prefer that value over free-form result text.
  */
 function extractResultFromEnvelope(rawOutput: string): string {
-  let events: ClaudeEvent[];
+  let envelope: unknown;
   try {
-    events = JSON.parse(rawOutput) as ClaudeEvent[];
+    envelope = JSON.parse(rawOutput) as unknown;
   } catch {
     throw new Error(
       `claude -p returned non-JSON output. Output preview: ${rawOutput.slice(0, 200)}`
     );
   }
 
-  if (!Array.isArray(events)) {
-    throw new Error('claude -p output was JSON but not an array of events as expected.');
-  }
-
+  const events = Array.isArray(envelope) ? envelope : [envelope];
   const resultEvent = events.find(isResultEvent);
   if (!resultEvent) {
-    throw new Error('claude -p output contained no result event. Events: ' + JSON.stringify(events.map(e => e.type)));
+    const eventTypes = events.filter(isClaudeEvent).map(event => event.type);
+    throw new Error('claude -p output contained no result event. Events: ' + JSON.stringify(eventTypes));
   }
 
-  if (resultEvent.is_error) {
-    throw new Error(`claude -p reported an error: ${resultEvent.result}`);
+  if (isErrorResult(resultEvent)) {
+    throw new ClaudeReportedError(formatClaudeError(resultEvent));
+  }
+
+  if (resultEvent.structured_output !== undefined) {
+    return JSON.stringify(resultEvent.structured_output);
+  }
+
+  if (typeof resultEvent.result !== 'string') {
+    throw new Error('claude -p result event did not contain a string result.');
   }
 
   return resultEvent.result;
@@ -100,12 +144,6 @@ export class ClaudeNativeRunner implements AnalysisRunner {
     const promptFile = join(tmpdir(), `ci-prompt-${fileId}.txt`);
     writeFileSync(promptFile, params.systemPrompt, 'utf-8');
 
-    let schemaFile: string | undefined;
-    if (params.jsonSchema) {
-      schemaFile = join(tmpdir(), `ci-schema-${fileId}.json`);
-      writeFileSync(schemaFile, JSON.stringify(params.jsonSchema), 'utf-8');
-    }
-
     try {
       const args = [
         '-p',
@@ -113,23 +151,40 @@ export class ClaudeNativeRunner implements AnalysisRunner {
         '--output-format', 'json',
         '--append-system-prompt-file', promptFile,
       ];
-      if (schemaFile) {
-        args.push('--json-schema', schemaFile);
+      if (params.jsonSchema) {
+        // Claude Code expects the schema JSON itself, not a path to a file.
+        args.push('--json-schema', JSON.stringify(params.jsonSchema));
       }
 
-      const rawOutput = execFileSync('claude', args, {
-        input: params.userPrompt,
-        encoding: 'utf-8',
-        timeout: 300_000,    // 5-minute hard limit per analysis call
-        maxBuffer: 10 * 1024 * 1024,  // 10 MB
-        cwd: tmpdir(),       // Isolate claude -p session files from user's project
-        // Propagate CODE_INSIGHTS_HOOK_ACTIVE so the claude -p subprocess won't
-        // trigger another SessionEnd hook when its own session ends (breaks the loop).
-        env: { ...process.env, CODE_INSIGHTS_HOOK_ACTIVE: '1' },
-      });
+      let rawOutput: string;
+      try {
+        rawOutput = execFileSync('claude', args, {
+          input: params.userPrompt,
+          encoding: 'utf-8',
+          timeout: 300_000,    // 5-minute hard limit per analysis call
+          maxBuffer: 10 * 1024 * 1024,  // 10 MB
+          cwd: tmpdir(),       // Isolate claude -p session files from user's project
+          // Propagate CODE_INSIGHTS_HOOK_ACTIVE so the claude -p subprocess won't
+          // trigger another SessionEnd hook when its own session ends (breaks the loop).
+          env: { ...process.env, CODE_INSIGHTS_HOOK_ACTIVE: '1' },
+        });
+      } catch (error) {
+        // Claude Code 2.1.168 writes its JSON result to stdout even when the
+        // process exits non-zero. Recover the structured error before falling
+        // back to Node's generic "Command failed" exception.
+        const stdout = getCapturedOutput(error, 'stdout');
+        if (stdout?.trim()) {
+          try {
+            extractResultFromEnvelope(stdout);
+          } catch (responseError) {
+            if (responseError instanceof ClaudeReportedError) throw responseError;
+          }
+        }
+        throw error;
+      }
 
-      // claude -p --output-format json wraps the response in an event array.
-      // Extract the actual LLM text from the result event.
+      // Extract the LLM payload from either the current single-result response
+      // or the legacy event-array envelope.
       const rawJson = extractResultFromEnvelope(rawOutput);
 
       return {
@@ -143,9 +198,6 @@ export class ClaudeNativeRunner implements AnalysisRunner {
     } finally {
       // Always clean up temp files, even if execFileSync throws.
       try { unlinkSync(promptFile); } catch { /* ignore — file may not exist */ }
-      if (schemaFile) {
-        try { unlinkSync(schemaFile); } catch { /* ignore */ }
-      }
     }
   }
 }

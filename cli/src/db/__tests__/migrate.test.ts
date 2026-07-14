@@ -34,8 +34,44 @@ describe('runMigrations — idempotency', () => {
       .all() as Array<{ version: number }>;
 
     // One row per version, no duplicates
-    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     db.close();
+  });
+});
+
+describe('runMigrations — persistent database identity', () => {
+  it('creates one stable unique identity per SQLite database', () => {
+    const firstDb = freshDb();
+    const secondDb = freshDb();
+
+    runMigrations(firstDb);
+    const firstIdentity = firstDb
+      .prepare("SELECT value FROM code_insights_metadata WHERE key = 'database_id'")
+      .pluck()
+      .get() as string;
+    runMigrations(firstDb);
+    const identityAfterSecondMigration = firstDb
+      .prepare("SELECT value FROM code_insights_metadata WHERE key = 'database_id'")
+      .pluck()
+      .get() as string;
+
+    runMigrations(secondDb);
+    const secondIdentity = secondDb
+      .prepare("SELECT value FROM code_insights_metadata WHERE key = 'database_id'")
+      .pluck()
+      .get() as string;
+    const firstSyncGeneration = firstDb
+      .prepare("SELECT value FROM code_insights_metadata WHERE key = 'sync_generation'")
+      .pluck()
+      .get() as string;
+
+    expect(firstIdentity).toMatch(/^[0-9a-f]{32}$/);
+    expect(firstSyncGeneration).toMatch(/^[0-9a-f]{32}$/);
+    expect(identityAfterSecondMigration).toBe(firstIdentity);
+    expect(secondIdentity).not.toBe(firstIdentity);
+
+    firstDb.close();
+    secondDb.close();
   });
 });
 

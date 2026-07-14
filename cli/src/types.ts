@@ -370,10 +370,18 @@ export type ExportTemplate = 'knowledge-base' | 'agent-rules';
 export interface SyncState {
   lastSync: string;
   files: Record<string, FileSyncState>;
+  /** Absolute DB path plus the persistent identity stored inside SQLite. */
+  databaseIdentity?: string;
+  migrations?: {
+    /** All Codex transcripts were re-synced after message IDs became session-scoped. */
+    codexScopedMessageIds?: boolean;
+  };
 }
 
 export interface FileSyncState {
   lastModified: string;
+  /** Byte size of the parsed snapshot; catches same-timestamp appends. */
+  fileSize?: number;
   lastSyncedLine: number;
   sessionId: string;
   syncedSessionIds?: string[];  // For providers where 1 file = N sessions (e.g., Cursor SQLite)
@@ -439,4 +447,3 @@ export interface DispatchImagePromptResponse {
   model: string;
   tokensUsed: { input: number; output: number };
 }
-

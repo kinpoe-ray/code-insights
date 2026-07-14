@@ -34,6 +34,7 @@ import {
 import { saveAnalysisUsage } from '../analysis/analysis-usage-db.js';
 import type { AnalysisRunner } from '../analysis/runner-types.js';
 import type { SQLiteMessageRow } from '../analysis/prompt-types.js';
+import { acquireLlmLock } from '../analysis/llm-lock.js';
 
 // ── DB types ──────────────────────────────────────────────────────────────────
 
@@ -262,6 +263,19 @@ export async function runInsightsCommand(options: InsightsCommandOptions): Promi
 
 // ── CLI command entry point ───────────────────────────────────────────────────
 
+function acquireCommandLlmLock(quiet: boolean): ReturnType<typeof acquireLlmLock> {
+  const lock = acquireLlmLock();
+  if (!lock) {
+    if (!quiet) {
+      console.error(chalk.yellow(
+        '[Code Insights] Another LLM analysis process is already running; try again later.'
+      ));
+    }
+    process.exitCode = 75;
+  }
+  return lock;
+}
+
 export async function insightsCommand(
   sessionId: string | undefined,
   opts: {
@@ -274,6 +288,7 @@ export async function insightsCommand(
   }
 ): Promise<void> {
   const quiet = opts.quiet ?? false;
+  let lock: ReturnType<typeof acquireLlmLock> = null;
 
   try {
     if (opts.hook) {
@@ -281,12 +296,16 @@ export async function insightsCommand(
       console.error(chalk.red(
         'The --hook flag has been removed. Run `code-insights install-hook` to install the updated hook.'
       ));
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     if (!sessionId) {
       throw new Error('Session ID is required');
     }
+
+    lock = acquireCommandLlmLock(quiet);
+    if (!lock) return;
 
     await runInsightsCommand({
       sessionId,
@@ -300,7 +319,9 @@ export async function insightsCommand(
     if (!quiet) {
       console.error(chalk.red(`[Code Insights] ${error instanceof Error ? error.message : 'Analysis failed'}`));
     }
-    process.exit(1);
+    process.exitCode = 1;
+  } finally {
+    lock?.release();
   }
 }
 
@@ -326,10 +347,20 @@ export async function insightsCheckCommand(opts: {
     const rows = db.prepare(`
       SELECT s.id, s.generated_title, s.custom_title, s.started_at, s.message_count
       FROM sessions s
-      LEFT JOIN analysis_usage au ON au.session_id = s.id AND au.analysis_type = 'session'
+      LEFT JOIN analysis_usage session_usage
+        ON session_usage.session_id = s.id
+       AND session_usage.analysis_type = 'session'
+      LEFT JOIN analysis_usage pq_usage
+        ON pq_usage.session_id = s.id
+       AND pq_usage.analysis_type = 'prompt_quality'
       WHERE s.started_at >= ?
         AND s.deleted_at IS NULL
-        AND au.session_id IS NULL
+        AND (
+          session_usage.session_id IS NULL
+          OR session_usage.session_message_count IS NOT s.message_count
+          OR pq_usage.session_id IS NULL
+          OR pq_usage.session_message_count IS NOT s.message_count
+        )
       ORDER BY s.started_at DESC
     `).all(cutoff) as Array<{ id: string; generated_title: string | null; custom_title: string | null; started_at: string; message_count: number }>;
 
@@ -347,39 +378,51 @@ export async function insightsCheckCommand(opts: {
 
     // --analyze: process all found sessions with progress output
     if (analyze) {
-      const runner = ProviderRunner.fromConfig();
-      let successCount = 0;
+      const lock = acquireCommandLlmLock(quiet);
+      if (!lock) return;
+      try {
+        const runner = ProviderRunner.fromConfig();
+        let successCount = 0;
 
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const label = row.custom_title ?? row.generated_title ?? row.id;
-        const position = `[${i + 1}/${count}]`;
-        process.stdout.write(`${position} ${label} ... `);
-        const start = Date.now();
-        try {
-          await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });
-          const elapsed = Math.round((Date.now() - start) / 1000);
-          process.stdout.write(`done (${elapsed}s)\n`);
-          successCount++;
-        } catch (err) {
-          process.stdout.write('failed\n');
-          console.error(chalk.red(`  [Code Insights] ${err instanceof Error ? err.message : 'Analysis failed'}`));
+        for (let i = 0; i < rows.length; i++) {
+          const row = rows[i];
+          const label = row.custom_title ?? row.generated_title ?? row.id;
+          const position = `[${i + 1}/${count}]`;
+          process.stdout.write(`${position} ${label} ... `);
+          const start = Date.now();
+          try {
+            await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });
+            const elapsed = Math.round((Date.now() - start) / 1000);
+            process.stdout.write(`done (${elapsed}s)\n`);
+            successCount++;
+          } catch (err) {
+            process.stdout.write('failed\n');
+            console.error(chalk.red(`  [Code Insights] ${err instanceof Error ? err.message : 'Analysis failed'}`));
+          }
         }
-      }
 
-      log(chalk.green(`Analyzed ${successCount} session${successCount !== 1 ? 's' : ''}.`));
+        log(chalk.green(`Analyzed ${successCount} session${successCount !== 1 ? 's' : ''}.`));
+      } finally {
+        lock.release();
+      }
       return;
     }
 
     // Auto-analyze silently when 1-2 unanalyzed sessions
     if (count <= 2) {
-      const runner = ProviderRunner.fromConfig();
-      for (const row of rows) {
-        try {
-          await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });
-        } catch {
-          // Silently ignore auto-analyze errors for 1-2 sessions
+      const lock = acquireCommandLlmLock(quiet);
+      if (!lock) return;
+      try {
+        const runner = ProviderRunner.fromConfig();
+        for (const row of rows) {
+          try {
+            await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });
+          } catch {
+            // Silently ignore auto-analyze errors for 1-2 sessions
+          }
         }
+      } finally {
+        lock.release();
       }
       return;
     }

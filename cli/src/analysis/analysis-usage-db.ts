@@ -104,3 +104,17 @@ export function getSessionAnalysisUsage(sessionId: string): AnalysisUsageRow[] {
     ORDER BY analyzed_at ASC
   `).all(sessionId) as AnalysisUsageRow[];
 }
+
+/**
+ * Mark the resumable two-pass analysis as stale without discarding the last
+ * visible insights. A later successful analysis atomically replaces them.
+ */
+export function invalidateAnalysisUsage(sessionId: string): void {
+  const db = getDb();
+  db.prepare(`
+    UPDATE analysis_usage
+    SET session_message_count = NULL
+    WHERE session_id = ?
+      AND analysis_type IN ('session', 'prompt_quality')
+  `).run(sessionId);
+}

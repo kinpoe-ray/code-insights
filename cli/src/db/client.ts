@@ -1,11 +1,13 @@
 import Database from 'better-sqlite3';
-import { join } from 'path';
+import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { mkdirSync, existsSync } from 'fs';
 import { runMigrations, type MigrationResult } from './migrate.js';
 
-const DB_DIR = join(homedir(), '.code-insights');
-const DB_PATH = join(DB_DIR, 'data.db');
+const CONFIG_DIR = process.env.CODE_INSIGHTS_CONFIG_DIR
+  || join(homedir(), '.code-insights');
+const DB_PATH = process.env.CODE_INSIGHTS_DB || join(CONFIG_DIR, 'data.db');
+const DB_DIR = dirname(DB_PATH);
 
 let _db: Database.Database | null = null;
 let _migrationResult: MigrationResult | null = null;
@@ -71,4 +73,47 @@ export function closeDb(): void {
  */
 export function getDbPath(): string {
   return DB_PATH;
+}
+
+/**
+ * Stable identity for the exact SQLite database backing this process.
+ *
+ * The absolute path distinguishes intentional alternate databases, while the
+ * ID stored inside SQLite distinguishes replacement/restored files at the same
+ * path. Backups retain their original identity by design.
+ */
+export function getDbIdentity(): string {
+  const rows = getDb().prepare(`
+    SELECT key, value
+    FROM code_insights_metadata
+    WHERE key IN ('database_id', 'sync_generation')
+  `).all() as Array<{ key: string; value: string }>;
+  const metadata = new Map(rows.map(row => [row.key, row.value]));
+  const databaseId = metadata.get('database_id');
+  const syncGeneration = metadata.get('sync_generation');
+
+  if (!databaseId || !syncGeneration) {
+    throw new Error('SQLite database identity is missing');
+  }
+
+  return `${resolve(DB_PATH)}#${databaseId}#${syncGeneration}`;
+}
+
+/**
+ * Advance the generation only after a full sync reaches its checkpoint.
+ * Restoring an older copy of the same database then produces an identity
+ * mismatch even though the persistent database_id is preserved by backups.
+ */
+export function advanceDbSyncIdentity(): string {
+  const result = getDb().prepare(`
+    UPDATE code_insights_metadata
+    SET value = lower(hex(randomblob(16)))
+    WHERE key = 'sync_generation'
+  `).run();
+
+  if (result.changes !== 1) {
+    throw new Error('Could not advance SQLite sync identity');
+  }
+
+  return getDbIdentity();
 }

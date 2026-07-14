@@ -137,6 +137,27 @@ code-insights install-hook             # auto-sync + auto-analyze when sessions 
 
 See [`cli/README.md`](cli/README.md) for the full CLI reference.
 
+### Optional macOS Scheduled Maintenance
+
+When running from a source checkout, you can install one daily LaunchAgent plus
+the Claude Code SessionEnd hook:
+
+```bash
+./automation/install-launchd.sh --install
+```
+
+The daily job runs at 03:15 and uses a shared process lock to keep scheduled,
+hook, direct CLI, and dashboard LLM work strictly serial. It syncs every
+supported source, drains up to 5 durable hook jobs, then analyzes the remaining
+sessions newest-first in batches of 5 (up to 50 per day). Quarantined failures
+are retried on a later run. The previous complete ISO week is refreshed only
+when its analyzed-session count or extracted facet content changes. Logs are
+stored under `~/.code-insights/logs/`.
+
+```bash
+./automation/install-launchd.sh --uninstall
+```
+
 ---
 
 ## Architecture

@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { loadConfig, saveConfig } from '@code-insights/cli/utils/config';
 import type { ClaudeInsightConfig, LLMProviderConfig } from '@code-insights/cli/types';
 import { loadLLMConfig, testLLMConfig } from '../llm/client.js';
+import { llmBusyPayload, runWithLlmLock } from '../llm/llm-lock.js';
 import { discoverOllamaModels } from '../llm/providers/ollama.js';
 import { discoverLlamaCppModels } from '../llm/providers/llamacpp.js';
 
@@ -123,7 +124,9 @@ app.post('/llm/test', async (c) => {
     }, 400);
   }
 
-  const result = await testLLMConfig(testConfig);
+  const locked = await runWithLlmLock(c, () => testLLMConfig(testConfig));
+  if (!locked.acquired) return c.json(llmBusyPayload(), 409);
+  const result = locked.value;
   return c.json(result, result.success ? 200 : 422);
 });
 

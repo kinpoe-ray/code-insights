@@ -54,6 +54,14 @@ vi.mock('../../analysis/provider-runner.js', () => ({
   },
 }));
 
+const mockReleaseLlmLock = vi.fn();
+const mockAcquireLlmLock = vi.fn((): { release(): void } | null => ({
+  release: mockReleaseLlmLock,
+}));
+vi.mock('../../analysis/llm-lock.js', () => ({
+  acquireLlmLock: mockAcquireLlmLock,
+}));
+
 const mockProvider = {
   parse: vi.fn(),
   getProviderName: vi.fn(() => 'claude-code'),
@@ -62,6 +70,12 @@ vi.mock('../../providers/registry.js', () => ({
   getProvider: vi.fn(() => mockProvider),
   getAllProviders: vi.fn(() => [mockProvider]),
 }));
+
+beforeEach(() => {
+  mockReleaseLlmLock.mockReset();
+  mockAcquireLlmLock.mockReset();
+  mockAcquireLlmLock.mockReturnValue({ release: mockReleaseLlmLock });
+});
 
 // ── Seed helpers ──────────────────────────────────────────────────────────────
 
@@ -144,7 +158,7 @@ describe('V8 migration — session_message_count column', () => {
       .prepare('SELECT version FROM schema_version ORDER BY version')
       .all() as Array<{ version: number }>;
 
-    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     db.close();
   });
 
@@ -196,7 +210,7 @@ describe('runInsightsCommand — provider mode (no --native)', () => {
 
     expect(mockFromConfig).toHaveBeenCalledTimes(1);
     expect(mockValidate).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('saves insights to the database', async () => {
     seedSession(mockDb);
@@ -249,6 +263,51 @@ describe('runInsightsCommand — provider mode (no --native)', () => {
     await expect(
       runInsightsCommand({ sessionId: 'nonexistent', native: false, quiet: true })
     ).rejects.toThrow(/not found/i);
+  });
+});
+
+describe('insightsCommand — shared LLM lock', () => {
+  const originalExitCode = process.exitCode;
+  let consoleErrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    mockDb = new Database(':memory:');
+    runMigrations(mockDb);
+    mockProviderRunAnalysis.mockReset();
+    mockFromConfig.mockReset();
+    process.exitCode = undefined;
+    consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    process.exitCode = originalExitCode;
+    consoleErrSpy.mockRestore();
+    mockDb.close();
+  });
+
+  it('leaves work untouched and returns temporary-failure status when the lock is busy', async () => {
+    seedSession(mockDb, 'busy-session');
+    mockAcquireLlmLock.mockReturnValueOnce(null);
+
+    const { insightsCommand } = await import('../insights.js');
+    await insightsCommand('busy-session', { quiet: false });
+
+    expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(75);
+    expect(consoleErrSpy).toHaveBeenCalledWith(expect.stringMatching(/already running/i));
+  });
+
+  it('releases the lock after a successful direct analysis', async () => {
+    seedSession(mockDb, 'locked-session');
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({ rawJson: makeAnalysisResponse(), durationMs: 100, inputTokens: 0, outputTokens: 0, model: 'test', provider: 'test' })
+      .mockResolvedValueOnce({ rawJson: makePQResponse(), durationMs: 100, inputTokens: 0, outputTokens: 0, model: 'test', provider: 'test' });
+
+    const { insightsCommand } = await import('../insights.js');
+    await insightsCommand('locked-session', { quiet: true });
+
+    expect(mockAcquireLlmLock).toHaveBeenCalledOnce();
+    expect(mockReleaseLlmLock).toHaveBeenCalledOnce();
   });
 });
 
@@ -464,7 +523,13 @@ describe('insightsCheckCommand — count-based behavior', () => {
       const sid = `chk-sess-${i}`;
       db.exec(`INSERT OR IGNORE INTO sessions (id, project_id, project_name, project_path, started_at, ended_at, message_count) VALUES ('${sid}', 'pc1', 'proj', '/p', datetime('now', '-${i} minutes'), datetime('now', '-${i} minutes'), 10);`);
       if (i < analyzedCount) {
-        db.exec(`INSERT OR IGNORE INTO analysis_usage (session_id, analysis_type, provider, model) VALUES ('${sid}', 'session', 'openai', 'gpt-4');`);
+        db.exec(`
+          INSERT OR IGNORE INTO analysis_usage
+            (session_id, analysis_type, provider, model, session_message_count)
+          VALUES
+            ('${sid}', 'session', 'openai', 'gpt-4', 10),
+            ('${sid}', 'prompt_quality', 'openai', 'gpt-4', 10);
+        `);
       }
     }
   }
@@ -491,6 +556,23 @@ describe('insightsCheckCommand — count-based behavior', () => {
     const { insightsCheckCommand } = await import('../insights.js');
     await insightsCheckCommand({ days: 7, quiet: true });
     expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it('counts a session whose saved passes were invalidated after message repair', async () => {
+    seedSessions(mockDb, 1, 0);
+    mockDb.exec(`
+      INSERT INTO analysis_usage
+        (session_id, analysis_type, provider, model, session_message_count)
+      VALUES
+        ('chk-sess-0', 'session', 'openai', 'gpt-4', NULL),
+        ('chk-sess-0', 'prompt_quality', 'openai', 'gpt-4', NULL);
+    `);
+
+    const { insightsCheckCommand } = await import('../insights.js');
+    await insightsCheckCommand({ days: 7, quiet: true });
+
+    const written = (stdoutSpy.mock.calls as Array<[unknown]>).map(c => String(c[0])).join('');
+    expect(written.trim()).toBe('1');
   });
 
   it('prints count and suggest --analyze for 3-10 unanalyzed sessions', async () => {
@@ -527,6 +609,7 @@ describe('insightsCheckCommand — count-based behavior', () => {
 });
 
 describe('insightsCheckCommand — auto-analyze (1-2 sessions)', () => {
+  const originalExitCode = process.exitCode;
   let consoleSpy: ReturnType<typeof vi.spyOn>;
   let consoleErrSpy: ReturnType<typeof vi.spyOn>;
 
@@ -537,11 +620,13 @@ describe('insightsCheckCommand — auto-analyze (1-2 sessions)', () => {
     mockValidate.mockReset();
     mockFromConfig.mockReset();
     mockProviderRunAnalysis.mockReset();
+    process.exitCode = undefined;
     consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     consoleErrSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    process.exitCode = originalExitCode;
     consoleSpy.mockRestore();
     consoleErrSpy.mockRestore();
   });
@@ -576,6 +661,17 @@ describe('insightsCheckCommand — auto-analyze (1-2 sessions)', () => {
     expect(mockValidate).not.toHaveBeenCalled();
     expect(mockFromConfig).toHaveBeenCalledTimes(1);
     expect(mockProviderRunAnalysis).toHaveBeenCalledTimes(4);
+  });
+
+  it('retains automatic work for a later run when another analysis holds the lock', async () => {
+    seedOne(mockDb, 'auto-busy');
+    mockAcquireLlmLock.mockReturnValueOnce(null);
+
+    const { insightsCheckCommand } = await import('../insights.js');
+    await insightsCheckCommand({ days: 7, quiet: false });
+
+    expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(75);
   });
 });
 

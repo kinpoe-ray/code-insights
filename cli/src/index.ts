@@ -16,6 +16,7 @@ import { reflectCommand } from './commands/reflect.js';
 import { insightsCommand, insightsCheckCommand } from './commands/insights.js';
 import { sessionEndCommand } from './commands/session-end.js';
 import { buildQueueCommand } from './commands/queue.js';
+import { runCommandWithLlmLock } from './commands/lock-run.js';
 import { doctorCommand } from './commands/doctor/index.js';
 import { showTelemetryNoticeIfNeeded } from './utils/telemetry.js';
 
@@ -146,6 +147,20 @@ program
 // queue command suite — manage the analysis_queue
 program.addCommand(buildQueueCommand());
 
+// Internal wrapper used by automation scripts to serialize arbitrary LLM work.
+program
+  .command('lock-run <command...>', { hidden: true })
+  .description('Run a command while holding the shared Code Insights LLM lock')
+  .helpOption(false)
+  .allowUnknownOption(true)
+  .action(async (command: string[]) => {
+    const exitCode = await runCommandWithLlmLock(command);
+    if (exitCode === 75) {
+      console.error('[Code Insights] Another LLM analysis process is already running.');
+    }
+    process.exitCode = exitCode;
+  });
+
 // insights command — analyze a session using native claude -p or configured LLM
 const insightsCmd = program
   .command('insights [session_id]')
@@ -180,11 +195,19 @@ program.action(async () => {
   await dashboardCommand({ port: '7890', open: true, sync: true });
 });
 
-// Show one-time telemetry disclosure before any command runs
-// Skip for --version/-V and --help/-h since those commands don't need it
+// Show one-time telemetry disclosure before any command runs.
+// A dry run must not create the config directory just to persist this marker.
 const isVersionOrHelp = process.argv.some(arg => ['--version', '-V', '--help', '-h'].includes(arg));
-if (!isVersionOrHelp) {
+const cliArgs = process.argv.slice(2);
+const isSyncDryRun = cliArgs[0] === 'sync' && cliArgs.includes('--dry-run');
+if (!isVersionOrHelp && !isSyncDryRun) {
   showTelemetryNoticeIfNeeded();
 }
 
-program.parse();
+try {
+  await program.parseAsync();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(`[Code Insights] ${message}`);
+  process.exitCode = 1;
+}

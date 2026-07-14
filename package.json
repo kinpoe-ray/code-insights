@@ -4,7 +4,8 @@
   "scripts": {
     "build": "pnpm --filter @code-insights/cli build && pnpm --filter @code-insights/server build && pnpm --filter @code-insights/dashboard build",
     "dev": "pnpm --filter @code-insights/cli dev",
-    "test": "pnpm -r test",
+    "test": "pnpm run test:automation && pnpm -r test",
+    "test:automation": "bash automation/tests/maintenance.test.sh && bash automation/tests/throttled-lock.test.sh && bash automation/tests/install-launchd.test.sh",
     "test:watch": "vitest",
     "test:coverage": "pnpm --filter @code-insights/cli test:coverage && pnpm --filter @code-insights/server test:coverage"
   },

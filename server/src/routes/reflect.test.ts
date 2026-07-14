@@ -1,4 +1,7 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
@@ -7,6 +10,13 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -126,6 +136,8 @@ function parseSSEEvents(text: string): Array<{ event: string; data: string }> {
 
 describe('Reflect routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockChat.mockReset();
@@ -133,6 +145,8 @@ describe('Reflect routes', () => {
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   // ──────────────────────────────────────────────────────
@@ -514,6 +528,25 @@ describe('Reflect routes', () => {
       expect(errorData.code).toBe('INSUFFICIENT_FACETS');
       expect(errorData.current).toBe(3);
       expect(errorData.required).toBe(8);
+    });
+
+    it('sends a recognizable busy error without calling the LLM', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({ content: '<json>{}</json>' });
+      seedMultipleSessions(8);
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      const text = await res.text();
+
+      expect(text).toContain('event: error');
+      expect(text).toContain('LLM_BUSY');
+      expect(mockChat).not.toHaveBeenCalled();
     });
 
     it('streams progress and complete events for friction-wins section', async () => {
