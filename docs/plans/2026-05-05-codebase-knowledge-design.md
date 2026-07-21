@@ -1,12 +1,20 @@
 # Codebase-Attached Knowledge — Design Spec
 
 **Feature:** `.code-insights.md` + `code-insights context` + Team Knowledge Sync  
-**Status:** Phase 1 approved for implementation · Phases 3–6 pending founder decision  
+**Status:** Historical design snapshot; commands and team-sync features described
+below are not implemented
 **Date:** 2026-05-05 (consolidated from 2026-04-20 + 2026-04-22 brainstorm)  
 **Author:** Srikanth Rao M  
 **Reviewed by:** devtools-cofounder, technical-architect, ux-engineer
 
 ---
+
+> **Versioning note (2026-07-18):** This snapshot reserved Schema V10 and V11
+> before those versions shipped. Current V10 implements database/sync identity,
+> and current V11 implements queue rerun/backoff plus source-scoped Reflect
+> snapshots. If this design is revived, its migrations must use the next
+> available schema version (V12 or later). References below to `applyV10()` and
+> `applyV11()` are historical proposals, not the current database contract.
 
 ## 1. Problem Statement
 
@@ -139,7 +147,8 @@ proven_patterns:
 
 ### SQLite over Postgres/Supabase (Jan 2026)
 **Choice:** Local SQLite with WAL mode, no cloud database.
-**Reasoning:** Privacy-first architecture — no data leaves the machine.
+**Reasoning:** Local-first architecture — no hosted Code Insights database or
+account sync; remote analysis remains a separate configured boundary.
 **Alternatives rejected:** Supabase (requires sign-up), Postgres (overkill for single-user local tool).
 **Trade-off:** No cross-device sync. Accepted — personal tool, single machine is the 95% case.
 **Revisit if:** Users request team/shared features.
@@ -746,12 +755,14 @@ Active friction
 
 | Tier | Storage | Contents | Access |
 |------|---------|----------|--------|
-| Personal (free) | Local SQLite `~/.code-insights/data.db` | Everything — sessions, transcripts, insights | Local only, never leaves machine |
+| Personal (free) | Local SQLite `~/.code-insights/data.db` | Everything — sessions, transcripts, insights | Stored locally; configured LLM and telemetry boundaries remain |
 | Team (paid) | Supabase PostgreSQL (bring-your-own) | Extracted knowledge only — decisions, learnings, patterns, friction | All team members read/write |
 
-**Privacy boundary:** The LLM synthesis step is the privacy layer. Raw transcripts never leave the machine. Only already-processed, already-scrubbed structured knowledge syncs. You share conclusions, not conversations.
+**Proposed sync boundary:** Raw transcripts would not be copied into the team
+database. Only separately scrubbed structured knowledge would sync. Cloud LLM
+analysis and telemetry remain separate boundaries.
 
-**What never leaves your machine:**
+**What the proposal would not sync to the team database:**
 - Raw session transcripts, prompts, messages, tool call contents, file contents
 
 **What syncs to team DB:**

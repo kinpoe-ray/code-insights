@@ -1,6 +1,7 @@
 import Database from 'better-sqlite3';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
+import type { LLMCapabilities, LLMMessage } from './types.js';
 
 // ──────────────────────────────────────────────────────
 // Module-scoped mutable DB reference for mocking.
@@ -15,14 +16,30 @@ vi.mock('@code-insights/cli/db/client', () => ({
 
 const mockChat = vi.fn();
 const mockIsConfigured = vi.fn(() => true);
+const mockPrepareMessages = vi.fn((messages: LLMMessage[]) => messages);
+const mockEstimateTokens = vi.fn((text: string) => Math.ceil(text.length / 4));
+const defaultCapabilities: LLMCapabilities = {
+  contextWindowTokens: 100_000,
+  reservedOutputTokens: 8_192,
+  safetyMarginTokens: 11_808,
+  supportsContentBlocks: false,
+  requestOverhead: {
+    baseTokens: 3,
+    perMessageTokens: 4,
+    perContentBlockTokens: 2,
+  },
+};
+let mockCapabilities: LLMCapabilities = { ...defaultCapabilities };
 
 vi.mock('./client.js', () => ({
   isLLMConfigured: (...args: unknown[]) => mockIsConfigured(...args),
   createLLMClient: () => ({
     provider: 'test',
     model: 'test-model',
+    capabilities: mockCapabilities,
     chat: mockChat,
-    estimateTokens: (text: string) => Math.ceil(text.length / 4),
+    prepareMessages: (messages: LLMMessage[]) => mockPrepareMessages(messages),
+    estimateTokens: (text: string) => mockEstimateTokens(text),
   }),
   loadLLMConfig: () => ({ provider: 'test', model: 'test-model' }),
 }));
@@ -118,6 +135,7 @@ const VALID_ANALYSIS_RESPONSE = {
     outcome_satisfaction: 'high',
     workflow_pattern: 'plan-then-implement',
     had_course_correction: false,
+    course_correction_reason: null,
     iteration_count: 2,
     friction_points: [],
     effective_patterns: [
@@ -148,6 +166,54 @@ const VALID_PQ_RESPONSE = {
   },
 };
 
+const EXPANDED_REDACTION = '[REDACTED:known-secret-with-expanded-budget-marker]';
+
+function configureExpandedSmallContext(): number {
+  mockCapabilities = {
+    contextWindowTokens: 16_384,
+    reservedOutputTokens: 4_096,
+    safetyMarginTokens: 1_024,
+    supportsContentBlocks: false,
+    requestOverhead: {
+      baseTokens: 3,
+      perMessageTokens: 4,
+      perContentBlockTokens: 2,
+    },
+  };
+  mockPrepareMessages.mockImplementation((messages: LLMMessage[]) => (
+    messages.map(message => ({
+      ...message,
+      content: typeof message.content === 'string'
+        ? message.content.replaceAll('EXPAND_ME', EXPANDED_REDACTION)
+        : message.content.map(block => ({
+            ...block,
+            text: block.text.replaceAll('EXPAND_ME', EXPANDED_REDACTION),
+          })),
+    }))
+  ));
+  return (
+    mockCapabilities.contextWindowTokens
+    - mockCapabilities.reservedOutputTokens
+    - mockCapabilities.safetyMarginTokens
+  );
+}
+
+function estimatedFinalRequestTokens(messages: LLMMessage[]): number {
+  let total = mockCapabilities.requestOverhead.baseTokens;
+  for (const message of messages) {
+    total += mockCapabilities.requestOverhead.perMessageTokens;
+    if (typeof message.content === 'string') {
+      total += Math.ceil(message.content.length / 4);
+    } else {
+      total += message.content.length * mockCapabilities.requestOverhead.perContentBlockTokens;
+      for (const block of message.content) {
+        total += Math.ceil(block.text.length / 4);
+      }
+    }
+  }
+  return total;
+}
+
 // ──────────────────────────────────────────────────────
 // Lifecycle
 // ──────────────────────────────────────────────────────
@@ -157,6 +223,14 @@ beforeEach(() => {
   seedTestSession(testDb);
   mockChat.mockReset();
   mockIsConfigured.mockReturnValue(true);
+  mockCapabilities = {
+    ...defaultCapabilities,
+    requestOverhead: { ...defaultCapabilities.requestOverhead },
+  };
+  mockPrepareMessages.mockReset();
+  mockPrepareMessages.mockImplementation((messages: LLMMessage[]) => messages);
+  mockEstimateTokens.mockReset();
+  mockEstimateTokens.mockImplementation((text: string) => Math.ceil(text.length / 4));
 });
 
 afterEach(() => {
@@ -188,6 +262,44 @@ describe('analyzeSession', () => {
     expect(result.error_type).toBe('no_json_found');
   });
 
+  it('characterization: a required chunk failure preserves the previous complete insight set', async () => {
+    testDb.prepare(`
+      INSERT INTO insights (
+        id, session_id, project_id, project_name, type, title, content,
+        summary, bullets, confidence, source, metadata, timestamp,
+        created_at, scope, analysis_version
+      ) VALUES (
+        'old-summary', 'sess-test', 'proj-test', 'test-project', 'summary',
+        'Previous complete analysis', 'Old content', 'Old content', '[]',
+        0.9, 'llm', NULL, '2025-06-15T11:00:00Z',
+        '2025-06-15T11:00:00Z', 'session', '3.0.0'
+      )
+    `).run();
+    mockChat
+      .mockResolvedValueOnce({
+        content: JSON.stringify(VALID_ANALYSIS_RESPONSE),
+        usage: { inputTokens: 100, outputTokens: 20 },
+      })
+      .mockResolvedValue({
+        content: 'not-json',
+        usage: { inputTokens: 200, outputTokens: 40 },
+      });
+
+    const result = await analyzeSession(makeSession(), [
+      makeMessage({ id: 'large-a', content: 'A'.repeat(200_000) }),
+      makeMessage({ id: 'large-b', content: 'B'.repeat(200_000) }),
+    ]);
+
+    expect(result.success).toBe(false);
+    expect(result.error_type).toBe('partial_failure');
+    const rows = testDb.prepare(
+      'SELECT id, title FROM insights WHERE session_id = ? ORDER BY id',
+    ).all('sess-test');
+    expect(rows).toEqual([
+      { id: 'old-summary', title: 'Previous complete analysis' },
+    ]);
+  });
+
   it('AbortError propagation', async () => {
     const abortErr = new Error('Aborted');
     abortErr.name = 'AbortError';
@@ -198,11 +310,13 @@ describe('analyzeSession', () => {
   });
 
   it('API error propagation', async () => {
-    mockChat.mockRejectedValue(new Error('Rate limit'));
+    const secret = 'provider-error-secret';
+    mockChat.mockRejectedValue(new Error(`Rate limit: ${secret}`));
     const result = await analyzeSession(makeSession(), [makeMessage()]);
     expect(result.success).toBe(false);
     expect(result.error_type).toBe('api_error');
-    expect(result.error).toBe('Rate limit');
+    expect(result.error).toBe('The analysis provider request failed.');
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it('happy path — valid JSON response writes insights and facets', async () => {
@@ -366,6 +480,30 @@ describe('analyzePromptQuality', () => {
     ).get('sess-test');
     expect(dbRow).toBeTruthy();
   });
+
+  it('budgets the final prepared prompt-quality request for a small context', async () => {
+    const budget = configureExpandedSmallContext();
+    let finalRequest: LLMMessage[] = [];
+    mockChat.mockImplementation(async (messages: LLMMessage[]) => {
+      finalRequest = mockPrepareMessages(messages);
+      return {
+        content: JSON.stringify(VALID_PQ_RESPONSE),
+        usage: null,
+      };
+    });
+    const expandingContent = 'EXPAND_ME'.repeat(2_500);
+
+    const result = await analyzePromptQuality(makeSession(), [
+      makeMessage({ id: 'pq-large-1', type: 'user', content: expandingContent }),
+      makeMessage({ id: 'pq-large-2', type: 'assistant', content: 'Response.' }),
+      makeMessage({ id: 'pq-large-3', type: 'user', content: expandingContent }),
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(estimatedFinalRequestTokens(finalRequest)).toBeLessThanOrEqual(budget);
+    expect(JSON.stringify(finalRequest)).not.toContain('EXPAND_ME');
+    expect(JSON.stringify(finalRequest)).toContain('conversation truncated for analysis');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -504,6 +642,65 @@ describe('extractFacetsOnly', () => {
     expect(facetRow!.outcome_satisfaction).toBe('medium');
     expect(facetRow!.had_course_correction).toBe(1);
     expect(facetRow!.iteration_count).toBe(3);
+  });
+
+  it('budgets the final prepared facet-only request for a small context', async () => {
+    const budget = configureExpandedSmallContext();
+    let finalRequest: LLMMessage[] = [];
+    mockChat.mockImplementation(async (messages: LLMMessage[]) => {
+      finalRequest = mockPrepareMessages(messages);
+      return {
+        content: JSON.stringify(validFacetResponse),
+        usage: null,
+      };
+    });
+
+    const result = await extractFacetsOnly(makeSession(), [
+      makeMessage({
+        id: 'facet-large',
+        content: 'EXPAND_ME'.repeat(5_000),
+      }),
+    ]);
+
+    expect(result.success).toBe(true);
+    expect(estimatedFinalRequestTokens(finalRequest)).toBeLessThanOrEqual(budget);
+    expect(JSON.stringify(finalRequest)).not.toContain('EXPAND_ME');
+    expect(JSON.stringify(finalRequest)).toContain('conversation truncated for analysis');
+  });
+
+  it.each([
+    ['array', '[]'],
+    ['empty object', '{}'],
+    ['wrong field types', JSON.stringify({
+      ...validFacetResponse,
+      had_course_correction: 'true',
+    })],
+  ])('does not persist an invalid facet-only %s response', async (_label, content) => {
+    mockChat.mockResolvedValue({ content, usage: null });
+
+    const result = await extractFacetsOnly(makeSession(), [makeMessage()]);
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Facet extraction returned an invalid response.',
+    });
+    const facetRow = testDb.prepare(
+      'SELECT * FROM session_facets WHERE session_id = ?',
+    ).get('sess-test');
+    expect(facetRow).toBeUndefined();
+  });
+
+  it('does not expose provider details from facet-only extraction', async () => {
+    const secret = 'facet-provider-error-secret';
+    mockChat.mockRejectedValue(new Error(`remote failure: ${secret}`));
+
+    const result = await extractFacetsOnly(makeSession(), [makeMessage()]);
+
+    expect(result).toEqual({
+      success: false,
+      error: 'Facet extraction provider request failed.',
+    });
+    expect(JSON.stringify(result)).not.toContain(secret);
   });
 
   it('filters invalid friction categories before facet-only persistence', async () => {

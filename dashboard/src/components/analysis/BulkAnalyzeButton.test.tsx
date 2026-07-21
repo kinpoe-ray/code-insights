@@ -1,23 +1,41 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type {
+  AnalysisBatchReceipt,
+  AnalysisQueueStatus,
+} from '@/lib/api';
+import type { LLMConfig, Session } from '@/lib/types';
+import { ANALYSIS_BATCH_RECEIPT_KEY } from '@/hooks/useAnalysisQueue';
 import { BulkAnalyzeButton } from './BulkAnalyzeButton';
-import type { Session } from '@/lib/types';
 
-vi.mock('@/lib/api', () => ({
-  analyzeSession: vi.fn(),
-}));
+const enqueueAnalysisBatch = vi.hoisted(() => vi.fn());
+const fetchAnalysisQueue = vi.hoisted(() => vi.fn());
 
-vi.mock('@/hooks/useConfig', () => ({
-  useLlmConfig: vi.fn(),
-}));
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>();
+  return {
+    ...actual,
+    enqueueAnalysisBatch,
+    fetchAnalysisQueue,
+  };
+});
 
-import { analyzeSession } from '@/lib/api';
-import { useLlmConfig } from '@/hooks/useConfig';
+const configuredLlm = {
+  dashboardPort: 7890,
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-6',
+} satisfies LLMConfig;
 
-const mockAnalyzeSession = vi.mocked(analyzeSession);
-const mockUseLlmConfig = vi.mocked(useLlmConfig);
+const emptyQueue: AnalysisQueueStatus = {
+  pending: 0,
+  processing: 0,
+  completed: 0,
+  failed: 0,
+  nextAttemptAt: null,
+  items: [],
+};
 
 function makeSession(id: string): Session {
   return {
@@ -49,282 +67,372 @@ function makeSession(id: string): Session {
     cache_creation_tokens: null,
     cache_read_tokens: null,
     estimated_cost_usd: null,
+    models_used: null,
+    primary_model: null,
+    usage_source: null,
+    compact_count: 0,
+    auto_compact_count: 0,
+    slash_commands: null,
   };
 }
 
-function setup(sessions: Session[], onComplete?: () => void) {
-  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const result = render(
-    <QueryClientProvider client={queryClient}>
-      <BulkAnalyzeButton sessions={sessions} onComplete={onComplete} />
-    </QueryClientProvider>
+function queueWith(
+  entries: Array<{
+    sessionId: string;
+    status: 'pending' | 'processing' | 'failed';
+    error?: string;
+  }>,
+): AnalysisQueueStatus {
+  return {
+    pending: entries.filter(({ status }) => status === 'pending').length,
+    processing: entries.filter(({ status }) => status === 'processing').length,
+    completed: 0,
+    failed: entries.filter(({ status }) => status === 'failed').length,
+    nextAttemptAt: null,
+    items: entries.map(({ sessionId, status, error }) => ({
+      session_id: sessionId,
+      status,
+      runner_type: 'provider',
+      enqueued_at: '2026-07-18 12:00:00',
+      started_at: status === 'processing' ? '2026-07-18 12:01:00' : null,
+      completed_at: null,
+      error_message: error ?? null,
+      attempt_count: status === 'failed' ? 3 : 0,
+      max_attempts: 3,
+      rerun_requested: 0,
+      next_attempt_at: null,
+    })),
+  };
+}
+
+function makeReceipt(sessionIds: string[]): AnalysisBatchReceipt {
+  return {
+    sessionIds,
+    queued: sessionIds.length,
+    alreadyActive: 0,
+    enqueuedAt: new Date().toISOString(),
+  };
+}
+
+function setup(
+  sessions: Session[],
+  options: {
+    onComplete?: () => void;
+    llmConfig?: LLMConfig;
+    queue?: AnalysisQueueStatus;
+  } = {},
+) {
+  fetchAnalysisQueue.mockResolvedValue(options.queue ?? emptyQueue);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, staleTime: Infinity },
+    },
+  });
+  queryClient.setQueryData(
+    ['config', 'llm'],
+    options.llmConfig ?? configuredLlm,
   );
-  return result;
+  queryClient.setQueryData(
+    ['analysisQueue'],
+    options.queue ?? emptyQueue,
+  );
+  render(
+    <QueryClientProvider client={queryClient}>
+      <BulkAnalyzeButton
+        sessions={sessions}
+        onComplete={options.onComplete}
+      />
+    </QueryClientProvider>,
+  );
+  return queryClient;
 }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  // Default: LLM configured
-  mockUseLlmConfig.mockReturnValue({
-    data: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
-  } as ReturnType<typeof useLlmConfig>);
+  localStorage.clear();
+  fetchAnalysisQueue.mockResolvedValue(emptyQueue);
 });
 
-describe('BulkAnalyzeButton', () => {
-  describe('unconfigured state', () => {
-    it('renders disabled button with configure message when LLM not configured', () => {
-      mockUseLlmConfig.mockReturnValue({ data: null } as ReturnType<typeof useLlmConfig>);
-      setup([makeSession('s1')]);
-      const btn = screen.getByRole('button', { name: /analyze selected/i });
-      expect(btn).toBeDisabled();
-      expect(screen.getByText(/configure ai first/i)).toBeInTheDocument();
+describe('BulkAnalyzeButton durable batches', () => {
+  it('is disabled until AI is configured', () => {
+    setup([makeSession('s1')], {
+      llmConfig: { dashboardPort: 7890 },
+    });
+
+    expect(screen.getByRole(
+      'button',
+      { name: /analyze selected/i },
+    )).toBeDisabled();
+  });
+
+  it('keeps singular, plural, and empty trigger states', () => {
+    const { unmount } = renderWithSessions([]);
+    expect(screen.getByRole(
+      'button',
+      { name: /analyze 0 sessions/i },
+    )).toBeDisabled();
+    unmount();
+
+    const one = renderWithSessions([makeSession('s1')]);
+    expect(screen.getByRole(
+      'button',
+      { name: /analyze 1 session$/i },
+    )).toBeEnabled();
+    one.unmount();
+
+    renderWithSessions([makeSession('s1'), makeSession('s2')]);
+    expect(screen.getByRole(
+      'button',
+      { name: /analyze 2 sessions/i },
+    )).toBeEnabled();
+  });
+
+  it('submits all ids in one POST and stores the returned receipt', async () => {
+    const sessions = [makeSession('s1'), makeSession('s2')];
+    const receipt = makeReceipt(['s1', 's2']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: receipt });
+    setup(sessions, {
+      queue: queueWith([
+        { sessionId: 's1', status: 'pending' },
+        { sessionId: 's2', status: 'pending' },
+      ]),
+    });
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 2 sessions/i },
+    ));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+
+    await waitFor(() => {
+      expect(enqueueAnalysisBatch).toHaveBeenCalledOnce();
+    });
+    expect(enqueueAnalysisBatch).toHaveBeenCalledWith(['s1', 's2']);
+    expect(JSON.parse(
+      localStorage.getItem(ANALYSIS_BATCH_RECEIPT_KEY)!,
+    )).toEqual(receipt);
+    expect(screen.getByText(/0 of 2 finished/i)).toBeInTheDocument();
+    const progressbar = screen.getByRole('progressbar');
+    expect(progressbar).toHaveAttribute('aria-valuemin', '0');
+    expect(progressbar).toHaveAttribute('aria-valuemax', '2');
+    expect(progressbar).toHaveAttribute('aria-valuenow', '0');
+    expect(screen.getByText(/0 of 2 finished/i)).toHaveAttribute(
+      'aria-live',
+      'polite',
+    );
+    expect(screen.queryByRole(
+      'button',
+      { name: /cancel|retry/i },
+    )).not.toBeInTheDocument();
+  });
+
+  it('can close an active batch and reopen its durable progress', async () => {
+    const receipt = makeReceipt(['s1']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: receipt });
+    setup([makeSession('s1')], {
+      queue: queueWith([{ sessionId: 's1', status: 'processing' }]),
+    });
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 1 session/i },
+    ));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+    await screen.findByText(/0 of 1 finished/i);
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 1 session/i },
+    ));
+    expect(screen.getByText(/0 of 1 finished/i)).toBeInTheDocument();
+  });
+
+  it('infers completion from omitted queue rows and refreshes once', async () => {
+    const receipt = makeReceipt(['s1', 's2']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: receipt });
+    const onComplete = vi.fn();
+    const queryClient = setup(
+      [makeSession('s1'), makeSession('s2')],
+      {
+        onComplete,
+        queue: queueWith([
+          { sessionId: 's1', status: 'pending' },
+          { sessionId: 's2', status: 'processing' },
+        ]),
+      },
+    );
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 2 sessions/i },
+    ));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+    await screen.findByText(/0 of 2 finished/i);
+
+    act(() => {
+      queryClient.setQueryData(['analysisQueue'], emptyQueue);
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(
+        /2 sessions analyzed successfully/i,
+      )).toBeInTheDocument();
+    });
+    expect(onComplete).toHaveBeenCalledOnce();
+  });
+
+  it('shows terminal failures from SQLite without a retry action', async () => {
+    const receipt = makeReceipt(['s1', 's2']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: receipt });
+    setup([makeSession('s1'), makeSession('s2')], {
+      queue: queueWith([
+        { sessionId: 's2', status: 'failed', error: 'provider timeout' },
+      ]),
+    });
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 2 sessions/i },
+    ));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+
+    expect(await screen.findByText(
+      /1 session analyzed successfully/i,
+    )).toBeInTheDocument();
+    expect(screen.getByText(/1 failed/i)).toBeInTheDocument();
+    expect(screen.getByText(/provider timeout/i)).toBeInTheDocument();
+    expect(screen.queryByRole(
+      'button',
+      { name: /retry|cancel/i },
+    )).not.toBeInTheDocument();
+  });
+
+  it('allows a different selection after the previous batch completes', async () => {
+    const previous = makeReceipt(['batch-a']);
+    localStorage.setItem(
+      ANALYSIS_BATCH_RECEIPT_KEY,
+      JSON.stringify(previous),
+    );
+    const next = makeReceipt(['batch-b']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: next });
+    setup([makeSession('batch-b')]);
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 1 session/i },
+    ));
+    expect(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    )).toBeInTheDocument();
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+
+    await waitFor(() => {
+      expect(enqueueAnalysisBatch).toHaveBeenCalledWith(['batch-b']);
+    });
+    expect(JSON.parse(
+      localStorage.getItem(ANALYSIS_BATCH_RECEIPT_KEY)!,
+    )).toEqual(next);
+  });
+
+  it('lets the same selection explicitly clear a completed receipt and analyze again', async () => {
+    const previous = makeReceipt(['s1']);
+    localStorage.setItem(
+      ANALYSIS_BATCH_RECEIPT_KEY,
+      JSON.stringify(previous),
+    );
+    const next = makeReceipt(['s1']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: next });
+    setup([makeSession('s1')]);
+
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 1 session/i },
+    ));
+    await screen.findByText(/1 session analyzed successfully/i);
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze again/i },
+    ));
+
+    expect(localStorage.getItem(ANALYSIS_BATCH_RECEIPT_KEY)).toBeNull();
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+    await waitFor(() => {
+      expect(enqueueAnalysisBatch).toHaveBeenCalledWith(['s1']);
     });
   });
 
-  describe('trigger button', () => {
-    it('is disabled when sessions array is empty', () => {
-      setup([]);
-      const btn = screen.getByRole('button', { name: /analyze 0 sessions/i });
-      expect(btn).toBeDisabled();
+  it('shows a queue error alert and retries a fresh snapshot', async () => {
+    const receipt = makeReceipt(['s1']);
+    enqueueAnalysisBatch.mockResolvedValue({ batch: receipt });
+    setup([makeSession('s1')], {
+      queue: emptyQueue,
     });
+    await waitFor(() => expect(fetchAnalysisQueue).toHaveBeenCalled());
+    fetchAnalysisQueue.mockRejectedValueOnce(new Error('queue offline'));
 
-    it('shows singular label for 1 session', () => {
-      setup([makeSession('s1')]);
-      expect(screen.getByRole('button', { name: /analyze 1 session$/i })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /analyze 1 session/i },
+    ));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /start analysis/i },
+    ));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /queue offline/i,
+    );
+    fetchAnalysisQueue.mockResolvedValueOnce(queueWith([
+      { sessionId: 's1', status: 'pending' },
+    ]));
+    await userEvent.click(screen.getByRole(
+      'button',
+      { name: /^retry$/i },
+    ));
+
+    await waitFor(() => {
+      expect(screen.getByRole('progressbar')).toBeInTheDocument();
     });
-
-    it('shows plural label for multiple sessions', () => {
-      setup([makeSession('s1'), makeSession('s2'), makeSession('s3')]);
-      expect(screen.getByRole('button', { name: /analyze 3 sessions/i })).toBeInTheDocument();
-    });
-  });
-
-  describe('dialog open/close behavior', () => {
-    it('opens dialog when trigger button is clicked', async () => {
-      setup([makeSession('s1')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      expect(screen.getByRole('dialog')).toBeInTheDocument();
-      expect(screen.getByText('Bulk Analysis')).toBeInTheDocument();
-    });
-
-    it('does not close dialog when Escape pressed while analyzing (regression #293)', async () => {
-      // analyzeSession never resolves — keeps component in analyzing=true state
-      mockAnalyzeSession.mockReturnValue(new Promise(() => {}));
-
-      setup([makeSession('s1')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      // Wait until analyzing state is active
-      await waitFor(() => {
-        expect(screen.getByText(/analyzing session/i)).toBeInTheDocument();
-      });
-
-      // Fire Escape — dialog must stay open
-      fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape', code: 'Escape' });
-
-      // Dialog should still be present
-      expect(screen.getByRole('dialog')).toBeInTheDocument();
-    });
-
-    it('can be closed after analysis completes', async () => {
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-
-      setup([makeSession('s1')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument();
-      });
-
-      await userEvent.click(screen.getByRole('button', { name: /done/i }));
-      await waitFor(() => {
-        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-      });
-    });
-
-    it('resets progress and result state when dialog is closed and reopened', async () => {
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-
-      setup([makeSession('s1')]);
-      // First open: run analysis to completion
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-      await waitFor(() => expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument());
-      await userEvent.click(screen.getByRole('button', { name: /done/i }));
-      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
-
-      // Second open: should show fresh "Start Analysis" prompt, not stale result
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      expect(screen.getByRole('button', { name: /start analysis/i })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: /done/i })).not.toBeInTheDocument();
-    });
-  });
-
-  describe('analysis execution', () => {
-    it('calls analyzeSession for each session and shows success result', async () => {
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-      const onComplete = vi.fn();
-
-      setup([makeSession('s1'), makeSession('s2')], onComplete);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 2 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      await waitFor(() => expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument());
-
-      expect(mockAnalyzeSession).toHaveBeenCalledTimes(2);
-      expect(mockAnalyzeSession).toHaveBeenCalledWith('s1');
-      expect(mockAnalyzeSession).toHaveBeenCalledWith('s2');
-      expect(onComplete).toHaveBeenCalledOnce();
-    });
-
-    it('shows failed count when some sessions error', async () => {
-      mockAnalyzeSession
-        .mockResolvedValueOnce({ success: true })
-        .mockRejectedValueOnce(new Error('API timeout'));
-
-      setup([makeSession('s1'), makeSession('s2')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 2 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      await waitFor(() => expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument());
-
-      expect(screen.getByText(/1 session.*analyzed successfully/i)).toBeInTheDocument();
-      expect(screen.getByText(/1 failed/i)).toBeInTheDocument();
-      expect(screen.getByText(/api timeout/i)).toBeInTheDocument();
-    });
-  });
-
-  // UI rendering and interaction tests authored by ux-agent
-  describe('UI rendering', () => {
-    it('renders analyzing spinner and "Analyzing session X of Y" text during analysis', async () => {
-      mockAnalyzeSession.mockReturnValue(new Promise(() => {}));
-
-      setup([makeSession('s1'), makeSession('s2')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 2 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      await waitFor(() => {
-        expect(screen.getByText(/analyzing session 0 of 2/i)).toBeInTheDocument();
-      });
-
-      // Spinner present — Lucide renders an SVG inside the progress row
-      const progressText = screen.getByText(/analyzing session/i);
-      expect(progressText.closest('div')?.querySelector('svg')).not.toBeNull();
-
-      // Start Analysis button is gone — replaced by progress UI
-      expect(screen.queryByRole('button', { name: /start analysis/i })).not.toBeInTheDocument();
-      // Done button not yet shown
-      expect(screen.queryByRole('button', { name: /^done$/i })).not.toBeInTheDocument();
-    });
-
-    it('progress bar width reflects completed/total ratio', async () => {
-      // Deferred for first session — lets us advance to "1 of 4 done" state
-      let resolveFirst!: (v: { success: true }) => void;
-      const firstPromise = new Promise<{ success: true }>((res) => {
-        resolveFirst = res;
-      });
-      mockAnalyzeSession
-        .mockReturnValueOnce(firstPromise)
-        // Subsequent calls hang — freezes us at completed=1, total=4 (25%)
-        .mockReturnValue(new Promise(() => {}));
-
-      const sessions = [makeSession('s1'), makeSession('s2'), makeSession('s3'), makeSession('s4')];
-      setup(sessions);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 4 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      // Initial state: 0 / 4 → width 0%
-      await waitFor(() => {
-        expect(screen.getByText(/analyzing session 0 of 4/i)).toBeInTheDocument();
-      });
-      // Progress fill div is the only element in the dialog with an inline width style
-      let fill = screen.getByRole('dialog').querySelector('[style*="width"]') as HTMLDivElement | null;
-      expect(fill).not.toBeNull();
-      expect(fill!.style.width).toBe('0%');
-
-      // Resolve first session → progress should tick to 1 / 4 (25%)
-      await act(async () => {
-        resolveFirst({ success: true });
-      });
-
-      await waitFor(() => {
-        expect(screen.getByText(/analyzing session 1 of 4/i)).toBeInTheDocument();
-      });
-      fill = screen.getByRole('dialog').querySelector('[style*="width"]') as HTMLDivElement | null;
-      expect(fill!.style.width).toBe('25%');
-    });
-
-    it('error list truncates at 5 items with "+N more" footer', async () => {
-      // 7 sessions, all fail → 7 errors, list should show 5 + "and 2 more"
-      mockAnalyzeSession.mockRejectedValue(new Error('boom'));
-
-      const sessions = Array.from({ length: 7 }, (_, i) => makeSession(`s${i + 1}`));
-      setup(sessions);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 7 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      await waitFor(() => {
-        expect(screen.getByRole('button', { name: /done/i })).toBeInTheDocument();
-      });
-
-      // Find the error list <ul> — dialog content is portaled
-      const list = screen.getByRole('dialog').querySelector('ul.list-disc') as HTMLUListElement | null;
-      expect(list).not.toBeNull();
-      const items = list!.querySelectorAll('li');
-
-      // 5 error rows + 1 "...and 2 more" footer row = 6 total
-      expect(items).toHaveLength(6);
-      expect(items[items.length - 1].textContent).toMatch(/and 2 more/i);
-      // First 5 are the truncated error rows
-      for (let i = 0; i < 5; i++) {
-        expect(items[i].textContent).toBe('boom');
-      }
-    });
-
-    it('success count text renders correctly with plural and singular forms', async () => {
-      // Case 1: singular — exactly 1 success
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-      const { unmount } = setup([makeSession('s1')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-      await waitFor(() => {
-        expect(screen.getByText(/^1 session analyzed successfully$/i)).toBeInTheDocument();
-      });
-      unmount();
-
-      // Case 2: plural — 3 successes
-      mockAnalyzeSession.mockReset();
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-      setup([makeSession('s1'), makeSession('s2'), makeSession('s3')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 3 sessions/i }));
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-      await waitFor(() => {
-        expect(screen.getByText(/^3 sessions analyzed successfully$/i)).toBeInTheDocument();
-      });
-    });
-
-    it('"Done" button appears in result state and clicking it closes the dialog', async () => {
-      mockAnalyzeSession.mockResolvedValue({ success: true });
-
-      setup([makeSession('s1')]);
-      await userEvent.click(screen.getByRole('button', { name: /analyze 1 session/i }));
-
-      // Pre-analysis: no Done button visible
-      expect(screen.queryByRole('button', { name: /^done$/i })).not.toBeInTheDocument();
-
-      await userEvent.click(screen.getByRole('button', { name: /start analysis/i }));
-
-      // Post-analysis: Done button rendered
-      const doneBtn = await screen.findByRole('button', { name: /^done$/i });
-      expect(doneBtn).toBeInTheDocument();
-
-      // Clicking unmounts the dialog
-      await userEvent.click(doneBtn);
-      await waitFor(() => {
-        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-      });
-    });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
+
+function renderWithSessions(sessions: Session[]) {
+  fetchAnalysisQueue.mockResolvedValue(emptyQueue);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: { retry: false, staleTime: Infinity },
+    },
+  });
+  queryClient.setQueryData(['config', 'llm'], configuredLlm);
+  queryClient.setQueryData(['analysisQueue'], emptyQueue);
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <BulkAnalyzeButton sessions={sessions} />
+    </QueryClientProvider>,
+  );
+}

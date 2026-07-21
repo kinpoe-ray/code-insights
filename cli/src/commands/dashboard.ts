@@ -7,6 +7,7 @@ import net from 'net';
 import { trackEvent, identifyUser, captureError, classifyError } from '../utils/telemetry.js';
 import { printBanner } from '../utils/banner.js';
 import { runSync } from './sync.js';
+import { processQueue } from '../analysis/queue-worker.js';
 
 interface DashboardOptions {
   port: string;
@@ -110,7 +111,14 @@ export async function dashboardCommand(options: DashboardOptions): Promise<void>
 
     // Use pathToFileURL so the import specifier is valid on all platforms,
     // including Windows where resolve() returns C:\...\index.js.
-    type ServerModule = { startServer: (opts: { port: number; staticDir: string; openBrowser: boolean }) => Promise<void> };
+    type ServerModule = {
+      startServer: (opts: {
+        port: number;
+        staticDir: string;
+        openBrowser: boolean;
+        processQueue: typeof processQueue;
+      }) => Promise<void>;
+    };
     const { startServer } = await import(pathToFileURL(serverEntryPath).href) as ServerModule;
 
     spinner.stop();
@@ -120,7 +128,12 @@ export async function dashboardCommand(options: DashboardOptions): Promise<void>
     console.log('');
 
     trackEvent('cli_dashboard', { port: port, success: true });
-    await startServer({ port, staticDir, openBrowser: options.open });
+    await startServer({
+      port,
+      staticDir,
+      openBrowser: options.open,
+      processQueue,
+    });
   } catch (err) {
     spinner.fail('Failed to start dashboard server.');
     console.error(chalk.red(err instanceof Error ? err.message : String(err)));

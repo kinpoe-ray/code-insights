@@ -3,7 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - master
+      - '**'
   pull_request:
     branches:
       - master
@@ -19,7 +19,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          version: 9.15.9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -29,6 +29,13 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Typecheck from clean workspace
+        run: |
+          test ! -d cli/dist
+          test ! -d server/dist
+          test ! -d dashboard/dist
+          pnpm typecheck
 
       - name: Build
         run: pnpm build

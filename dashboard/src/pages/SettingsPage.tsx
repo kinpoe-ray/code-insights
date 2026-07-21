@@ -130,6 +130,9 @@ export default function SettingsPage() {
   const [ollamaCorsOpen, setOllamaCorsOpen] = useState(false);
   const [llamacppDiscoveredModels, setLlamacppDiscoveredModels] = useState<string[]>([]);
   const [llamacppDiscovering, setLlamacppDiscovering] = useState(false);
+  const supportsCustomBaseUrl = llmConfig?.providers?.some(
+    (provider) => provider.id === llmProvider && provider.supportsCustomBaseUrl,
+  ) ?? false;
 
   // Populate form from loaded config
   useEffect(() => {
@@ -190,6 +193,7 @@ export default function SettingsPage() {
     setLlmConfigured(false);
     setLlmTestError(null);
     setLlmApiKey('');
+    setLlmBaseUrl('');
     setCustomModel('');
     const providerInfo = PROVIDERS.find((p) => p.id === provider);
     setLlmModel(providerInfo?.models[0]?.id ?? '');
@@ -219,7 +223,9 @@ export default function SettingsPage() {
         provider: llmProvider,
         model: effectiveModel,
         apiKey: llmApiKey || undefined,
-        baseUrl: llmBaseUrl || undefined,
+        ...(supportsCustomBaseUrl && llmBaseUrl
+          ? { baseUrl: llmBaseUrl }
+          : {}),
       });
 
       if (testResult.success) {
@@ -227,7 +233,9 @@ export default function SettingsPage() {
           provider: llmProvider,
           model: effectiveModel,
           apiKey: llmApiKey || undefined,
-          baseUrl: llmBaseUrl || undefined,
+          ...(supportsCustomBaseUrl && llmBaseUrl
+            ? { baseUrl: llmBaseUrl }
+            : {}),
         });
         setLlmConfigured(true);
         setLlmTestError(null);
@@ -562,8 +570,25 @@ export default function SettingsPage() {
             </div>
           )}
 
+          {supportsCustomBaseUrl
+            && llmProvider !== 'ollama'
+            && llmProvider !== 'llamacpp' && (
+            <div>
+              <label className="text-sm font-medium">Base URL (optional)</label>
+              <Input
+                value={llmBaseUrl}
+                onChange={(e) => setLlmBaseUrl(e.target.value)}
+                placeholder={`Official ${PROVIDERS.find((p) => p.id === llmProvider)?.name} API`}
+                className="mt-1"
+              />
+              <p className="text-xs text-muted-foreground mt-1">
+                Leave empty to use the official provider API.
+              </p>
+            </div>
+          )}
+
           {/* llama.cpp: Base URL + model discovery button */}
-          {llmProvider === 'llamacpp' && (
+          {supportsCustomBaseUrl && llmProvider === 'llamacpp' && (
             <div className="space-y-3">
               <div>
                 <label className="text-sm font-medium">Base URL (optional)</label>
@@ -603,7 +628,7 @@ export default function SettingsPage() {
           )}
 
           {/* Ollama: Base URL + collapsible CORS instructions */}
-          {llmProvider === 'ollama' && (
+          {supportsCustomBaseUrl && llmProvider === 'ollama' && (
             <>
               <div>
                 <label className="text-sm font-medium">Base URL (optional)</label>

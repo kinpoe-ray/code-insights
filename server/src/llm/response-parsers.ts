@@ -4,4 +4,5 @@ export {
   extractJsonPayload,
   parseAnalysisResponse,
   parsePromptQualityResponse,
+  validateAnalysisFacets,
 } from '@code-insights/cli/analysis/response-parsers';

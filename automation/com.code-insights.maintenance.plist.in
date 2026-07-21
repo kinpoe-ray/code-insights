@@ -25,14 +25,18 @@
     <string>@CODE_INSIGHTS_BIN@</string>
     <key>CODE_INSIGHTS_CONFIG_DIR</key>
     <string>@CONFIG_DIR@</string>
+    <key>CODE_INSIGHTS_WINDOW_END</key>
+    <string>@WINDOW_END@</string>
+    <key>CODE_INSIGHTS_BATCH_SIZE</key>
+    <string>@BATCH_SIZE@</string>
   </dict>
 
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key>
-    <integer>3</integer>
+    <integer>@START_HOUR@</integer>
     <key>Minute</key>
-    <integer>15</integer>
+    <integer>@START_MINUTE@</integer>
   </dict>
 
   <key>ProcessType</key>

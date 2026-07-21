@@ -1,10 +1,16 @@
 # UX Design: LLM Cost Transparency
 
-**Status:** draft
+**Status:** Historical design, superseded by the shipped `analysis_usage`
+implementation and `GET /api/analysis/usage`
 **Date:** 2026-03-15
 **Author:** UX Engineer
 
 ---
+
+> This file preserves the earlier UX exploration. Current storage, route names,
+> pricing, and resume behavior are documented in
+> [PRODUCT.md](../PRODUCT.md) and [ARCHITECTURE.md](../ARCHITECTURE.md); do not
+> implement the proposed `analysis_runs` or `/api/analysis/cost` contracts.
 
 ## Problem Statement
 

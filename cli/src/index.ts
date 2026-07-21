@@ -18,6 +18,8 @@ import { sessionEndCommand } from './commands/session-end.js';
 import { buildQueueCommand } from './commands/queue.js';
 import { runCommandWithLlmLock } from './commands/lock-run.js';
 import { doctorCommand } from './commands/doctor/index.js';
+import { buildMaintenanceCommand } from './commands/maintenance.js';
+import { buildReanalyzeCommand } from './commands/reanalyze.js';
 import { showTelemetryNoticeIfNeeded } from './utils/telemetry.js';
 
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'));
@@ -94,7 +96,8 @@ program
 program
   .command('install-hook')
   .description('Install Claude Code SessionEnd hook for automatic sync and analysis')
-  .action(() => installHookCommand());
+  .option('--provider', 'Analyze with the LLM provider configured in Code Insights')
+  .action((opts) => installHookCommand({ native: !opts.provider }));
 
 program
   .command('uninstall-hook')
@@ -130,6 +133,8 @@ program.addCommand(statsCommand);
 program.addCommand(configCommand);
 program.addCommand(telemetryCommand);
 program.addCommand(reflectCommand);
+program.addCommand(buildMaintenanceCommand());
+program.addCommand(buildReanalyzeCommand());
 
 
 // session-end command — single SessionEnd hook entry point (sync + enqueue + spawn worker)
@@ -137,11 +142,20 @@ program
   .command('session-end')
   .description('SessionEnd hook: sync session, enqueue for analysis, spawn background worker')
   .option('--native', 'Use claude -p for analysis worker (default: true)')
+  .option('--provider', 'Use the LLM provider configured in Code Insights')
   .option('-s, --source <tool>', 'Source tool identifier (default: claude-code)')
   .option('-q, --quiet', 'Suppress output')
   .option('--model <model>', 'Model for native analysis (default: sonnet)')
   .action(async (opts) => {
-    await sessionEndCommand({ native: opts.native ?? true, quiet: opts.quiet, source: opts.source, model: opts.model });
+    if (opts.native && opts.provider) {
+      throw new Error('Choose either --native or --provider, not both.');
+    }
+    await sessionEndCommand({
+      native: opts.provider ? false : opts.native ?? true,
+      quiet: opts.quiet,
+      source: opts.source,
+      model: opts.model,
+    });
   });
 
 // queue command suite — manage the analysis_queue
@@ -200,7 +214,9 @@ program.action(async () => {
 const isVersionOrHelp = process.argv.some(arg => ['--version', '-V', '--help', '-h'].includes(arg));
 const cliArgs = process.argv.slice(2);
 const isSyncDryRun = cliArgs[0] === 'sync' && cliArgs.includes('--dry-run');
-if (!isVersionOrHelp && !isSyncDryRun) {
+const isReanalyzeDryRun = cliArgs[0] === 'reanalyze' && cliArgs.includes('--dry-run');
+const isMaintenanceStatus = cliArgs[0] === 'maintenance' && cliArgs[1] === 'status';
+if (!isVersionOrHelp && !isSyncDryRun && !isReanalyzeDryRun && !isMaintenanceStatus) {
   showTelemetryNoticeIfNeeded();
 }
 

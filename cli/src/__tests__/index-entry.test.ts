@@ -4,6 +4,10 @@ const entryState = vi.hoisted(() => ({
   asyncActionWasAwaited: false,
   lockRunArgs: null as string[] | null,
   lockRunResult: 0,
+  maintenanceActionWasCalled: false,
+  reanalyzeAction: null as string | null,
+  installHookOptions: null as { native?: boolean } | null,
+  sessionEndOptions: null as { native?: boolean; quiet?: boolean } | null,
 }));
 
 vi.mock('../commands/init.js', () => ({ initCommand: vi.fn() }));
@@ -14,7 +18,9 @@ vi.mock('../commands/sync.js', () => ({
 }));
 vi.mock('../commands/status.js', () => ({ statusCommand: vi.fn() }));
 vi.mock('../commands/install-hook.js', () => ({
-  installHookCommand: vi.fn(),
+  installHookCommand: vi.fn((options?: { native?: boolean }) => {
+    entryState.installHookOptions = options ?? {};
+  }),
   uninstallHookCommand: vi.fn(),
 }));
 vi.mock('../commands/open.js', () => ({ openCommand: vi.fn() }));
@@ -23,7 +29,11 @@ vi.mock('../commands/insights.js', () => ({
   insightsCommand: vi.fn(),
   insightsCheckCommand: vi.fn(),
 }));
-vi.mock('../commands/session-end.js', () => ({ sessionEndCommand: vi.fn() }));
+vi.mock('../commands/session-end.js', () => ({
+  sessionEndCommand: vi.fn((options?: { native?: boolean; quiet?: boolean }) => {
+    entryState.sessionEndOptions = options ?? {};
+  }),
+}));
 vi.mock('../commands/doctor/index.js', () => ({ doctorCommand: vi.fn() }));
 vi.mock('../commands/lock-run.js', () => ({
   runCommandWithLlmLock: vi.fn(async (command: string[]) => {
@@ -31,6 +41,29 @@ vi.mock('../commands/lock-run.js', () => ({
     return entryState.lockRunResult;
   }),
 }));
+vi.mock('../commands/maintenance.js', async () => {
+  const { Command } = await vi.importActual<typeof import('commander')>('commander');
+  const command = new Command('maintenance');
+  command.command('status').action(() => {
+    entryState.maintenanceActionWasCalled = true;
+  });
+  return { buildMaintenanceCommand: () => command };
+});
+
+vi.mock('../commands/reanalyze.js', async () => {
+  const { Command } = await vi.importActual<typeof import('commander')>('commander');
+  return {
+    buildReanalyzeCommand: () => {
+      const command = new Command('reanalyze')
+        .option('--dry-run')
+        .action(() => { entryState.reanalyzeAction = 'dry-run'; });
+      command.command('run').option('--json').action(() => {
+        entryState.reanalyzeAction = 'run';
+      });
+      return command;
+    },
+  };
+});
 
 vi.mock('../commands/reset.js', async () => {
   const { Command } = await vi.importActual<typeof import('commander')>('commander');
@@ -91,6 +124,10 @@ describe('CLI production entry point', () => {
     entryState.asyncActionWasAwaited = false;
     entryState.lockRunArgs = null;
     entryState.lockRunResult = 0;
+    entryState.maintenanceActionWasCalled = false;
+    entryState.reanalyzeAction = null;
+    entryState.installHookOptions = null;
+    entryState.sessionEndOptions = null;
     process.argv = ['node', 'code-insights', 'reflect'];
     process.exitCode = undefined;
     vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -138,6 +175,22 @@ describe('CLI production entry point', () => {
     expect(console.error).not.toHaveBeenCalled();
   });
 
+  it('exposes maintenance controls through the production CLI', async () => {
+    process.argv = ['node', 'code-insights', 'maintenance', 'status'];
+
+    await import('../index.js');
+
+    expect(entryState.maintenanceActionWasCalled).toBe(true);
+  });
+
+  it('exposes the durable reanalysis campaign through the production CLI', async () => {
+    process.argv = ['node', 'code-insights', 'reanalyze', 'run', '--json'];
+
+    await import('../index.js');
+
+    expect(entryState.reanalyzeAction).toBe('run');
+  });
+
   it('reports a busy lock concisely and preserves exit status 75', async () => {
     process.argv = ['node', 'code-insights', 'lock-run', '/usr/bin/true'];
     entryState.lockRunResult = 75;
@@ -171,12 +224,47 @@ describe('CLI production entry point', () => {
     expect(helpOutput).not.toContain('lock-run');
   });
 
+  it('installs a provider-backed hook when requested', async () => {
+    process.argv = ['node', 'code-insights', 'install-hook', '--provider'];
+
+    await import('../index.js');
+
+    expect(entryState.installHookOptions).toEqual({ native: false });
+  });
+
+  it('runs SessionEnd automation through the configured provider when requested', async () => {
+    process.argv = ['node', 'code-insights', 'session-end', '--provider', '--quiet'];
+
+    await import('../index.js');
+
+    expect(entryState.sessionEndOptions).toMatchObject({ native: false, quiet: true });
+  });
+
   it.each([
     ['sync', '--dry-run'],
     ['sync', '--source', 'codex-cli', '--dry-run'],
     ['sync', '--dry-run', '--project', 'example'],
   ])('does not persist the telemetry notice for a dry-run sync: %j', async (...args) => {
     process.argv = ['node', 'code-insights', ...args];
+
+    await import('../index.js');
+    const { showTelemetryNoticeIfNeeded } = await import('../utils/telemetry.js');
+
+    expect(showTelemetryNoticeIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('keeps a reanalysis dry run free of the telemetry notice', async () => {
+    process.argv = ['node', 'code-insights', 'reanalyze', '--dry-run'];
+
+    await import('../index.js');
+    const { showTelemetryNoticeIfNeeded } = await import('../utils/telemetry.js');
+
+    expect(entryState.reanalyzeAction).toBe('dry-run');
+    expect(showTelemetryNoticeIfNeeded).not.toHaveBeenCalled();
+  });
+
+  it('keeps maintenance status output free of the telemetry notice', async () => {
+    process.argv = ['node', 'code-insights', 'maintenance', 'status'];
 
     await import('../index.js');
     const { showTelemetryNoticeIfNeeded } = await import('../utils/telemetry.js');

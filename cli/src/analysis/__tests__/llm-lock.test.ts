@@ -5,10 +5,43 @@ import { join } from 'path';
 import { spawnSync } from 'child_process';
 
 const testState = vi.hoisted(() => ({ home: '' }));
+const processBoundary = vi.hoisted(() => ({
+  startTime: 'Sat Jul 18 12:00:00 2026',
+}));
 
 vi.mock('os', async (importOriginal) => {
   const actual = await importOriginal<typeof import('os')>();
   return { ...actual, homedir: () => testState.home };
+});
+
+vi.mock('child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('child_process')>();
+  return {
+    ...actual,
+    spawnSync: vi.fn((command: string, args?: readonly string[], options?: unknown) => {
+      const isMacProcessStartQuery = command === '/bin/ps'
+        && args?.[0] === '-o'
+        && args?.[1] === 'lstart='
+        && args?.[2] === '-p'
+        && /^\d+$/.test(args?.[3] ?? '');
+      if (isMacProcessStartQuery) {
+        const stdout = `${processBoundary.startTime}\n`;
+        return {
+          pid: process.pid,
+          output: [null, stdout, ''],
+          stdout,
+          stderr: '',
+          status: 0,
+          signal: null,
+        };
+      }
+
+      // Dead-owner tests still use a real child process. Only the OS process
+      // birth query is controlled because /bin/ps is unavailable in sandboxed
+      // macOS test runners.
+      return Reflect.apply(actual.spawnSync, actual, [command, args, options]);
+    }),
+  };
 });
 
 import { acquireLlmLock, isLlmLockTokenOwner } from '../llm-lock.js';

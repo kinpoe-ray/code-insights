@@ -3,7 +3,11 @@ import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { loadConfig, saveConfig, isConfigured } from '../utils/config.js';
 import { trackEvent } from '../utils/telemetry.js';
-import { PROVIDERS, getDefaultModel } from '../constants/llm-providers.js';
+import {
+  PROVIDERS,
+  getDefaultModel,
+  validateProviderBaseUrl,
+} from '../constants/llm-providers.js';
 import type { ClaudeInsightConfig, LLMProviderConfig } from '../types.js';
 
 /**
@@ -108,7 +112,7 @@ const llmCommand = configCommand
   .option('--provider <provider>', 'LLM provider (openai, anthropic, gemini, ollama)')
   .option('--model <model>', 'Model ID (e.g., gpt-4o, claude-sonnet-4-20250514)')
   .option('--api-key <key>', 'API key for the selected provider')
-  .option('--base-url <url>', 'Custom base URL (for Ollama or local endpoints)')
+  .option('--base-url <url>', 'Custom base URL (for supported providers)')
   .option('--show', 'Show current LLM configuration')
   .action(async (options: {
     provider?: string;
@@ -153,7 +157,18 @@ const llmCommand = configCommand
       }
 
       const providerInfo = PROVIDERS.find(p => p.id === options.provider);
-      if (providerInfo?.requiresApiKey && !options.apiKey) {
+      const existingLlm = loadConfig()?.dashboard?.llm;
+      const keepsExistingProvider = existingLlm?.provider === options.provider;
+      const explicitlyChangedEndpoint = options.baseUrl !== undefined
+        && options.baseUrl.trim() !== (existingLlm?.baseUrl ?? '').trim();
+      const canReuseCredentials = keepsExistingProvider && !explicitlyChangedEndpoint;
+      const apiKey = options.apiKey || (canReuseCredentials ? existingLlm.apiKey : undefined);
+      const baseUrl = options.baseUrl !== undefined
+        ? options.baseUrl
+        : keepsExistingProvider
+          ? existingLlm.baseUrl
+          : undefined;
+      if (providerInfo?.requiresApiKey && !apiKey) {
         console.error(chalk.red(`\nProvider "${options.provider}" requires an API key. Use --api-key <key>\n`));
         process.exit(1);
       }
@@ -161,11 +176,11 @@ const llmCommand = configCommand
       const llmConfig: LLMProviderConfig = {
         provider: options.provider as LLMProviderConfig['provider'],
         model: options.model,
-        ...(options.apiKey ? { apiKey: options.apiKey } : {}),
-        ...(options.baseUrl ? { baseUrl: options.baseUrl } : {}),
+        ...(apiKey ? { apiKey } : {}),
+        ...(baseUrl !== undefined ? { baseUrl } : {}),
       };
 
-      saveLLMConfig(llmConfig);
+      if (!saveLLMConfig(llmConfig)) return;
       console.log(chalk.green(`\nLLM configured: ${options.provider} / ${options.model}\n`));
       return;
     }
@@ -248,40 +263,30 @@ async function runInteractiveLLMConfig(): Promise<void> {
     }
   }
 
-  // Step 4: Base URL (Ollama, llamacpp, or custom)
-  if (provider === 'ollama' || provider === 'llamacpp') {
-    const defaultUrl = provider === 'ollama' ? 'http://localhost:11434' : 'http://localhost:8080';
+  // Step 4: Base URL, only when the selected adapter implements it.
+  if (providerInfo.supportsCustomBaseUrl) {
+    const defaultUrl = provider === 'ollama'
+      ? 'http://localhost:11434'
+      : provider === 'llamacpp'
+        ? 'http://localhost:8080'
+        : undefined;
     const { baseUrl } = await inquirer.prompt<{ baseUrl: string }>([
       {
         type: 'input',
         name: 'baseUrl',
-        message: `${providerInfo.name} URL (leave blank for default ${defaultUrl}):`,
-        default: existing?.baseUrl ?? '',
+        message: defaultUrl
+          ? `${providerInfo.name} URL (leave blank for default ${defaultUrl}):`
+          : `Custom base URL (leave blank for official ${providerInfo.name} API):`,
+        default: existing?.provider === provider ? existing.baseUrl ?? '' : '',
       },
     ]);
 
-    if (baseUrl && baseUrl !== defaultUrl) {
-      llmConfig.baseUrl = baseUrl;
-    }
-    // No API key prompt for llamacpp — llama-server runs locally without authentication
-  } else if (provider === 'anthropic' || provider === 'openai' || provider === 'gemini') {
-    // Optional custom base URL for Anthropic-/OpenAI-/Gemini-compatible endpoints
-    // (e.g. Zhipu BigModel's /api/anthropic). Leave blank to use the official API.
-    const { baseUrl } = await inquirer.prompt<{ baseUrl: string }>([
-      {
-        type: 'input',
-        name: 'baseUrl',
-        message: `Custom base URL (leave blank for official ${providerInfo.name} API):`,
-        default: existing?.baseUrl ?? '',
-      },
-    ]);
-
-    if (baseUrl) {
+    if (baseUrl && (!defaultUrl || baseUrl !== defaultUrl)) {
       llmConfig.baseUrl = baseUrl;
     }
   }
 
-  saveLLMConfig(llmConfig);
+  if (!saveLLMConfig(llmConfig)) return;
 
   console.log(chalk.green(`\nLLM configured: ${providerInfo.name} / ${model}\n`));
 
@@ -293,12 +298,29 @@ async function runInteractiveLLMConfig(): Promise<void> {
 /**
  * Save LLM config into the dashboard.llm field of the CLI config file.
  */
-function saveLLMConfig(llmConfig: LLMProviderConfig): void {
+function saveLLMConfig(llmConfig: LLMProviderConfig): boolean {
+  const baseUrlValidation = validateProviderBaseUrl(llmConfig.provider, llmConfig.baseUrl);
+  if (!baseUrlValidation.ok) {
+    console.error(chalk.red(
+      `\n${baseUrlValidation.message} (${baseUrlValidation.code})\n`,
+    ));
+    process.exitCode = 1;
+    return false;
+  }
+
+  const normalizedLlmConfig = { ...llmConfig };
+  if (baseUrlValidation.value === undefined) {
+    delete normalizedLlmConfig.baseUrl;
+  } else {
+    normalizedLlmConfig.baseUrl = baseUrlValidation.value;
+  }
+
   const existing: ClaudeInsightConfig = loadConfig() ?? {
     sync: { claudeDir: '~/.claude/projects', excludeProjects: [] },
   };
-  existing.dashboard = { ...existing.dashboard, llm: llmConfig };
+  existing.dashboard = { ...existing.dashboard, llm: normalizedLlmConfig };
   saveConfig(existing);
+  return true;
 }
 
 // Suppress unused variable warning — llmCommand is registered via .command() side-effect

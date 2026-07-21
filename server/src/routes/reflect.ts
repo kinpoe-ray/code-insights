@@ -38,11 +38,23 @@ function parseLLMJson<T>(response: string): T | null {
   }
 }
 
-// Detect the dominant source tool from the database to target artifact generation.
-function detectTargetTool(db: ReturnType<typeof getDb>): string {
+// Use an explicitly selected source when present. Otherwise detect the dominant
+// tool only within the same period/project scope used for this reflection.
+function detectTargetTool(
+  db: ReturnType<typeof getDb>,
+  where: string,
+  params: (string | number)[],
+  source?: string,
+): string {
+  if (source) return source;
   const row = db.prepare(
-    `SELECT source_tool, COUNT(*) as count FROM sessions WHERE deleted_at IS NULL GROUP BY source_tool ORDER BY count DESC LIMIT 1`
-  ).get() as { source_tool: string; count: number } | undefined;
+    `SELECT s.source_tool, COUNT(*) as count
+     FROM sessions s
+     ${where}
+     GROUP BY s.source_tool
+     ORDER BY count DESC, s.source_tool ASC
+     LIMIT 1`
+  ).get(...params) as { source_tool: string; count: number } | undefined;
   return row?.source_tool || 'claude-code';
 }
 
@@ -107,7 +119,7 @@ app.post('/generate', requireLLM(), async (c) => {
 
       const client = createLLMClient();
       const results: Record<string, unknown> = {};
-      const targetTool = detectTargetTool(db);
+      const targetTool = detectTargetTool(db, where, params, body.source);
 
       for (const section of sections) {
         if (abortSignal.aborted) break;
@@ -212,11 +224,15 @@ app.post('/generate', requireLLM(), async (c) => {
           ? isoWeekBounds.end.toISOString()
           : new Date().toISOString();
         const projectKey = body.project || '__all__';
+        const sourceScope = body.source || '__all__';
 
         db.prepare(`
-          INSERT INTO reflect_snapshots (period, project_id, results_json, generated_at, window_start, window_end, session_count, facet_count)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(period, project_id) DO UPDATE SET
+          INSERT INTO reflect_snapshots (
+            period, project_id, source_scope, results_json, generated_at,
+            window_start, window_end, session_count, facet_count
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(period, project_id, source_scope) DO UPDATE SET
             results_json = excluded.results_json,
             generated_at = excluded.generated_at,
             window_start = excluded.window_start,
@@ -226,6 +242,7 @@ app.post('/generate', requireLLM(), async (c) => {
         `).run(
           period,
           projectKey,
+          sourceScope,
           JSON.stringify(results),
           new Date().toISOString(),
           windowStart,
@@ -273,18 +290,30 @@ app.get('/results', (c) => {
 app.get('/weeks', (c) => {
   const db = getDb();
   const project = c.req.query('project');
+  const source = c.req.query('source');
 
-  const projectCondition = project ? 'AND project_id = ?' : '';
-  const projectParams: string[] = project ? [project] : [];
+  const scopeConditions: string[] = [];
+  const scopeParams: string[] = [];
+  if (project) {
+    scopeConditions.push('s.project_id = ?');
+    scopeParams.push(project);
+  }
+  if (source) {
+    scopeConditions.push('s.source_tool = ?');
+    scopeParams.push(source);
+  }
+  const scopeCondition = scopeConditions.length > 0
+    ? `AND ${scopeConditions.join(' AND ')}`
+    : '';
 
   // Find the earliest session to determine the full week range.
   // If no sessions exist, return empty array.
   const earliestRow = db.prepare(`
     SELECT MIN(started_at) as earliest
-    FROM sessions
-    WHERE deleted_at IS NULL
-      ${projectCondition}
-  `).get(...projectParams) as { earliest: string | null } | undefined;
+    FROM sessions s
+    WHERE s.deleted_at IS NULL
+      ${scopeCondition}
+  `).get(...scopeParams) as { earliest: string | null } | undefined;
 
   if (!earliestRow?.earliest) {
     return c.json({ weeks: [] });
@@ -320,6 +349,7 @@ app.get('/weeks', (c) => {
   }
 
   const projectKey = project || '__all__';
+  const sourceScope = source || '__all__';
 
   // Query 1: session counts per ISO week using GROUP BY.
   // Shift back three days before advancing to Thursday so Friday-Sunday stay in their
@@ -337,12 +367,12 @@ app.get('/weeks', (c) => {
     WHERE s.deleted_at IS NULL
       AND s.started_at >= ?
       AND s.started_at < ?
-      ${projectCondition}
+      ${scopeCondition}
     GROUP BY week_monday
   `).all(
     rangeStart,
     rangeEnd,
-    ...projectParams
+    ...scopeParams
   ) as Array<{ week_monday: string; cnt: number }>;
 
   // Build a map from ISO week string -> session count.
@@ -360,8 +390,14 @@ app.get('/weeks', (c) => {
   const snapshotRows = db.prepare(`
     SELECT period, generated_at
     FROM reflect_snapshots
-    WHERE period IN (${weekPlaceholders}) AND project_id = ?
-  `).all(...weekEntries.map(e => e.week), projectKey) as Array<{ period: string; generated_at: string }>;
+    WHERE period IN (${weekPlaceholders})
+      AND project_id = ?
+      AND source_scope = ?
+  `).all(
+    ...weekEntries.map(e => e.week),
+    projectKey,
+    sourceScope,
+  ) as Array<{ period: string; generated_at: string }>;
 
   const snapshotMap = new Map(snapshotRows.map(r => [r.period, r.generated_at]));
 
@@ -381,12 +417,14 @@ app.get('/snapshot', (c) => {
   const db = getDb();
   const period = c.req.query('period') || '30d';
   const project = c.req.query('project') || '__all__';
+  const sourceScope = c.req.query('source') || '__all__';
 
   const row = db.prepare(
-    `SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ?`
-  ).get(period, project) as {
+    `SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ? AND source_scope = ?`
+  ).get(period, project, sourceScope) as {
     period: string;
     project_id: string;
+    source_scope: string;
     results_json: string;
     generated_at: string;
     window_start: string | null;
@@ -411,6 +449,7 @@ app.get('/snapshot', (c) => {
     snapshot: {
       period: row.period,
       projectId: row.project_id,
+      sourceScope: row.source_scope,
       results,
       generatedAt: row.generated_at,
       windowStart: row.window_start,

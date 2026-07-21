@@ -350,6 +350,7 @@ export interface ProviderInfo {
   name: string;
   models: ProviderModelOption[];
   requiresApiKey: boolean;
+  supportsCustomBaseUrl: boolean;
   apiKeyLink?: string;
 }
 

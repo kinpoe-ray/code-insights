@@ -1,5 +1,9 @@
 # Test Coverage: 47% → 75% Implementation Plan
 
+> **Historical plan:** Assertions, route lists, week limits, and coverage
+> numbers below describe the 2026-03-12 codebase. Use
+> [../QA.md](../QA.md) and current source/tests as the active contract.
+
 > **For agentic workers:** REQUIRED: Use superpowers:subagent-driven-development (if subagents available) or superpowers:executing-plans to implement this plan. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Increase test coverage from 47.3% to ≥75% statement coverage across the CLI and server packages.

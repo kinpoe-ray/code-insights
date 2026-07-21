@@ -112,7 +112,8 @@ export const DEFAULT_NATIVE_MODEL = 'sonnet';
 
 export class ClaudeNativeRunner implements AnalysisRunner {
   readonly name = 'claude-code-native';
-  private readonly model: string;
+  readonly provider = 'claude-code-native';
+  readonly model: string;
 
   constructor(options?: { model?: string }) {
     this.model = options?.model ?? DEFAULT_NATIVE_MODEL;

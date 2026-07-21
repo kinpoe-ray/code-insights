@@ -41,8 +41,21 @@ case "${1:-}" in
     ;;
   sync)
     printf 'Already up to date!\n'
+    [[ -z "${PAUSE_AFTER_SYNC_FILE:-}" ]] || touch "$PAUSE_AFTER_SYNC_FILE"
     ;;
   queue)
+    ;;
+  reanalyze)
+    if [[ "${2:-}" == 'run' ]]; then
+      if [[ -n "${HISTORY_REFRESH_STATUS:-}" ]]; then
+        printf '{"active":false,"status":"%s","processed":1,"stopReason":"%s"}\n' \
+          "$HISTORY_REFRESH_STATUS" "$HISTORY_REFRESH_STATUS"
+      elif [[ "${HISTORY_REFRESH_ACTIVE:-0}" == '1' ]]; then
+        printf '{"active":true,"status":"active","processed":2,"stopReason":"batch_limit"}\n'
+      else
+        printf '{"active":false,"status":"idle","processed":0,"stopReason":"no_active_campaign"}\n'
+      fi
+    fi
     ;;
   dashboard)
     printf '%s\n' "$$" > "$DASHBOARD_PID_FILE"
@@ -61,6 +74,12 @@ cat > "$TMP_ROOT/bin/analyze" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'analyze %s\n' "$*" >> "$CALL_LOG"
+printf 'analysis-deadline %s\n' "${CODE_INSIGHTS_DEADLINE_EPOCH:-none}" >> "$CALL_LOG"
+if [[ -n "${ANALYZE_PAUSE_FILE:-}" ]]; then
+  touch "$ANALYZE_PAUSE_FILE"
+  printf 'Selected: 2 session(s)\nCompleted: 0 succeeded, 0 failed, 2 not attempted.\n'
+  exit 3
+fi
 count=0
 [[ -f "$ANALYZE_COUNT_FILE" ]] && read -r count < "$ANALYZE_COUNT_FILE"
 if [[ "$count" -eq 0 ]]; then
@@ -97,7 +116,24 @@ fi
 [[ -f "$DASHBOARD_STARTED_FILE" ]]
 EOF
 
-chmod +x "$TMP_ROOT/bin/code-insights" "$TMP_ROOT/bin/analyze" "$TMP_ROOT/bin/sqlite3" "$TMP_ROOT/bin/curl"
+cat > "$TMP_ROOT/bin/date" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == '+%H:%M' && -n "${WINDOW_TIME_COUNT_FILE:-}" ]]; then
+  count=0
+  [[ -f "$WINDOW_TIME_COUNT_FILE" ]] && read -r count < "$WINDOW_TIME_COUNT_FILE"
+  printf '%s\n' "$((count + 1))" > "$WINDOW_TIME_COUNT_FILE"
+  if [[ "$count" -ge "${WINDOW_TIME_SWITCH_AFTER:-0}" ]]; then
+    printf '%s\n' "${WINDOW_TIME_AFTER:-06:00}"
+  else
+    printf '%s\n' "${WINDOW_TIME_BEFORE:-05:59}"
+  fi
+  exit 0
+fi
+exec /bin/date "$@"
+EOF
+
+chmod +x "$TMP_ROOT/bin/code-insights" "$TMP_ROOT/bin/analyze" "$TMP_ROOT/bin/sqlite3" "$TMP_ROOT/bin/curl" "$TMP_ROOT/bin/date"
 
 export HOME="$TMP_ROOT/home"
 export PATH="$TMP_ROOT/bin:/usr/bin:/bin"
@@ -117,14 +153,124 @@ export REFLECTED_FILE="$TMP_ROOT/reflected"
 export CURL_LOG="$TMP_ROOT/curl.log"
 export DASHBOARD_PID_FILE="$TMP_ROOT/dashboard.pid"
 export DASHBOARD_STARTED_FILE="$TMP_ROOT/dashboard.started"
+export WINDOW_TIME_COUNT_FILE="$TMP_ROOT/window-time-count"
+
+# A paused maintenance run exits successfully before lock acquisition, sync,
+# queue processing, analysis, or reflection.
+: > "$CALL_LOG"
+touch "$HOME/.code-insights/maintenance.paused"
+set +e
+"$SCRIPT" run > "$TMP_ROOT/paused.log" 2>&1
+paused_status=$?
+set -e
+[[ "$paused_status" -eq 0 ]] || fail "expected paused maintenance exit 0, got $paused_status"
+[[ ! -s "$CALL_LOG" ]] || fail 'paused maintenance invoked an automatic command'
+assert_contains "$TMP_ROOT/paused.log" 'Maintenance is paused; no work was started.'
+rm -f "$HOME/.code-insights/maintenance.paused"
+
+# A pause requested after sync stops the same maintenance chain before queue,
+# analysis, and reflection.
+: > "$CALL_LOG"
+export PAUSE_AFTER_SYNC_FILE="$HOME/.code-insights/maintenance.paused"
+"$SCRIPT" run > "$TMP_ROOT/paused-after-sync.log" 2>&1
+unset PAUSE_AFTER_SYNC_FILE
+assert_contains "$CALL_LOG" 'code-insights sync'
+assert_not_contains "$CALL_LOG" 'code-insights queue process'
+assert_not_contains "$CALL_LOG" 'analyze '
+assert_not_contains "$CALL_LOG" 'code-insights reflect'
+assert_contains "$TMP_ROOT/paused-after-sync.log" 'Maintenance was paused; remaining work will resume later.'
+rm -f "$HOME/.code-insights/maintenance.paused"
+
+# A malformed maintenance-window boundary is rejected before any automatic
+# command starts.
+: > "$CALL_LOG"
+set +e
+CODE_INSIGHTS_WINDOW_END='24:00' "$SCRIPT" run > "$TMP_ROOT/invalid-window.log" 2>&1
+invalid_window_status=$?
+set -e
+[[ "$invalid_window_status" -eq 64 ]] \
+  || fail "expected invalid maintenance window exit 64, got $invalid_window_status"
+assert_not_contains "$CALL_LOG" 'code-insights sync'
+assert_contains "$TMP_ROOT/invalid-window.log" 'Invalid CODE_INSIGHTS_WINDOW_END'
+
+# A run that starts at or after its cutoff exits cleanly without sync or LLM
+# work. Midnight is a deterministic already-ended boundary for this test.
+: > "$CALL_LOG"
+CODE_INSIGHTS_WINDOW_END='00:00' \
+  "$SCRIPT" run > "$TMP_ROOT/closed-window.log" 2>&1
+assert_not_contains "$CALL_LOG" 'code-insights sync'
+assert_not_contains "$CALL_LOG" 'code-insights queue process'
+assert_not_contains "$CALL_LOG" 'analyze '
+assert_not_contains "$CALL_LOG" 'code-insights reflect'
+assert_contains "$TMP_ROOT/closed-window.log" \
+  'Maintenance window ended at 00:00; no work was started.'
 
 # Newest-first drain repeats bounded batches until there is no work.
 FACET_COUNT=0 "$SCRIPT" run > "$TMP_ROOT/run.log" 2>&1
 assert_contains "$CALL_LOG" "code-insights lock-run /bin/bash $SCRIPT run"
 assert_contains "$CALL_LOG" 'code-insights sync'
 assert_contains "$CALL_LOG" 'code-insights queue process -q --limit 5 --delay 0'
+assert_contains "$CALL_LOG" 'code-insights reanalyze run --batch-size 5 --retry-failed --json'
 assert_contains "$CALL_LOG" 'analyze --days 36500 --batch-size 5 --delay 0'
 [[ "$(grep -c '^analyze ' "$CALL_LOG")" -eq 2 ]] || fail 'expected two bounded analyze calls'
+
+# The cutoff is checked before every analysis batch. Work completed before the
+# boundary stays complete; unstarted sessions are retained for the next run.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$WINDOW_TIME_COUNT_FILE"
+WINDOW_TIME_SWITCH_AFTER=4 CODE_INSIGHTS_WINDOW_END='06:00' FACET_COUNT=0 \
+  "$SCRIPT" run > "$TMP_ROOT/window-boundary.log" 2>&1
+[[ "$(grep -c '^analyze ' "$CALL_LOG")" -eq 1 ]] \
+  || fail 'expected the window boundary to stop before the second analysis batch'
+assert_contains "$TMP_ROOT/window-boundary.log" \
+  'Maintenance window ended at 06:00; remaining analysis will resume on the next schedule.'
+
+# The absolute cutoff is exported to the inner analyzer so it can stop between
+# individual sessions, not only between outer batches.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$WINDOW_TIME_COUNT_FILE"
+WINDOW_TIME_SWITCH_AFTER=100 CODE_INSIGHTS_WINDOW_END='06:00' \
+  CODE_INSIGHTS_DEADLINE_EPOCH=9999999999 FACET_COUNT=0 \
+  "$SCRIPT" run > "$TMP_ROOT/deadline-propagation.log" 2>&1
+assert_contains "$CALL_LOG" 'analysis-deadline 9999999999'
+
+# Exit 3 from the inner analyzer is a normal pause/deadline stop. Maintenance
+# must not launch another batch or reflection after it.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$REFLECTED_FILE"
+export ANALYZE_PAUSE_FILE="$HOME/.code-insights/maintenance.paused"
+FACET_COUNT=9 SNAPSHOT_COUNT=8 CURL_STATUS=0 \
+  "$SCRIPT" run > "$TMP_ROOT/paused-during-analysis.log" 2>&1
+unset ANALYZE_PAUSE_FILE
+[[ "$(grep -c '^analyze ' "$CALL_LOG")" -eq 1 ]] \
+  || fail 'pause did not stop after the current analysis batch'
+assert_not_contains "$CALL_LOG" 'code-insights reflect'
+assert_contains "$TMP_ROOT/paused-during-analysis.log" 'Maintenance was paused; remaining work will resume later.'
+rm -f "$HOME/.code-insights/maintenance.paused"
+
+# A durable history refresh owns the scheduled analysis budget. Maintenance
+# advances it once, then skips legacy selection and reflection so mixed model
+# generations are not synthesized mid-campaign.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$REFLECTED_FILE"
+HISTORY_REFRESH_ACTIVE=1 FACET_COUNT=9 SNAPSHOT_COUNT=8 CURL_STATUS=0 \
+  "$SCRIPT" run > "$TMP_ROOT/history-refresh.log" 2>&1
+assert_contains "$CALL_LOG" 'code-insights reanalyze run --batch-size 5 --retry-failed --json'
+[[ "$(grep -c '^analyze ' "$CALL_LOG" || true)" -eq 0 ]] \
+  || fail 'active history refresh also started legacy analysis'
+assert_not_contains "$CALL_LOG" 'code-insights reflect'
+assert_contains "$TMP_ROOT/history-refresh.log" 'Durable history reanalysis remains active'
+
+# A campaign completed by this batch reports active=false, so maintenance
+# continues legacy analysis/reflection in the same window instead of waiting
+# for the next day's schedule.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$REFLECTED_FILE"
+HISTORY_REFRESH_STATUS=completed FACET_COUNT=0 \
+  "$SCRIPT" run > "$TMP_ROOT/history-refresh-completed.log" 2>&1
+assert_contains "$CALL_LOG" 'code-insights reanalyze run --batch-size 5 --retry-failed --json'
+assert_contains "$CALL_LOG" 'analyze --days 36500 --batch-size 5 --delay 0'
+assert_not_contains "$TMP_ROOT/history-refresh-completed.log" 'Durable history reanalysis remains active'
 
 # A stale weekly snapshot is refreshed through an already-running dashboard.
 : > "$CALL_LOG"

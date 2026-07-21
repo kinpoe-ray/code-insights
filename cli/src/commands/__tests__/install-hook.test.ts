@@ -140,6 +140,18 @@ describe('installHookCommand', () => {
       expect(sessionEndCmd.timeout).toBe(10000);
     });
 
+    it('can install a provider-backed SessionEnd hook for the configured LLM', async () => {
+      const { installHookCommand } = await import('../install-hook.js');
+      await installHookCommand({ native: false });
+
+      const settings = readSettings();
+      const hooks = settings.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+      const command = hooks.SessionEnd[0].hooks[0].command;
+
+      expect(command).toContain('session-end --provider -q');
+      expect(command).not.toContain(' --native ');
+    });
+
     it('preserves existing settings.json content', async () => {
       writeSettings({ theme: 'dark', someOtherKey: 42 });
 

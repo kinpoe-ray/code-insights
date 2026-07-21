@@ -149,20 +149,26 @@ function shellQuote(value: string): string {
   return "'" + value.replace(/'/g, "'\"'\"'") + "'";
 }
 
-function sessionEndHookCommand(): string {
+function sessionEndHookCommand(native: boolean): string {
   const configDir = process.env.CODE_INSIGHTS_CONFIG_DIR;
+  const runnerFlag = native ? '--native' : '--provider';
   if (process.platform === 'win32') {
     const cliEntry = `"${CLI_ENTRY.replace(/"/g, '""')}"`;
     const prefix = configDir
       ? `set "CODE_INSIGHTS_CONFIG_DIR=${configDir.replace(/"/g, '""')}" && `
       : '';
-    return `${prefix}node ${cliEntry} session-end --native -q`;
+    return `${prefix}node ${cliEntry} session-end ${runnerFlag} -q`;
   }
 
   const prefix = configDir
     ? `CODE_INSIGHTS_CONFIG_DIR=${shellQuote(configDir)} `
     : '';
-  return `${prefix}node ${shellQuote(CLI_ENTRY)} session-end --native -q`;
+  return `${prefix}node ${shellQuote(CLI_ENTRY)} session-end ${runnerFlag} -q`;
+}
+
+export interface InstallHookOptions {
+  /** Use Claude CLI when true; use the configured LLM provider when false. */
+  native?: boolean;
 }
 
 /**
@@ -191,14 +197,17 @@ function removeStopHooks(settings: ClaudeSettings): boolean {
  * Running install-hook again removes the old Stop hook (v4.8.x hygiene) and
  * installs a fresh session-end hook.
  */
-export async function installHookCommand(): Promise<void> {
+export async function installHookCommand(options: InstallHookOptions = {}): Promise<void> {
+  const native = options.native ?? true;
   console.log(chalk.cyan('\nInstall Code Insights Hook\n'));
 
-  const sessionEndCommand = sessionEndHookCommand();
+  const sessionEndCommand = sessionEndHookCommand(native);
 
   console.log(chalk.gray('This will add one Claude Code SessionEnd hook:\n'));
   console.log(chalk.white('  SessionEnd hook — Syncs and analyzes sessions when they end'));
-  console.log(chalk.gray('                    Uses your Claude subscription. No API key needed.\n'));
+  console.log(chalk.gray(native
+    ? '                    Uses your Claude subscription. No API key needed.\n'
+    : '                    Uses the LLM provider configured in Code Insights.\n'));
 
   try {
     const settingsTarget = resolveSettingsFileTarget();

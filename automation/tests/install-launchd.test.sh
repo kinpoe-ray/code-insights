@@ -66,11 +66,87 @@ grep -Fq "$ROOT/automation/code-insights-maintenance.sh" "$TMP_ROOT/maintenance.
 grep -Fq "$TMP_ROOT/bin" "$TMP_ROOT/maintenance.plist" || fail 'missing executable directory in PATH'
 grep -Fq '<key>CODE_INSIGHTS_CONFIG_DIR</key>' "$TMP_ROOT/maintenance.plist" || fail 'missing config directory environment key'
 grep -Fq "<string>$TMP_ROOT/home/.code-insights</string>" "$TMP_ROOT/maintenance.plist" || fail 'missing rendered config directory'
-grep -Fq '<integer>3</integer>' "$TMP_ROOT/maintenance.plist" || fail 'missing scheduled hour'
-grep -Fq '<integer>15</integer>' "$TMP_ROOT/maintenance.plist" || fail 'missing scheduled minute'
+grep -Fq '<integer>2</integer>' "$TMP_ROOT/maintenance.plist" || fail 'missing default scheduled hour'
+grep -Fq '<integer>0</integer>' "$TMP_ROOT/maintenance.plist" || fail 'missing default scheduled minute'
+grep -Fq '<key>CODE_INSIGHTS_WINDOW_END</key>' "$TMP_ROOT/maintenance.plist" || fail 'missing maintenance window end environment key'
+grep -Fq '<string>06:00</string>' "$TMP_ROOT/maintenance.plist" || fail 'missing default maintenance window end'
+grep -Fq '<key>CODE_INSIGHTS_BATCH_SIZE</key>' "$TMP_ROOT/maintenance.plist" || fail 'missing maintenance batch size environment key'
+grep -Fq '<string>20</string>' "$TMP_ROOT/maintenance.plist" || fail 'missing default maintenance batch size'
 if command -v plutil >/dev/null 2>&1; then
   plutil -lint "$TMP_ROOT/maintenance.plist" >/dev/null
 fi
+
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/custom-window.plist" --start 18:42 --end 20:30 --batch-size 7
+
+grep -Fq '<integer>18</integer>' "$TMP_ROOT/custom-window.plist" || fail 'custom start hour was not rendered'
+grep -Fq '<integer>42</integer>' "$TMP_ROOT/custom-window.plist" || fail 'custom start minute was not rendered'
+grep -Fq '<string>20:30</string>' "$TMP_ROOT/custom-window.plist" || fail 'custom window end was not rendered'
+grep -Fq '<string>7</string>' "$TMP_ROOT/custom-window.plist" || fail 'custom batch size was not rendered'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/invalid-start.plist" --start 2:00 > "$TMP_ROOT/invalid-start.log" 2>&1
+invalid_start_status=$?
+set -e
+[[ "$invalid_start_status" -eq 64 ]] || fail "expected malformed --start to exit 64, got $invalid_start_status"
+grep -Fq 'Invalid --start time: 2:00' "$TMP_ROOT/invalid-start.log" || fail 'malformed --start did not explain the validation error'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/out-of-range-start.plist" --start 24:00 > "$TMP_ROOT/out-of-range-start.log" 2>&1
+out_of_range_start_status=$?
+set -e
+[[ "$out_of_range_start_status" -eq 64 ]] || fail "expected out-of-range --start to exit 64, got $out_of_range_start_status"
+grep -Fq 'Invalid --start time: 24:00' "$TMP_ROOT/out-of-range-start.log" || fail 'out-of-range --start did not explain the validation error'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/invalid-end.plist" --end 6:00 > "$TMP_ROOT/invalid-end.log" 2>&1
+invalid_end_status=$?
+set -e
+[[ "$invalid_end_status" -eq 64 ]] || fail "expected malformed --end to exit 64, got $invalid_end_status"
+grep -Fq 'Invalid --end time: 6:00' "$TMP_ROOT/invalid-end.log" || fail 'malformed --end did not explain the validation error'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/out-of-range-end.plist" --end 06:60 > "$TMP_ROOT/out-of-range-end.log" 2>&1
+out_of_range_end_status=$?
+set -e
+[[ "$out_of_range_end_status" -eq 64 ]] || fail "expected out-of-range --end to exit 64, got $out_of_range_end_status"
+grep -Fq 'Invalid --end time: 06:60' "$TMP_ROOT/out-of-range-end.log" || fail 'out-of-range --end did not explain the validation error'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/cross-midnight.plist" --start 23:00 --end 02:00 > "$TMP_ROOT/cross-midnight.log" 2>&1
+cross_midnight_status=$?
+set -e
+[[ "$cross_midnight_status" -eq 64 ]] || fail "expected cross-midnight window to exit 64, got $cross_midnight_status"
+grep -Fq 'Invalid maintenance window: --start must be earlier than --end; cross-midnight windows are not supported.' "$TMP_ROOT/cross-midnight.log" || fail 'cross-midnight window did not explain the supported ordering'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/empty-window.plist" --start 06:00 --end 06:00 > "$TMP_ROOT/empty-window.log" 2>&1
+empty_window_status=$?
+set -e
+[[ "$empty_window_status" -eq 64 ]] || fail "expected empty maintenance window to exit 64, got $empty_window_status"
+grep -Fq 'Invalid maintenance window: --start must be earlier than --end' "$TMP_ROOT/empty-window.log" || fail 'empty maintenance window did not explain the supported ordering'
+
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --render "$TMP_ROOT/invalid-batch-size.plist" --batch-size 0 > "$TMP_ROOT/invalid-batch-size.log" 2>&1
+invalid_batch_size_status=$?
+set -e
+[[ "$invalid_batch_size_status" -eq 64 ]] || fail "expected zero --batch-size to exit 64, got $invalid_batch_size_status"
+grep -Fq 'Invalid --batch-size: 0 (expected a positive integer)' "$TMP_ROOT/invalid-batch-size.log" || fail 'invalid batch size did not explain the validation error'
 
 # Uninstall is a recovery action: it must unload/remove the agent even when the
 # checkout or CLI it originally referenced no longer exists.
@@ -274,6 +350,8 @@ HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
 IFS='|' read -r staged_plist staging_destination < "$PLIST_MV_LOG"
 [[ -n "$staged_plist" && -n "$staging_destination" ]] || fail 'successful install did not replace the plist'
 [[ "$(dirname "$staged_plist")" == "$(dirname "$staging_destination")" ]] || fail 'plist was not staged in the LaunchAgents directory'
+grep -Fxq 'install-hook --provider' "$CLI_CALL_LOG" \
+  || fail 'successful install did not configure the SessionEnd hook for the configured provider'
 rm -f "$installed_plist"
 
 # User-managed LaunchAgent plist symlinks are rejected before any launchctl

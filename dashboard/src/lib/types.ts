@@ -269,4 +269,8 @@ export interface LLMConfig {
   model?: string;
   apiKey?: string;      // masked by server before returning (first4...last4)
   baseUrl?: string;
+  providers?: Array<{
+    id: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'llamacpp';
+    supportsCustomBaseUrl: boolean;
+  }>;
 }

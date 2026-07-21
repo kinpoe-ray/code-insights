@@ -7,6 +7,13 @@
 
 ---
 
+> **Shipped-divergence note (2026-07-18):** The current implementation uses
+> `POST /api/dispatch/generate` and `POST /api/dispatch/image-prompt`, with
+> `technical`, `accessible`, and `quick-tips` tones. Older export-route,
+> Journal-entry, or “scrubbed at analysis time” statements below are retained
+> as design history and must not override current source or
+> [../SECURITY-MODEL.md](../SECURITY-MODEL.md).
+
 ## Problem
 
 Developers accumulate structured learnings, decisions, and techniques across AI coding sessions. These live in the `insights` table — processed, categorized, and evidenced. But they never escape the tool. There is no way to turn them into something shareable: a blog post, a team write-up, a personal changelog entry.
@@ -261,7 +268,9 @@ The user context paragraph is NOT scrubbed — the user wrote it intentionally. 
 
 ### No schema changes needed
 
-All required data (`insights` table) exists in Schema V9. No new tables, no migrations.
+At the time of this historical design, all required data existed in the
+`insights` table and no new migration was planned. The current database is
+Schema V11.
 
 ---
 

@@ -5,13 +5,14 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "build": "vite build",
+    "build": "pnpm run typecheck && vite build",
     "dev": "vite",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",

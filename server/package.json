@@ -12,10 +12,11 @@
     "dev": "tsc --watch",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
   },
   "license": "MIT",
   "private": true,

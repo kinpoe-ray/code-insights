@@ -12,6 +12,89 @@ CODE_INSIGHTS_BIN="${CODE_INSIGHTS_BIN:-$(command -v code-insights 2>/dev/null |
 CONFIG_DIR="${CODE_INSIGHTS_CONFIG_DIR:-$HOME/.code-insights}"
 LOG_DIR="$CONFIG_DIR/logs"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+START_TIME='02:00'
+END_TIME='06:00'
+BATCH_SIZE='20'
+
+usage() {
+  printf 'Usage: %s [--install | --uninstall | --render DESTINATION] [--start HH:MM] [--end HH:MM] [--batch-size N]\n' "$0" >&2
+}
+
+ACTION='--install'
+RENDER_DESTINATION=''
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    --install|--uninstall)
+      ACTION=$1
+      shift
+      ;;
+    --render)
+      [[ $# -ge 2 && "$2" != --* ]] || { usage; exit 64; }
+      ACTION=$1
+      RENDER_DESTINATION=$2
+      shift 2
+      ;;
+    --start|--end|--batch-size)
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+fi
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --start)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      START_TIME=$2
+      shift 2
+      ;;
+    --end)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      END_TIME=$2
+      shift 2
+      ;;
+    --batch-size)
+      [[ $# -ge 2 ]] || { usage; exit 64; }
+      BATCH_SIZE=$2
+      shift 2
+      ;;
+    *)
+      usage
+      exit 64
+      ;;
+  esac
+done
+
+if [[ ! "$START_TIME" =~ ^([0-9]{2}):([0-9]{2})$ ]]; then
+  printf 'Invalid --start time: %s (expected HH:MM)\n' "$START_TIME" >&2
+  exit 64
+fi
+START_HOUR=$((10#${BASH_REMATCH[1]}))
+START_MINUTE=$((10#${BASH_REMATCH[2]}))
+if [[ "$START_HOUR" -gt 23 || "$START_MINUTE" -gt 59 ]]; then
+  printf 'Invalid --start time: %s (expected HH:MM)\n' "$START_TIME" >&2
+  exit 64
+fi
+if [[ ! "$END_TIME" =~ ^([0-9]{2}):([0-9]{2})$ ]]; then
+  printf 'Invalid --end time: %s (expected HH:MM)\n' "$END_TIME" >&2
+  exit 64
+fi
+END_HOUR=$((10#${BASH_REMATCH[1]}))
+END_MINUTE=$((10#${BASH_REMATCH[2]}))
+if [[ "$END_HOUR" -gt 23 || "$END_MINUTE" -gt 59 ]]; then
+  printf 'Invalid --end time: %s (expected HH:MM)\n' "$END_TIME" >&2
+  exit 64
+fi
+if [[ $((START_HOUR * 60 + START_MINUTE)) -ge $((END_HOUR * 60 + END_MINUTE)) ]]; then
+  printf 'Invalid maintenance window: --start must be earlier than --end; cross-midnight windows are not supported.\n' >&2
+  exit 64
+fi
+if [[ ! "$BATCH_SIZE" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'Invalid --batch-size: %s (expected a positive integer)\n' "$BATCH_SIZE" >&2
+  exit 64
+fi
 
 xml_sed_escape() {
   local value=$1
@@ -38,6 +121,10 @@ render_plist() {
     -e "s|@PATH@|$(xml_sed_escape "$path_value")|g" \
     -e "s|@CODE_INSIGHTS_BIN@|$(xml_sed_escape "$CODE_INSIGHTS_BIN")|g" \
     -e "s|@CONFIG_DIR@|$(xml_sed_escape "$CONFIG_DIR")|g" \
+    -e "s|@WINDOW_END@|$(xml_sed_escape "$END_TIME")|g" \
+    -e "s|@BATCH_SIZE@|$(xml_sed_escape "$BATCH_SIZE")|g" \
+    -e "s|@START_HOUR@|$(xml_sed_escape "$START_HOUR")|g" \
+    -e "s|@START_MINUTE@|$(xml_sed_escape "$START_MINUTE")|g" \
     -e "s|@STDOUT_LOG@|$(xml_sed_escape "$LOG_DIR/launchd.stdout.log")|g" \
     -e "s|@STDERR_LOG@|$(xml_sed_escape "$LOG_DIR/launchd.stderr.log")|g" \
     "$TEMPLATE" > "$destination"
@@ -50,14 +137,12 @@ validate_inputs() {
   [[ -f "$TEMPLATE" ]] || { printf 'LaunchAgent template not found: %s\n' "$TEMPLATE" >&2; exit 66; }
 }
 
-case "${1:---install}" in
+case "$ACTION" in
   --render)
-    [[ $# -eq 2 ]] || { printf 'Usage: %s --render DESTINATION\n' "$0" >&2; exit 64; }
     validate_inputs
-    render_plist "$2"
+    render_plist "$RENDER_DESTINATION"
     ;;
   --install)
-    [[ $# -le 1 ]] || { printf 'Usage: %s --install\n' "$0" >&2; exit 64; }
     validate_inputs
     [[ "$(uname -s)" == 'Darwin' ]] || { printf 'LaunchAgent installation requires macOS.\n' >&2; exit 69; }
     NODE_BIN=$(command -v node 2>/dev/null || true)
@@ -480,17 +565,16 @@ case "${1:---install}" in
     new_agent_bootstrapped=1
     launchctl bootstrap "gui/$(id -u)" "$PLIST"
     hook_install_started=1
-    if "$CODE_INSIGHTS_BIN" install-hook; then
+    if "$CODE_INSIGHTS_BIN" install-hook --provider; then
       :
     else
       hook_status=$?
       exit "$hook_status"
     fi
     install_committed=1
-    printf 'Installed %s (daily at 03:15) and the Claude SessionEnd hook.\n' "$PLIST"
+    printf 'Installed %s (daily at %s) and the Claude SessionEnd hook.\n' "$PLIST" "$START_TIME"
     ;;
   --uninstall)
-    [[ $# -eq 1 ]] || { printf 'Usage: %s --uninstall\n' "$0" >&2; exit 64; }
     uninstall_status=0
     if [[ "$(uname -s)" == 'Darwin' ]]; then
       if launchctl bootout "gui/$(id -u)" "$PLIST" >/dev/null 2>&1; then
@@ -530,7 +614,7 @@ case "${1:---install}" in
     fi
     ;;
   *)
-    printf 'Usage: %s [--install | --uninstall | --render DESTINATION]\n' "$0" >&2
+    usage
     exit 64
     ;;
 esac

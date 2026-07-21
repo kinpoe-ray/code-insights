@@ -5,85 +5,55 @@
  *   --native   Use claude -p (user's Claude subscription, zero config)
  *   (default)  Use configured LLM provider (OpenAI, Anthropic, Gemini, Ollama)
  *
- * Resume detection:
- *   Skips analysis if analysis_usage.session_message_count matches current
- *   sessions.message_count — the session has not changed since last analysis.
- *   Bypassed with --force.
+ * Resume detection is fail-closed: both passes must match the exact input,
+ * pipeline revision, provider, and model. Bypassed with --force.
  */
 
+import type Database from 'better-sqlite3';
 import chalk from 'chalk';
 import { getDb } from '../db/client.js';
 import { ClaudeNativeRunner } from '../analysis/native-runner.js';
 import { ProviderRunner } from '../analysis/provider-runner.js';
 import {
-  SHARED_ANALYST_SYSTEM_PROMPT,
-  buildSessionAnalysisInstructions,
-  buildPromptQualityInstructions,
-  buildCacheableConversationBlock,
-} from '../analysis/prompts.js';
-import { formatMessagesForAnalysis } from '../analysis/message-format.js';
-import { parseAnalysisResponse, parsePromptQualityResponse } from '../analysis/response-parsers.js';
-import {
-  saveInsightsToDb,
-  deleteSessionInsights,
-  saveFacetsToDb,
-  convertToInsightRows,
-  convertPQToInsightRow,
-  applyGeneratedTitle,
-} from '../analysis/analysis-db.js';
-import { saveAnalysisUsage } from '../analysis/analysis-usage-db.js';
+  freezeSessionAnalysisInput,
+  isAnalysisLLMClient,
+  preparePromptQualityPass,
+  prepareSessionAnalysisPass,
+  publishPreparedTwoPass,
+  TWO_PASS_PIPELINE_REVISION,
+  type FrozenSessionAnalysisInput,
+} from '../analysis/two-pass-analysis.js';
 import type { AnalysisRunner } from '../analysis/runner-types.js';
-import type { SQLiteMessageRow } from '../analysis/prompt-types.js';
 import { acquireLlmLock } from '../analysis/llm-lock.js';
-
-// ── DB types ──────────────────────────────────────────────────────────────────
-
-interface SessionRow {
-  id: string;
-  project_id: string;
-  project_name: string;
-  project_path: string;
-  summary: string | null;
-  ended_at: string;
-  message_count: number;
-  compact_count: number | null;
-  auto_compact_count: number | null;
-  slash_commands: string | null;
-}
-
-// ── Session query helpers ─────────────────────────────────────────────────────
-
-function loadSessionForAnalysis(sessionId: string): SessionRow | null {
-  const db = getDb();
-  return db.prepare(`
-    SELECT id, project_id, project_name, project_path, summary, ended_at,
-           message_count, compact_count, auto_compact_count, slash_commands
-    FROM sessions
-    WHERE id = ? AND deleted_at IS NULL
-  `).get(sessionId) as SessionRow | null;
-}
-
-function loadSessionMessages(sessionId: string): SQLiteMessageRow[] {
-  const db = getDb();
-  return db.prepare(`
-    SELECT id, session_id, type, content, thinking, tool_calls, tool_results, usage, timestamp, parent_id
-    FROM messages
-    WHERE session_id = ?
-    ORDER BY timestamp ASC
-  `).all(sessionId) as SQLiteMessageRow[];
-}
 
 // ── Resume detection ──────────────────────────────────────────────────────────
 
-function isAlreadyAnalyzed(sessionId: string, currentMessageCount: number): boolean {
-  const db = getDb();
+function isAlreadyAnalyzed(
+  input: FrozenSessionAnalysisInput,
+  runner: AnalysisRunner,
+  db: Database.Database,
+): boolean {
+  if (typeof runner.provider !== 'string' || typeof runner.model !== 'string') {
+    return false;
+  }
   const row = db.prepare(`
-    SELECT COUNT(DISTINCT analysis_type) AS completed_passes
+    SELECT COUNT(*) AS completed_passes
     FROM analysis_usage
     WHERE session_id = ?
       AND analysis_type IN ('session', 'prompt_quality')
       AND session_message_count = ?
-  `).get(sessionId, currentMessageCount) as { completed_passes: number };
+      AND provider = ?
+      AND model = ?
+      AND input_revision = ?
+      AND pipeline_revision = ?
+  `).get(
+    input.session.id,
+    input.session.message_count,
+    runner.provider,
+    runner.model,
+    input.inputRevision,
+    TWO_PASS_PIPELINE_REVISION,
+  ) as { completed_passes: number };
 
   return row.completed_passes === 2;
 }
@@ -110,11 +80,15 @@ export interface InsightsCommandOptions {
  */
 export async function runInsightsCommand(options: InsightsCommandOptions): Promise<void> {
   const log = options.quiet ? () => {} : console.log.bind(console);
+  const db = getDb();
 
   // 1. Build the runner (or reuse a pre-built one from batch callers)
   let runner: AnalysisRunner;
   if (options._runner) {
     runner = options._runner;
+    if (!options.native && !isAnalysisLLMClient(runner)) {
+      throw new Error('Configured provider runner does not implement the LLMClient interface.');
+    }
   } else if (options.native) {
     ClaudeNativeRunner.validate();
     runner = new ClaudeNativeRunner({ model: options.model });
@@ -122,143 +96,25 @@ export async function runInsightsCommand(options: InsightsCommandOptions): Promi
     runner = ProviderRunner.fromConfig();
   }
 
-  // 2. Load session from DB
-  const session = loadSessionForAnalysis(options.sessionId);
-  if (!session) {
-    throw new Error(`Session '${options.sessionId}' not found in local database.`);
-  }
-
-  // SessionData is the shared type accepted by analysis-db converters.
-  // SessionRow uses null for optional fields (SQLite); SessionData uses undefined.
-  const sessionData = {
-    ...session,
-    compact_count: session.compact_count ?? undefined,
-    auto_compact_count: session.auto_compact_count ?? undefined,
-    slash_commands: session.slash_commands ?? undefined,
-  };
+  // 2. Freeze one revision for both remote passes.
+  const input = freezeSessionAnalysisInput(options.sessionId, db);
 
   // 3. Resume detection (skipped when --force)
   if (!options.force) {
-    if (isAlreadyAnalyzed(options.sessionId, session.message_count)) {
-      return; // already analyzed at this session length
+    if (isAlreadyAnalyzed(input, runner, db)) {
+      return;
     }
   }
 
-  // 4. Load messages
-  const messages = loadSessionMessages(options.sessionId);
+  // 4. Prepare both remote passes. Neither call can mutate visible results.
+  const sessionStage = await prepareSessionAnalysisPass(input, runner);
+  const promptQualityStage = await preparePromptQualityPass(input, runner, sessionStage);
 
-  // 5. Build shared conversation block (same for both passes)
-  const formattedMessages = formatMessagesForAnalysis(messages);
-
-  // Session metadata for prompt builders
-  const slashCommands = (() => {
-    try {
-      return JSON.parse(session.slash_commands ?? '[]') as string[];
-    } catch {
-      return [] as string[];
-    }
-  })();
-  const sessionMeta = {
-    compactCount: session.compact_count ?? 0,
-    autoCompactCount: session.auto_compact_count ?? 0,
-    slashCommands,
-  };
-  const humanMessageCount = messages.filter(m => m.type === 'user').length;
-  const assistantMessageCount = messages.filter(m => m.type === 'assistant').length;
-  const toolExchangeCount = messages.filter(m => m.tool_calls).length;
-
-  // ── Pass 1: Session analysis ──────────────────────────────────────────────
-
-  const sessionInstructions = buildSessionAnalysisInstructions(
-    session.project_name,
-    session.summary,
-    sessionMeta,
-  );
-  const sessionUserPrompt = `${buildCacheableConversationBlock(formattedMessages).text}\n${sessionInstructions}`;
-
-  const sessionResult = await runner.runAnalysis({
-    systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
-    userPrompt: sessionUserPrompt,
-  });
-
-  const parsedSession = parseAnalysisResponse(sessionResult.rawJson);
-  if (!parsedSession.success) {
-    throw new Error(`Session analysis failed: ${parsedSession.error.error_message}`);
-  }
-
-  // Save session insights (upsert: insert new, delete old)
-  const sessionInsights = convertToInsightRows(parsedSession.data, sessionData);
-  saveInsightsToDb(sessionInsights);
-  applyGeneratedTitle(session.id, sessionInsights);
-  deleteSessionInsights(session.id, {
-    excludeTypes: ['prompt_quality'],
-    excludeIds: sessionInsights.map(i => i.id),
-  });
-
-  if (parsedSession.data.facets) {
-    saveFacetsToDb(session.id, parsedSession.data.facets);
-  }
-
-  saveAnalysisUsage({
-    session_id: session.id,
-    analysis_type: 'session',
-    provider: sessionResult.provider,
-    model: sessionResult.model,
-    input_tokens: sessionResult.inputTokens,
-    output_tokens: sessionResult.outputTokens,
-    cache_creation_tokens: sessionResult.cacheCreationTokens,
-    cache_read_tokens: sessionResult.cacheReadTokens,
-    estimated_cost_usd: 0,
-    duration_ms: sessionResult.durationMs,
-    session_message_count: session.message_count,
-  });
-
-  // ── Pass 2: Prompt quality analysis ──────────────────────────────────────
-
-  const pqInstructions = buildPromptQualityInstructions(
-    session.project_name,
-    { humanMessageCount, assistantMessageCount, toolExchangeCount },
-    sessionMeta,
-  );
-  const pqUserPrompt = `${buildCacheableConversationBlock(formattedMessages).text}\n${pqInstructions}`;
-
-  const pqResult = await runner.runAnalysis({
-    systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
-    userPrompt: pqUserPrompt,
-  });
-
-  const parsedPQ = parsePromptQualityResponse(pqResult.rawJson);
-  if (!parsedPQ.success) {
-    throw new Error(`Prompt quality analysis failed: ${parsedPQ.error.error_message}`);
-  }
-
-  const pqInsight = convertPQToInsightRow(parsedPQ.data, sessionData);
-  saveInsightsToDb([pqInsight]);
-  deleteSessionInsights(session.id, {
-    excludeTypes: ['summary', 'decision', 'learning'],
-    excludeIds: [pqInsight.id],
-  });
-
-  saveAnalysisUsage({
-    session_id: session.id,
-    analysis_type: 'prompt_quality',
-    provider: pqResult.provider,
-    model: pqResult.model,
-    input_tokens: pqResult.inputTokens,
-    output_tokens: pqResult.outputTokens,
-    cache_creation_tokens: pqResult.cacheCreationTokens,
-    cache_read_tokens: pqResult.cacheReadTokens,
-    estimated_cost_usd: 0,
-    duration_ms: pqResult.durationMs,
-    session_message_count: session.message_count,
-  });
-
-  // ── Summary line ──────────────────────────────────────────────────────────
-
-  // Non-PQ insight count (excludes summary's own entry which is always saved)
-  const insightCount = sessionInsights.length;
-  const pqScore = parsedPQ.data.efficiency_score;
-  log(chalk.green(`[Code Insights] Session analyzed: ${insightCount} insights, PQ ${pqScore}/100`));
+  // 5. Publish only after both passes succeeded, in one SQLite transaction.
+  const published = publishPreparedTwoPass(input, sessionStage, promptQualityStage, undefined, db);
+  log(chalk.green(
+    `[Code Insights] Session analyzed: ${published.insightCount} insights, PQ ${published.promptQualityScore}/100`,
+  ));
 }
 
 // ── CLI command entry point ───────────────────────────────────────────────────
@@ -344,25 +200,20 @@ export async function insightsCheckCommand(opts: {
     const db = getDb();
     const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
 
-    const rows = db.prepare(`
+    const recentRows = db.prepare(`
       SELECT s.id, s.generated_title, s.custom_title, s.started_at, s.message_count
       FROM sessions s
-      LEFT JOIN analysis_usage session_usage
-        ON session_usage.session_id = s.id
-       AND session_usage.analysis_type = 'session'
-      LEFT JOIN analysis_usage pq_usage
-        ON pq_usage.session_id = s.id
-       AND pq_usage.analysis_type = 'prompt_quality'
       WHERE s.started_at >= ?
         AND s.deleted_at IS NULL
-        AND (
-          session_usage.session_id IS NULL
-          OR session_usage.session_message_count IS NOT s.message_count
-          OR pq_usage.session_id IS NULL
-          OR pq_usage.session_message_count IS NOT s.message_count
-        )
       ORDER BY s.started_at DESC
     `).all(cutoff) as Array<{ id: string; generated_title: string | null; custom_title: string | null; started_at: string; message_count: number }>;
+
+    if (recentRows.length === 0) return;
+    const runner = ProviderRunner.fromConfig();
+    const rows = recentRows.filter(row => {
+      const input = freezeSessionAnalysisInput(row.id, db);
+      return !isAlreadyAnalyzed(input, runner, db);
+    });
 
     const count = rows.length;
 
@@ -381,7 +232,6 @@ export async function insightsCheckCommand(opts: {
       const lock = acquireCommandLlmLock(quiet);
       if (!lock) return;
       try {
-        const runner = ProviderRunner.fromConfig();
         let successCount = 0;
 
         for (let i = 0; i < rows.length; i++) {
@@ -413,7 +263,6 @@ export async function insightsCheckCommand(opts: {
       const lock = acquireCommandLlmLock(quiet);
       if (!lock) return;
       try {
-        const runner = ProviderRunner.fromConfig();
         for (const row of rows) {
           try {
             await runInsightsCommand({ sessionId: row.id, native: false, quiet: true, _runner: runner });

@@ -33,30 +33,15 @@ export interface AnalysisResult {
     /** Anthropic: tokens read from the prompt cache (90% discount vs normal input). */
     cacheReadTokens?: number;
   };
-}
-
-// ─── Shared constants ─────────────────────────────────────────────────────────
-
-/**
- * Maximum input tokens to send to the LLM (leaves room for the response).
- *
- * Provider-aware: llamacpp targets small quantized models (12B-27B GGUF) with limited
- * context windows. The CONVERSATION budget must leave room for:
- *   - ~3K tokens of system prompt + analysis instructions (prompt overhead)
- *   - 4K max_tokens reserved for model output
- * With a 32K context llama-server (-c 32768): 32K - 3K prompt - 4K output ≈ 25K available.
- * At 12K conversation budget with 80% chunking (9.6K effective), total request stays under 17K,
- * fitting safely in even a 16K context window.
- *
- * Previously 24K, which caused exceed_context_size_error because it didn't account for overhead.
- *
- * All other providers (hosted APIs with large context windows) use the 80K default.
- */
-export const MAX_INPUT_TOKENS = 80000;
-
-export function getMaxInputTokens(provider: string): number {
-  if (provider === 'llamacpp') return 12288;
-  return MAX_INPUT_TOKENS;
+  completeness?: 'complete' | 'partial' | 'none';
+  stats?: {
+    chunkCount: number;
+    successfulChunks: number;
+    failedChunks: number;
+    callCount: number;
+    facetCallCount: number;
+  };
+  warnings?: string[];
 }
 
 // ─── Shared helper ────────────────────────────────────────────────────────────

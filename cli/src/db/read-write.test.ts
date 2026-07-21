@@ -618,6 +618,7 @@ describe('Database read/write operations', () => {
     const insertSnapshot = (overrides: Partial<{
       period: string;
       projectId: string;
+      sourceScope: string;
       resultsJson: string;
       generatedAt: string;
       windowStart: string | null;
@@ -628,6 +629,7 @@ describe('Database read/write operations', () => {
       const defaults = {
         period: '30d',
         projectId: '__all__',
+        sourceScope: '__all__',
         resultsJson: JSON.stringify({ 'friction-wins': { narrative: 'test' } }),
         generatedAt: '2025-06-15T10:00:00Z',
         windowStart: '2025-05-16T10:00:00Z',
@@ -637,21 +639,22 @@ describe('Database read/write operations', () => {
       };
       const d = { ...defaults, ...overrides };
       testDb.prepare(`
-        INSERT INTO reflect_snapshots (period, project_id, results_json, generated_at, window_start, window_end, session_count, facet_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(d.period, d.projectId, d.resultsJson, d.generatedAt, d.windowStart, d.windowEnd, d.sessionCount, d.facetCount);
+        INSERT INTO reflect_snapshots (period, project_id, source_scope, results_json, generated_at, window_start, window_end, session_count, facet_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(d.period, d.projectId, d.sourceScope, d.resultsJson, d.generatedAt, d.windowStart, d.windowEnd, d.sessionCount, d.facetCount);
     };
 
     it('inserts and reads a snapshot', () => {
       insertSnapshot();
 
       const row = testDb.prepare(
-        'SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ?'
-      ).get('30d', '__all__') as Record<string, unknown>;
+        'SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ? AND source_scope = ?'
+      ).get('30d', '__all__', '__all__') as Record<string, unknown>;
 
       expect(row).toBeDefined();
       expect(row.period).toBe('30d');
       expect(row.project_id).toBe('__all__');
+      expect(row.source_scope).toBe('__all__');
       expect(row.session_count).toBe(25);
       expect(row.facet_count).toBe(100);
 
@@ -661,8 +664,8 @@ describe('Database read/write operations', () => {
 
     it('returns undefined for non-existent snapshot', () => {
       const row = testDb.prepare(
-        'SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ?'
-      ).get('7d', '__all__');
+        'SELECT * FROM reflect_snapshots WHERE period = ? AND project_id = ? AND source_scope = ?'
+      ).get('7d', '__all__', '__all__');
 
       expect(row).toBeUndefined();
     });
@@ -671,16 +674,16 @@ describe('Database read/write operations', () => {
       insertSnapshot({ sessionCount: 20 });
       // Upsert with new data
       testDb.prepare(`
-        INSERT INTO reflect_snapshots (period, project_id, results_json, generated_at, window_start, window_end, session_count, facet_count)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(period, project_id) DO UPDATE SET
+        INSERT INTO reflect_snapshots (period, project_id, source_scope, results_json, generated_at, window_start, window_end, session_count, facet_count)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(period, project_id, source_scope) DO UPDATE SET
           results_json = excluded.results_json,
           generated_at = excluded.generated_at,
           window_start = excluded.window_start,
           window_end = excluded.window_end,
           session_count = excluded.session_count,
           facet_count = excluded.facet_count
-      `).run('30d', '__all__', '{"updated":true}', '2025-06-16T10:00:00Z', '2025-05-17T10:00:00Z', '2025-06-16T10:00:00Z', 35, 150);
+      `).run('30d', '__all__', '__all__', '{"updated":true}', '2025-06-16T10:00:00Z', '2025-05-17T10:00:00Z', '2025-06-16T10:00:00Z', 35, 150);
 
       const rows = testDb.prepare('SELECT * FROM reflect_snapshots').all();
       expect(rows).toHaveLength(1);
@@ -690,13 +693,14 @@ describe('Database read/write operations', () => {
       expect(row.results_json).toBe('{"updated":true}');
     });
 
-    it('stores separate snapshots per period+project combo', () => {
+    it('stores separate snapshots per period+project+source combo', () => {
       insertSnapshot({ period: '30d', projectId: '__all__' });
       insertSnapshot({ period: '7d', projectId: '__all__' });
       insertSnapshot({ period: '30d', projectId: 'proj-123' });
+      insertSnapshot({ period: '30d', projectId: '__all__', sourceScope: 'codex-cli' });
 
       const rows = testDb.prepare('SELECT * FROM reflect_snapshots').all();
-      expect(rows).toHaveLength(3);
+      expect(rows).toHaveLength(4);
     });
 
     it('is cleared by DELETE FROM reflect_snapshots (reset flow)', () => {

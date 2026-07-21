@@ -2,7 +2,10 @@
 
 > Reference document for tools in the AI session analysis, codebase knowledge, and agent context space.
 > Maintained for positioning awareness and feature differentiation tracking.
-> Last updated: 2026-05-06
+> Last updated: 2026-07-18
+>
+> Feature names such as `attach`, `context`, and `.code-insights.md` below are
+> retained as unimplemented design concepts, not current CLI capabilities.
 
 ---
 
@@ -44,10 +47,10 @@ Entire CLI captures rich context behind code changes: prompts, transcripts, and 
 | Primary consumer | The AI agent (runtime) | The human developer (analytics) |
 | Time orientation | Present task continuity | Cross-session pattern aggregation |
 | Source support | Entire CLI only | 5 providers (Claude Code, Cursor, Codex CLI, Copilot CLI, VS Code Copilot Chat) |
-| Output | Agent context window | Dashboard, CLI stats, `.code-insights.md` |
+| Output | Agent context window | Dashboard, CLI stats, insights, reflections, exports |
 | Core question | "What was happening in this session?" | "How are my patterns changing over time?" |
-| Freshness gate | None | `code-insights attach --check` (CI staleness gate) |
-| Privacy model | Entire CLI captures + stores session data | Fully local SQLite, never leaves machine |
+| Freshness gate | None | None currently (`attach --check` exists only in a design snapshot) |
+| Privacy model | Entire CLI captures + stores session data | Local SQLite; configured remote LLM analysis and opt-out telemetry are explicit boundaries |
 
 ### Feature gaps this surfaces in Code Insights
 
@@ -57,20 +60,27 @@ Entire CLI captures rich context behind code changes: prompts, transcripts, and 
 
 **`what-happened`:** Partially covered by Code Insights' Key Decisions extraction in `.code-insights.md`, but at a higher abstraction level (architectural decisions across many sessions, not per-line blame context).
 
-**`search`:** Phase 2 of the codebase knowledge feature (`code-insights context <topic>`) covers similar ground — querying past work by topic. Code Insights' version is aggregated and multi-source; Entire.io's is raw session retrieval tied to their CLI.
+**`search`:** The retained codebase-knowledge design proposes
+`code-insights context <topic>` for similar topic queries, but that command is
+not implemented. If built, Code Insights' version would be aggregated and
+multi-source; Entire.io's is raw session retrieval tied to their CLI.
 
 ### Strategic notes
 
 - Entire.io's open-sourcing **validates** the thesis that AI session data is valuable infrastructure.
 - Their single-runtime constraint (tied to Entire CLI) leaves Code Insights' multi-source neutrality intact as the key moat.
-- The `--check` CI staleness gate in `code-insights attach` has no equivalent in Entire.io or any comparable tool (as of 2026-05-06).
+- The unimplemented `attach --check` design could add a CI staleness gate; it
+  must not be presented as a current differentiator.
 - Mention in README "Related projects" section. Positioning: "Entire builds the pipe; Code Insights builds the mirror."
 
 ---
 
 ## Claude Code Memory
 
-Claude Code's built-in `CLAUDE.md` system serves as agent bootstrap context. Code Insights' `code-insights attach` generates and injects rules into `CLAUDE.md` via sentinels — making Code Insights a *source* for CLAUDE.md content rather than a competitor to it.
+Claude Code's built-in `CLAUDE.md` system serves as agent bootstrap context. A
+retained Code Insights design proposes an `attach` command that would generate
+and inject rules into bootstrap files, but the current CLI does not implement
+that command.
 
 ---
 

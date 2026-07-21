@@ -1,12 +1,19 @@
 // Gemini provider implementation (server-side, no browser dependencies)
 
 import type { LLMClient, LLMMessage, LLMResponse, ChatOptions } from '../types.js';
-import { flattenContent } from '../types.js';
+import { defaultLLMCapabilities, flattenContent } from '../types.js';
+import {
+  invalidProviderResponse,
+  isProviderRecord,
+  parseProviderJson,
+} from './provider-response.js';
 
 export function createGeminiClient(apiKey: string, model: string): LLMClient {
   return {
     provider: 'gemini',
     model,
+    capabilities: defaultLLMCapabilities('gemini'),
+    prepareMessages: (messages) => messages,
 
     async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
       const systemMessage = messages.find(m => m.role === 'system');
@@ -41,43 +48,60 @@ export function createGeminiClient(apiKey: string, model: string): LLMClient {
         };
       }
 
-      // Gemini REST API requires the API key as a query parameter (not a header).
-      // This is Google's documented authentication pattern for the Generative Language API.
-      const response = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
+      let response: Response;
+      try {
+        response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+          {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
           signal: options?.signal,
           body: JSON.stringify(body),
-        }
-      );
-
-      if (!response.ok) {
-        const error = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        const detail = error.error?.message;
-        if (response.status === 401 || response.status === 403) {
-          throw new Error(`Invalid API key. Check your Gemini API key in \`code-insights config llm\`.${detail ? ` (${detail})` : ''}`);
-        }
-        if (response.status === 429) {
-          throw new Error(`Rate limited or quota exceeded. Check your Gemini account usage.${detail ? ` (${detail})` : ''}`);
-        }
-        if (response.status >= 500) {
-          throw new Error(`Gemini service error (HTTP ${response.status}). Try again later.${detail ? ` (${detail})` : ''}`);
-        }
-        throw new Error(detail || `Gemini API error (HTTP ${response.status})`);
+          },
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        throw new Error('Gemini request could not be completed.');
       }
 
-      const data = await response.json() as {
-        candidates?: Array<{ content: { parts: Array<{ text: string }> } }>;
-        usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
-      };
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          throw new Error(`Gemini request was rejected (HTTP ${response.status}).`);
+        }
+        if (response.status === 429) {
+          throw new Error('Gemini request was rate limited (HTTP 429).');
+        }
+        throw new Error(`Gemini request failed (HTTP ${response.status}).`);
+      }
+
+      const data = await parseProviderJson(response, 'Gemini');
+      if (!isProviderRecord(data) || !Array.isArray(data.candidates)) {
+        invalidProviderResponse('Gemini');
+      }
+      const candidate = data.candidates[0];
+      const content = isProviderRecord(candidate) ? candidate.content : undefined;
+      const parts = isProviderRecord(content) ? content.parts : undefined;
+      const firstPart = Array.isArray(parts) ? parts[0] : undefined;
+      if (!isProviderRecord(firstPart) || typeof firstPart.text !== 'string') {
+        invalidProviderResponse('Gemini');
+      }
+      const usage = isProviderRecord(data.usageMetadata)
+        && typeof data.usageMetadata.promptTokenCount === 'number'
+        && typeof data.usageMetadata.candidatesTokenCount === 'number'
+        ? {
+            promptTokenCount: data.usageMetadata.promptTokenCount,
+            candidatesTokenCount: data.usageMetadata.candidatesTokenCount,
+          }
+        : undefined;
 
       return {
-        content: data.candidates?.[0]?.content?.parts?.[0]?.text || '',
-        usage: data.usageMetadata ? {
-          inputTokens: data.usageMetadata.promptTokenCount,
-          outputTokens: data.usageMetadata.candidatesTokenCount,
+        content: firstPart.text,
+        usage: usage ? {
+          inputTokens: usage.promptTokenCount,
+          outputTokens: usage.candidatesTokenCount,
         } : undefined,
       };
     },

@@ -216,7 +216,8 @@ This separation ensures the export is reliable regardless of CSS variable resolu
 
 ### 1. User Authentication / Identity
 Should the shareable card include the user's name or handle?
-- **Current state:** Code Insights has no user accounts. It's fully local-first.
+- **Current state:** Code Insights has no user accounts and stores card inputs
+  locally; configured LLM and telemetry boundaries are documented separately.
 - **Option A:** No user identity on card — anonymous stats only
 - **Option B:** Add a lightweight "display name" config (`code-insights config set name "John"`) — stored in `~/.code-insights/config.json`, purely optional
 - **Option C:** Allow user to type their name in a modal before downloading

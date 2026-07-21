@@ -23,6 +23,7 @@ import { fileURLToPath } from 'url';
 import { getConfigDir } from '../utils/config.js';
 import { syncSingleFile } from './sync.js';
 import { enqueue } from '../db/queue.js';
+import { isMaintenancePaused } from './maintenance.js';
 
 /** Resolve the CLI entry point for spawning child processes. */
 const CLI_ENTRY = resolve(fileURLToPath(import.meta.url), '../../index.js');
@@ -46,6 +47,10 @@ export async function sessionEndCommand(options: SessionEndOptions = {}): Promis
 
   // Guard: break infinite recursion when our own analysis worker's session ends
   if (process.env.CODE_INSIGHTS_HOOK_ACTIVE) {
+    return;
+  }
+
+  if (isMaintenancePaused()) {
     return;
   }
 

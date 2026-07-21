@@ -4,13 +4,22 @@
 
 **Your data, your machine, your insights.**
 
-Code Insights is a free, open-source tool that helps developers who use multiple AI coding tools analyze their sessions, collect insights, track decisions and learnings, and build knowledge over time. It's built on a simple principle: your session data never leaves your machine.
+Code Insights is a free, open-source tool that helps developers who use multiple
+AI coding tools analyze their sessions, collect insights, track decisions and
+learnings, and build knowledge over time. It is built on a local-first
+principle: raw storage belongs to the user, while any configured remote analysis
+boundary is explicit and documented.
 
 ## Core Beliefs
 
 ### 1. Privacy by Architecture
 
-There is no central Code Insights server. No accounts, no sign-ups, no cloud. All session data lives in a local SQLite database at `~/.code-insights/data.db`. The dashboard runs locally at `http://localhost:7890` — it never phones home.
+There is no Code Insights account service or hosted session database. Raw
+sessions and generated results live in local SQLite at
+`~/.code-insights/data.db`, and the dashboard server binds to `127.0.0.1`.
+Configured cloud LLM analysis sends credential-pattern-redacted content
+directly to that provider. Aggregate allowlisted telemetry is enabled by
+default and can be disabled.
 
 ### 2. Developers Can Handle It
 
@@ -29,7 +38,9 @@ Everything ships in one repository:
 - **Dashboard** (embedded SPA) — served locally by a Hono server via `code-insights dashboard`
 - **Server** (local API) — Hono API on `localhost:7890`, proxies LLM calls server-side
 
-No hosted infrastructure. No Vercel. No Firebase. No Supabase. One install, zero cloud dependencies.
+No Code Insights-hosted application or sync infrastructure. Users may still
+choose cloud LLM providers, remote custom model endpoints, and default-on
+aggregate telemetry.
 
 ### 4. Tool, Not Platform
 
@@ -63,8 +74,10 @@ Code Insights is a utility, not a product. It should:
 - Full feature parity between CLI stats and dashboard views
 
 ### Phase 5: Telemetry ✅
-- Anonymous aggregate usage signals via PostHog (opt-out model, enabled by default)
-- 14 event types tracked (cli_sync, cli_stats, analysis_run, dashboard_loaded, export_run, etc.)
+- Pseudonymous aggregate usage signals via PostHog (opt-out model, enabled by default)
+- Caller-supplied telemetry properties restricted to an explicit allowlist
+- Product telemetry events and caller-supplied properties are explicitly
+  allowlisted rather than documented as a fixed count
 - Respects `CODE_INSIGHTS_TELEMETRY_DISABLED` and `DO_NOT_TRACK` environment variables
 
 ### Phase 6: Polish & Distribution ✅
@@ -90,6 +103,14 @@ Message classification V6 schema added `compact_count`, `auto_compact_count`, an
 ### Phase 10: User Experience & Shareability ✅
 Zero-config first run: `code-insights` with no args auto-syncs and opens the dashboard — no `init` required (v4.1.0). Guided empty states for first-time users. Dashboard auto-sync before server start. Knowledge Journal page with chronological timeline of learnings and decisions by ISO week. Shareable AI Fluency Score card (v4.2.0–v4.3.0): 1200×630 PNG export with hero score (0–100 composite from 5 PQ dimensions), rainbow fingerprint bars, tool logos, effective pattern pills, and 4-week rolling scoring window.
 
+### Current: Local Reliability and Security Boundary ✅
+
+Schema V11 adds durable analysis reruns/backoff and source-scoped Reflect
+snapshots. Configured-provider session analysis uses one shared
+`AnalysisEngine`, with credential-pattern redaction at its outbound provider
+boundary. The dashboard binds to loopback and protects API requests with
+`Host`/`Origin` validation plus a process-scoped token.
+
 ### What's Next
 - Progress tracking: "Am I getting better?" — weekly snapshots comparing friction trends and pattern emergence, tracking user-actionable friction declining and new patterns solidifying
 - Friction-to-pattern affinity map (e.g., stale-assumptions friction → context-gathering pattern)
@@ -111,19 +132,28 @@ Zero-config first run: `code-insights` with no args auto-syncs and opens the das
 > **Status:** Brainstorming phase. No implementation decisions made. This section documents a direction being explored before any code changes are committed. The founder must make an explicit decision before Phase 3 of the roadmap below begins.
 >
 > Branch: `feature/codebase-knowledge-redesign`  
-> Full brainstorm notes: `docs/superpowers/specs/2026-04-22-codebase-knowledge-redesign-brainstorm.md`
+> The original brainstorm reference is no longer present in this repository;
+> the retained design snapshot is
+> `docs/plans/2026-05-05-codebase-knowledge-design.md`.
 
 ### Team Knowledge Sync — Optional Team Tier
 
-A brainstorming session (2026-04-22) explored adding an optional **team tier** that would allow multiple developers on the same codebase to pool their extracted knowledge — without ever sharing raw session transcripts.
+A brainstorming session (2026-04-22) explored adding an optional **team tier**
+that would allow multiple developers on the same codebase to pool extracted
+knowledge without intentionally syncing raw session transcripts.
 
-**The core insight:** The LLM synthesis step is a natural privacy boundary. Raw sessions stay local forever. Only the already-processed, already-scrubbed extracted knowledge (decisions, learnings, patterns, friction) would sync to a team-owned database.
+**The proposed boundary:** Raw transcript sync would remain out of scope. Only
+processed, separately scrubbed knowledge (decisions, learnings, patterns,
+friction) would be eligible for a team-owned database. This proposal is not
+implemented and would require a fresh security review.
 
 **What this would look like:**
 
-- **Free tier**: unchanged — fully local SQLite, personal only, everything as it is today
+- **Free tier**: unchanged — local SQLite storage, personal only, with the
+  existing documented LLM and telemetry boundaries
 - **Team tier**: Bring-Your-Own Supabase PostgreSQL — teams configure their own Supabase project; Code Insights never runs the infrastructure
-- **Privacy-preserving sync**: only LLM-extracted structured knowledge syncs; raw transcripts never leave the machine
+- **Privacy-preserving sync proposal**: only separately scrubbed structured
+  knowledge syncs; raw transcript sync remains out of scope
 - **`code-insights context <topic>`**: a new retrieval command that queries both your local DB and the team's shared knowledge base, with attribution per entry (`@alice · Jan 14, 2026`)
 - **`.code-insights.md`**: generated from the full team's knowledge (not just one person's sessions) — solving the single-author blindspot
 
@@ -138,7 +168,9 @@ A brainstorming session (2026-04-22) explored adding an optional **team tier** t
 **What stays unchanged regardless:**
 
 - Free personal tier is identical to today — no degradation, no feature gating
-- Raw session data never leaves the machine under any tier
+- No raw-transcript sync feature is proposed; cloud analysis and telemetry
+  retain the current boundaries documented in
+  [SECURITY-MODEL.md](SECURITY-MODEL.md)
 - MIT-licensed open source codebase
 - No Code Insights central server — team data lives in the team's own Supabase
 

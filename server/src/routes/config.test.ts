@@ -13,6 +13,11 @@ import { saveConfig } from '@code-insights/cli/utils/config';
 let testDb: Database.Database;
 let lockTestDir: string;
 
+const configMocks = vi.hoisted(() => ({
+  loadConfig: vi.fn(),
+  saveConfig: vi.fn(),
+}));
+
 function occupyLlmLock(): void {
   const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
   mkdirSync(lockPath, { recursive: true });
@@ -29,8 +34,8 @@ vi.mock('@code-insights/cli/utils/telemetry', () => ({
 }));
 
 vi.mock('@code-insights/cli/utils/config', () => ({
-  loadConfig: () => null,
-  saveConfig: vi.fn(),
+  loadConfig: configMocks.loadConfig,
+  saveConfig: configMocks.saveConfig,
 }));
 
 const mockTestLLMConfig = vi.fn().mockResolvedValue({ success: true });
@@ -67,6 +72,9 @@ describe('Config routes', () => {
     process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockTestLLMConfig.mockClear();
+    configMocks.loadConfig.mockReset();
+    configMocks.loadConfig.mockReturnValue(null);
+    configMocks.saveConfig.mockReset();
   });
 
   afterEach(() => {
@@ -85,6 +93,39 @@ describe('Config routes', () => {
       expect(body.dashboardPort).toBe(7890);
       expect(body.provider).toBeUndefined();
       expect(body.model).toBeUndefined();
+    });
+
+    it('returns custom base URL capabilities from the shared provider registry', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm');
+      const body = await res.json();
+
+      expect(body.providers).toEqual([
+        { id: 'openai', supportsCustomBaseUrl: false },
+        { id: 'anthropic', supportsCustomBaseUrl: true },
+        { id: 'gemini', supportsCustomBaseUrl: false },
+        { id: 'ollama', supportsCustomBaseUrl: true },
+        { id: 'llamacpp', supportsCustomBaseUrl: true },
+      ]);
+    });
+
+    it('does not expose a stale base URL for an unsupported provider', async () => {
+      configMocks.loadConfig.mockReturnValue({
+        sync: { claudeDir: '~/.claude/projects', excludeProjects: [] },
+        dashboard: {
+          llm: {
+            provider: 'openai',
+            model: 'gpt-4o',
+            baseUrl: 'https://stale-endpoint.example.test',
+          },
+        },
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/config/llm');
+      const body = await res.json();
+
+      expect(body.baseUrl).toBeUndefined();
     });
   });
 
@@ -184,6 +225,61 @@ describe('Config routes', () => {
       });
       expect(vi.mocked(saveConfig)).toHaveBeenCalledOnce();
     });
+
+    it('clears a stale base URL when switching to a provider that does not support it', async () => {
+      configMocks.loadConfig.mockReturnValue({
+        sync: { claudeDir: '~/.claude/projects', excludeProjects: [] },
+        dashboard: {
+          llm: {
+            provider: 'anthropic',
+            model: 'claude-sonnet-4-20250514',
+            apiKey: 'old-key',
+            baseUrl: 'https://old-anthropic-endpoint.example.test',
+          },
+        },
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/config/llm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'gpt-4o',
+          apiKey: 'new-key',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(configMocks.saveConfig.mock.calls[0][0].dashboard.llm).toEqual({
+        provider: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'new-key',
+      });
+    });
+
+    it('rejects a credential-bearing base URL without echoing it', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          baseUrl: 'https://private-user:super-secret@gateway.example.test/v1',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      const responseBody = await res.json();
+      expect(responseBody).toEqual({
+        error: 'Base URL must not include a username or password.',
+        code: 'BASE_URL_CREDENTIALS_FORBIDDEN',
+      });
+      expect(JSON.stringify(responseBody)).not.toContain('private-user');
+      expect(JSON.stringify(responseBody)).not.toContain('super-secret');
+      expect(configMocks.saveConfig).not.toHaveBeenCalled();
+    });
   });
 
   describe('POST /api/config/llm/test', () => {
@@ -210,6 +306,83 @@ describe('Config routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.success).toBe(true);
+    });
+
+    it('rejects an unsupported provider with a custom base URL', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'openai',
+          model: 'gpt-4o',
+          apiKey: 'test-key',
+          baseUrl: 'https://unsupported.example.test/v1',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({
+        code: 'BASE_URL_UNSUPPORTED',
+        error: 'OpenAI does not support a custom base URL.',
+      });
+      expect(mockTestLLMConfig).not.toHaveBeenCalled();
+    });
+
+    it('rejects a remote Anthropic HTTP endpoint before testing it', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          baseUrl: 'http://gateway.example.test/anthropic',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'Anthropic base URL must use HTTPS unless it targets the local machine.',
+        code: 'BASE_URL_HTTPS_REQUIRED',
+      });
+      expect(mockTestLLMConfig).not.toHaveBeenCalled();
+    });
+
+    it('normalizes an accepted base URL before testing it', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'ollama',
+          model: 'llama3',
+          baseUrl: '  http://localhost:11434  ',
+        }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(mockTestLLMConfig).toHaveBeenCalledWith({
+        provider: 'ollama',
+        model: 'llama3',
+        baseUrl: 'http://localhost:11434',
+      });
+    });
+
+    it('rejects an unknown provider before attempting a test call', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'not-a-provider',
+          model: 'unknown-model',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ success: false });
+      expect(mockTestLLMConfig).not.toHaveBeenCalled();
     });
 
     it('returns a recognizable busy response without testing the provider', async () => {

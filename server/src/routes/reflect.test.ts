@@ -225,6 +225,29 @@ describe('Reflect routes', () => {
       );
       expect(scopeCreep).toBeUndefined();
     });
+
+    it('filters aggregate counts by source query param', async () => {
+      seedSessionWithFacets('sess-claude-source', {
+        sourceTool: 'claude-code',
+      });
+      seedSessionWithFacets('sess-codex-source-1', {
+        sourceTool: 'codex-cli',
+      });
+      seedSessionWithFacets('sess-codex-source-2', {
+        sourceTool: 'codex-cli',
+      });
+
+      const app = createApp();
+      const res = await app.request(
+        '/api/reflect/results?period=all&source=codex-cli',
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.totalSessions).toBe(2);
+      expect(body.totalAllSessions).toBe(2);
+      expect(body.sourceTools).toEqual(['codex-cli']);
+    });
   });
 
   // ──────────────────────────────────────────────────────
@@ -269,6 +292,54 @@ describe('Reflect routes', () => {
       expect(body.snapshot.facetCount).toBe(12);
       expect(body.snapshot.generatedAt).toBe('2026-03-10T12:00:00Z');
       expect(body.snapshot.results).toEqual(snapshotResults);
+    });
+
+    it('keeps snapshots for different source scopes independent', async () => {
+      const insertSnapshot = testDb.prepare(`
+        INSERT INTO reflect_snapshots (
+          period, project_id, source_scope, results_json, generated_at,
+          window_start, window_end, session_count, facet_count
+        ) VALUES (?, '__all__', ?, ?, ?, NULL, ?, ?, ?)
+      `);
+      insertSnapshot.run(
+        '2026-W10',
+        'claude-code',
+        JSON.stringify({ marker: 'claude' }),
+        '2026-03-10T12:00:00Z',
+        '2026-03-09T00:00:00Z',
+        4,
+        2,
+      );
+      insertSnapshot.run(
+        '2026-W10',
+        'codex-cli',
+        JSON.stringify({ marker: 'codex' }),
+        '2026-03-10T13:00:00Z',
+        '2026-03-09T00:00:00Z',
+        7,
+        3,
+      );
+
+      const app = createApp();
+      const claudeRes = await app.request(
+        '/api/reflect/snapshot?period=2026-W10&source=claude-code',
+      );
+      const codexRes = await app.request(
+        '/api/reflect/snapshot?period=2026-W10&source=codex-cli',
+      );
+      const unscopedRes = await app.request('/api/reflect/snapshot?period=2026-W10');
+
+      expect((await claudeRes.json()).snapshot).toMatchObject({
+        sourceScope: 'claude-code',
+        results: { marker: 'claude' },
+        sessionCount: 4,
+      });
+      expect((await codexRes.json()).snapshot).toMatchObject({
+        sourceScope: 'codex-cli',
+        results: { marker: 'codex' },
+        sessionCount: 7,
+      });
+      expect((await unscopedRes.json()).snapshot).toBeNull();
     });
 
     it('returns null for corrupted snapshot JSON', async () => {
@@ -416,6 +487,57 @@ describe('Reflect routes', () => {
 
       expect(previousWeek.sessionCount).toBe(1);
       expect(currentWeek.sessionCount).toBe(0);
+    });
+
+    it('filters week range, session counts, and snapshot status by source', async () => {
+      const now = new Date();
+      const nowDay = now.getUTCDay();
+      const daysToMonday = nowDay === 0 ? 6 : nowDay - 1;
+      const thisMondayMs = Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+      ) - daysToMonday * 86400000;
+      const thisMonday = new Date(thisMondayMs);
+      const currentWeek = formatIsoWeek(thisMonday);
+
+      seedSessionWithFacets('sess-codex-current', {
+        sourceTool: 'codex-cli',
+        startedAt: new Date(thisMondayMs + 3600000).toISOString(),
+      });
+      seedSessionWithFacets('sess-claude-current', {
+        sourceTool: 'claude-code',
+        startedAt: new Date(thisMondayMs + 7200000).toISOString(),
+      });
+      seedSessionWithFacets('sess-claude-old', {
+        sourceTool: 'claude-code',
+        startedAt: new Date(thisMondayMs - 21 * 86400000).toISOString(),
+      });
+
+      testDb.prepare(`
+        INSERT INTO reflect_snapshots (
+          period, project_id, source_scope, results_json, generated_at,
+          window_start, window_end, session_count, facet_count
+        ) VALUES (?, '__all__', 'claude-code', '{}', ?, ?, ?, 2, 0)
+      `).run(
+        currentWeek,
+        '2026-07-18T00:00:00Z',
+        thisMonday.toISOString(),
+        new Date(thisMondayMs + 7 * 86400000).toISOString(),
+      );
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/weeks?source=codex-cli');
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.weeks).toHaveLength(1);
+      expect(body.weeks[0]).toMatchObject({
+        week: currentWeek,
+        sessionCount: 1,
+        hasSnapshot: false,
+        generatedAt: null,
+      });
     });
   });
 
@@ -660,6 +782,135 @@ describe('Reflect routes', () => {
       expect(snapshotBody.snapshot).not.toBeNull();
       expect(snapshotBody.snapshot.period).toBe('all');
       expect(snapshotBody.snapshot.results).toHaveProperty('friction-wins');
+    });
+
+    it('stores generated snapshots independently for each source scope', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat
+        .mockResolvedValueOnce({ content: '<json>{"narrative":"claude result"}</json>' })
+        .mockResolvedValueOnce({ content: '<json>{"narrative":"codex result"}</json>' });
+
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-claude-scope-${i}`, {
+          sourceTool: 'claude-code',
+        });
+        seedSessionWithFacets(`sess-codex-scope-${i}`, {
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      for (const source of ['claude-code', 'codex-cli']) {
+        const response = await app.request('/api/reflect/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            period: 'all',
+            source,
+            sections: ['friction-wins'],
+          }),
+        });
+        const events = parseSSEEvents(await response.text());
+        expect(events.some(event => event.event === 'complete')).toBe(true);
+      }
+
+      const claudeSnapshot = await (
+        await app.request('/api/reflect/snapshot?period=all&source=claude-code')
+      ).json();
+      const codexSnapshot = await (
+        await app.request('/api/reflect/snapshot?period=all&source=codex-cli')
+      ).json();
+
+      expect(claudeSnapshot.snapshot).toMatchObject({
+        sourceScope: 'claude-code',
+        sessionCount: 8,
+        results: {
+          'friction-wins': { narrative: 'claude result' },
+        },
+      });
+      expect(codexSnapshot.snapshot).toMatchObject({
+        sourceScope: 'codex-cli',
+        sessionCount: 8,
+        results: {
+          'friction-wins': { narrative: 'codex result' },
+        },
+      });
+    });
+
+    it('targets the requested source tool when generating rules', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({
+        content: '<json>{"claudeMdRules":[],"hookConfigs":[]}</json>',
+      });
+
+      for (let i = 0; i < 10; i++) {
+        seedSessionWithFacets(`sess-global-majority-${i}`, {
+          sourceTool: 'claude-code',
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-filtered-source-${i}`, {
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          period: 'all',
+          source: 'codex-cli',
+          sections: ['rules-skills'],
+        }),
+      });
+      const events = parseSSEEvents(await response.text());
+      const complete = events.find(event => event.event === 'complete');
+
+      expect(complete).toBeDefined();
+      expect(JSON.parse(complete!.data).results['rules-skills'].targetTool).toBe(
+        'codex-cli',
+      );
+    });
+
+    it('detects the target tool inside the selected project scope', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({
+        content: '<json>{"claudeMdRules":[],"hookConfigs":[]}</json>',
+      });
+
+      for (let i = 0; i < 10; i++) {
+        seedSessionWithFacets(`sess-other-project-${i}`, {
+          projectId: 'proj-other',
+          projectName: 'other',
+          sourceTool: 'claude-code',
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-selected-project-${i}`, {
+          projectId: 'proj-selected',
+          projectName: 'selected',
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          period: 'all',
+          project: 'proj-selected',
+          sections: ['rules-skills'],
+        }),
+      });
+      const events = parseSSEEvents(await response.text());
+      const complete = events.find(event => event.event === 'complete');
+
+      expect(complete).toBeDefined();
+      expect(JSON.parse(complete!.data).results['rules-skills'].targetTool).toBe(
+        'codex-cli',
+      );
     });
   });
 });

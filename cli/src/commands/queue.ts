@@ -13,11 +13,7 @@
 import chalk from 'chalk';
 import { Command } from 'commander';
 import { getQueueStatus, resetFailed, pruneCompleted } from '../db/queue.js';
-import {
-  PROCESS_QUEUE_BUSY,
-  PROCESS_QUEUE_FAILED,
-  processQueue,
-} from '../analysis/queue-worker.js';
+import { processQueue } from '../analysis/queue-worker.js';
 
 // ── queue status ──────────────────────────────────────────────────────────────
 
@@ -77,26 +73,50 @@ export async function queueProcessCommand(opts: QueueProcessCommandOptions = {})
   const log = quiet ? () => {} : console.log.bind(console);
 
   try {
-    const count = await processQueue({
+    const result = await processQueue({
       quiet,
       model: opts.model,
       maxItems: opts.limit,
       delayMs: opts.delay === undefined ? undefined : opts.delay * 1_000,
     });
-    if (count === PROCESS_QUEUE_BUSY) {
+    if (result.status === 'busy') {
       log(chalk.yellow('[Code Insights] Queue worker is busy; pending items were retained'));
       process.exitCode = 75;
       return;
     }
-    if (count === PROCESS_QUEUE_FAILED) {
+    if (result.status === 'paused') {
+      log(chalk.yellow(
+        `[Code Insights] Automatic analysis is paused; ${result.completedCount} item(s) completed before stopping`,
+      ));
+      return;
+    }
+    if (result.status === 'deadline') {
+      log(chalk.yellow(
+        `[Code Insights] Maintenance deadline reached; ${result.completedCount} item(s) completed before stopping`,
+      ));
+      return;
+    }
+    if (result.status === 'deferred') {
+      log(chalk.yellow(
+        `[Code Insights] Queue work is deferred until ${result.nextAttemptAt} UTC`,
+      ));
+      process.exitCode = 75;
+      return;
+    }
+    if (result.status === 'failed') {
       log(chalk.red('[Code Insights] Queue processing stopped after an analysis failure'));
       process.exitCode = 1;
       return;
     }
-    if (count === 0) {
+    if (result.completedCount === 0) {
       log(chalk.dim('[Code Insights] No pending items in queue'));
     } else {
-      log(chalk.green(`[Code Insights] Processed ${count} item(s)`));
+      log(chalk.green(`[Code Insights] Processed ${result.completedCount} item(s)`));
+      if (result.rerunPendingCount > 0) {
+        log(chalk.yellow(
+          `[Code Insights] ${result.rerunPendingCount} changed item(s) remain queued for another pass`,
+        ));
+      }
     }
   } catch (error) {
     if (!quiet) {

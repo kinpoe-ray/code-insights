@@ -14,7 +14,7 @@ This roadmap outlines the development phases for Code Insights. Timelines are fl
 | **2. Integration** ✅ | Workflow integration | Claude Code hook (`install-hook`), CLI stats suite (5 subcommands) |
 | **3. Intelligence** ✅ | LLM-powered insights | Multi-provider LLM (OpenAI, Anthropic, Gemini, Ollama, llama.cpp), session analysis, 4 insight types |
 | **4. Feature Parity** ✅ | Local SPA + multi-source | Vite + React SPA, 5 providers (claude-code, cursor, codex-cli, copilot-cli, copilot), session-level export |
-| **5. Telemetry** ✅ | Anonymous usage signals | PostHog (opt-out model, 14 event types, anonymous device ID) |
+| **5. Telemetry** ✅ | Aggregate usage signals | PostHog (default-on/opt-out, stable pseudonymous machine ID, explicit allowlists) |
 | **6. Distribution** ✅ | npm publish + docs | `@code-insights/cli` on npm, landing page at code-insights.app |
 
 ### Pending from earlier phases
@@ -136,7 +136,9 @@ This roadmap outlines the development phases for Code Insights. Timelines are fl
 
 - [x] **8.5.3 ISO Week Navigation for Reflect** (PR #132) ✅
   - Replaced sliding windows (7d/30d/90d) with ISO week navigation (`2026-W10`)
-  - `GET /api/reflect/weeks` returns last 8 weeks with session counts and snapshot status
+  - `GET /api/reflect/weeks` now returns the data-driven history from the
+    earliest session through the current week (capped at 520 weeks), with
+    session counts and snapshot status
   - `MIN_FACETS_FOR_REFLECT` lowered from 20 → 8 for weekly scope
 
 - [x] **8.5.4 Attribution Rewrite** (PR #138) ✅
@@ -268,8 +270,13 @@ This roadmap outlines the development phases for Code Insights. Timelines are fl
 
 - [x] **12.1 Prompt Module Migration** (#238) — Move prompt builders from server to CLI for shared access
 - [x] **12.2 Runner Interface** (#239) — AnalysisRunner abstraction with ClaudeNativeRunner + ProviderRunner
-- [x] **12.3 `insights` CLI Command** (#240) — Unified command with `--native` and `--hook` modes, V8 schema migration
-- [x] **12.4 Hook Installation** (#241) — `install-hook` adds SessionEnd analysis hook alongside existing sync hook
+- [x] **12.3 `insights` CLI Command** (#240) — Originally shipped with
+  `--native` and `--hook` modes plus the V8 schema migration. The public
+  `--hook` mode is now removed.
+- [x] **12.4 Hook Installation** (#241) — Originally shipped separate sync and
+  analysis hooks. Current releases install one `SessionEnd` hook that calls the
+  internal `session-end` workflow, syncs the completed file, enqueues analysis,
+  and starts a detached worker.
 - [x] **12.5 Backfill Recovery** (#242) — `insights check` for unanalyzed sessions (7-day lookback)
 - [x] **12.6 Dashboard + Docs** (#243) — Updated LlmNudgeBanner, analysis provenance, documentation
 

@@ -4,8 +4,8 @@ Thanks for your interest in contributing! This guide covers everything you need 
 
 ## Prerequisites
 
-- **Node.js** 18 or later
-- **pnpm** >= 9
+- **Node.js** 20, 22, or 24 and later (`^20 || ^22 || >=24`)
+- **pnpm** exactly 9.15.9 (the version pinned by this workspace)
 
 ## Getting Started
 
@@ -15,7 +15,8 @@ git clone https://github.com/melagiri/code-insights.git
 cd code-insights
 
 # Install dependencies (workspace root)
-pnpm install
+corepack enable
+pnpm install --frozen-lockfile
 
 # Build all packages
 pnpm build
@@ -30,8 +31,10 @@ cd cli && npm link
 code-insights/
 ├── cli/              # Node.js CLI — parses sessions, syncs to SQLite
 │   └── src/
-│       ├── commands/ # CLI commands (init, sync, status, stats, dashboard, config, reset)
-│       ├── providers/# Source tool providers (claude-code, cursor, codex, copilot-cli)
+│       ├── commands/ # CLI commands (sync, stats, dashboard, reflect, queue, config)
+│       ├── analysis/ # Shared AnalysisEngine and durable queue worker
+│       ├── privacy/  # Outbound credential-pattern guard
+│       ├── providers/# Source providers (Claude, Cursor, Codex, Copilot)
 │       ├── parser/   # JSONL parsing and session title generation
 │       ├── db/       # SQLite schema, migrations, queries
 │       ├── utils/    # Config, device, paths
@@ -72,7 +75,13 @@ cd server && pnpm dev
 ### 3. Verify your changes
 
 ```bash
-# From the workspace root — builds all 3 packages
+# From the workspace root — type-check all 3 packages
+pnpm typecheck
+
+# Run automation and package tests
+pnpm test
+
+# Build CLI, server, then dashboard
 pnpm build
 ```
 

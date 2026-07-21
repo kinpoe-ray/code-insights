@@ -23,7 +23,7 @@ Code Insights provides:
 3. **Session classification** — Categorizes sessions (deep focus, bug hunt, feature build, etc.)
 4. **LLM-powered analysis** — Two analysis paths:
    - **Native (zero-config):** Claude Code users get automatic analysis via `SessionEnd` hook using their existing Claude subscription. No API key needed. Install with `code-insights install-hook`.
-   - **On-demand:** Configure any LLM provider (OpenAI, Anthropic, Gemini, Ollama, llama.cpp) for manual analysis from the dashboard or CLI. Ollama and llama.cpp run fully local — no API key needed.
+   - **On-demand:** Configure any LLM provider (OpenAI, Anthropic, Gemini, Ollama, llama.cpp) for manual analysis from the dashboard or CLI. Ollama and llama.cpp require no API key and remain local when their endpoint is local.
 5. **Visual dashboard** — Local web interface with charts, timelines, and filters at `http://localhost:7890`
 6. **CLI analytics** — Terminal stats via `code-insights stats` and subcommands
 
@@ -31,17 +31,39 @@ Code Insights provides:
 
 - **Developers using multiple AI coding tools** who want to understand their AI-assisted work patterns across Claude Code, Cursor, Codex CLI, Copilot CLI, and VS Code Copilot Chat
 - **Learners** who want to review and reinforce what they've built with AI assistants
-- **Privacy-conscious developers** who want insights without giving up their data to a cloud service
+- **Privacy-conscious developers** who want local storage and explicit control
+  over any LLM or telemetry network boundary
 
 ## Privacy Model
 
-**Fully local. No cloud. No accounts.**
+**Local-first storage. No Code Insights account or hosted data sync.**
 
-Code Insights stores all session data in a SQLite database at `~/.code-insights/data.db` on your own machine. There is no central server, no sign-up, and no data sent anywhere. The dashboard runs locally at `http://localhost:7890` — served by a Hono API process on your own machine.
+Code Insights stores raw sessions and generated results in a SQLite database at
+`~/.code-insights/data.db` on the user's machine. The dashboard is served by a
+local Hono process bound to `127.0.0.1`. It validates loopback `Host` and
+`Origin` values and protects API calls with a random, in-memory session token.
 
-LLM analysis uses your own API key, stored in `~/.code-insights/config.json` (mode 0o600). API calls go directly from the local server to your chosen LLM provider — not through any Code Insights infrastructure.
+LLM analysis uses the user's configured provider. Before session content is
+sent, a pattern-based outbound guard redacts recognized credentials such as
+common tokens, authorization/API-key headers, credential assignments,
+private-key blocks, credential URLs, signed query parameters, cookies, and npm
+credentials. Cloud providers and remote custom endpoints still receive that
+redacted content. Ollama and llama.cpp keep analysis on the machine only when
+their endpoint is local. Pattern matching is a guardrail, not a complete secret
+scanner, and may miss unknown formats.
 
-**Telemetry:** Anonymous, aggregate usage signals via PostHog. Opt-out model (enabled by default). Respects `CODE_INSIGHTS_TELEMETRY_DISABLED` and `DO_NOT_TRACK` environment variables. No PII collected. See `code-insights telemetry` to manage.
+Claude Code native analysis delegates its prompt to the locally installed
+Claude CLI rather than the configured-provider guard, so that path follows
+Claude Code's own account and data-handling settings.
+
+**Telemetry:** Anonymous/pseudonymous aggregate product signals via PostHog are
+enabled by default and restricted to an event/property allowlist. The intended
+payload excludes session content, prompts, responses, file paths, API keys, and
+free-form errors. Users can opt out with `code-insights telemetry disable`,
+`CODE_INSIGHTS_TELEMETRY_DISABLED=1`, or `DO_NOT_TRACK=1`.
+
+See [SECURITY-MODEL.md](SECURITY-MODEL.md) for the complete trust boundaries,
+local-storage assumptions, and reporting guidance.
 
 ## Core Features
 
@@ -111,7 +133,9 @@ Cross-session pattern detection and synthesis, powered by session facets:
 - Attribution model: each friction point classified as `user-actionable`, `ai-capability`, or `environmental`
 - Synthesis prompts pre-aggregate data in code, then feed ranked summaries to LLM for narration
 - Reflect uses ISO week navigation (e.g., `2026-W10`) rather than sliding windows; `--week` CLI flag, `GET /api/reflect/weeks` endpoint for week history
-- Reflect snapshots cached in `reflect_snapshots` table (Schema V4); `period` column stores ISO week strings
+- Reflect can be scoped by source tool with `--source`; snapshots use composite
+  key `(period, project_id, source_scope)` so all-source and source-specific
+  results do not overwrite each other
 - 8-session minimum threshold for weekly scope synthesis; coverage warning when < 50% analyzed
 
 **Upcoming:** Progress tracking — "Am I getting better?" Weekly snapshots comparing friction trends and pattern emergence over time, helping developers see how their AI collaboration skills evolve.
@@ -128,7 +152,7 @@ Turn session insights into shareable content. Dispatch generates blog posts and 
 **Formats and tones:**
 - **Blog** — Long-form technical post with narrative structure, code context, and lessons learned
 - **LinkedIn** — Concise professional update optimized for engagement (~250 words, 3-5 key points)
-- Tones: Technical, Storytelling, Educational, Reflective
+- Tones: Technical deep-dive, Accessible, Quick tips
 
 **AI Cover Image Prompts** — Inside the post preview, generate a Midjourney/DALL-E-ready prompt for your cover image via the `/api/dispatch/image-prompt` endpoint.
 
@@ -215,8 +239,11 @@ code-insights sync --verbose               # Verbose output
 code-insights sync --regenerate-titles     # Regenerate session titles
 code-insights sync prune                   # Soft-delete trivial sessions (≤2 messages, restorable with sync --force)
 code-insights status                       # Show sync statistics
-code-insights install-hook                 # Auto-sync on session end
+code-insights install-hook                 # Auto-sync + enqueue analysis on session end
 code-insights uninstall-hook               # Remove auto-sync hook
+code-insights queue status                 # Show durable analysis queue state
+code-insights queue process --limit 5      # Process a bounded foreground batch
+code-insights queue retry --all            # Retry terminal failures
 ```
 
 #### Dashboard & Browser
@@ -254,6 +281,7 @@ code-insights reflect                      # Cross-session LLM synthesis (curren
 code-insights reflect --week 2026-W11      # Synthesis for a specific ISO week
 code-insights reflect --section friction-wins   # Only generate one section
 code-insights reflect --project myproject  # Scope to a specific project
+code-insights reflect --source cursor      # Scope to a specific source tool
 code-insights reflect backfill             # Backfill facets for legacy sessions
 code-insights reflect backfill --period 30d     # Backfill within time range (7d|30d|90d|all)
 code-insights reflect backfill --project <name> # Backfill for specific project
@@ -295,6 +323,25 @@ code-insights reset --confirm              # Delete all local data
 
 Per-session analysis costs are tracked in the `analysis_usage` SQLite table (Schema V7, extended in V8). Each analysis call records provider, model, token counts (including cache creation/read tokens), estimated USD cost, and duration. The dashboard shows cost per session after analysis runs. Cost data is also available via the `/api/analysis/usage` endpoint.
 
+Configured-provider session analysis is implemented once in the shared
+`AnalysisEngine`, which is used by both CLI and server entry points. A server
+persistence adapter writes only complete results, so an aborted or partial run
+does not replace the previous complete insight.
+
+The durable `analysis_queue` stores one row per session and claims due work in
+FIFO order. A request that arrives while the session is already processing sets
+`rerun_requested`, producing one fresh rerun after the active attempt finishes.
+Provider failures are retried with durable `next_attempt_at` delays of 30 and
+60 seconds; the third failed attempt becomes terminal by default. The dashboard
+can enqueue 1–500 session IDs with `POST /api/analysis/queue`. Processing work
+uses a ten-minute lease; after a restart, the stored lease deadline wakes the
+queue pump and stale recovery applies the same retry/rerun rules.
+
+The database also carries a persistent database ID and sync generation in
+`code_insights_metadata`. A successful full sync advances the generation.
+`reset` clears user tables and advances it in the same transaction, preventing
+an old filesystem sync checkpoint from being mistaken for the new database.
+
 ### Message Classification (Schema V6)
 
 The `sessions` table tracks three context signals from Claude Code sessions: `compact_count` (explicit `/compact` invocations), `auto_compact_count` (auto-compact triggers), and `slash_commands` (all non-exit slash commands used). These signals feed into session characterization and are available for display in session detail views.
@@ -333,11 +380,13 @@ Adding a new source tool requires implementing the `SessionProvider` interface i
 ## Tech Stack
 
 - **CLI**: Node.js (ES2022, ES Modules), Commander.js
-- **Database**: SQLite (`better-sqlite3`) at `~/.code-insights/data.db` — WAL mode, local, Schema V9
-- **Server**: Hono — lightweight API server, serves dashboard SPA at `localhost:7890`
+- **Database**: SQLite (`better-sqlite3`) at `~/.code-insights/data.db` — WAL mode, local, Schema V11
+- **Server**: Hono — loopback-only API server, serves dashboard SPA at `127.0.0.1:7890`
 - **Dashboard**: Vite + React 19 SPA, Tailwind CSS 4 + shadcn/ui
-- **AI**: Multi-provider — OpenAI, Anthropic, Gemini, Ollama (your own API keys, proxied server-side)
-- **Telemetry**: PostHog (opt-out, anonymous device ID, no PII)
+- **AI**: Multi-provider — OpenAI, Anthropic, Gemini, Ollama, llama.cpp
+  (the local CLI/server connects directly to the configured endpoint)
+- **Telemetry**: PostHog (default-on, opt-out, stable pseudonymous machine ID,
+  explicit property allowlist)
 - **Package manager**: pnpm (workspace monorepo: `cli/`, `dashboard/`, `server/`)
 
 ## Success Metrics
@@ -345,4 +394,4 @@ Adding a new source tool requires implementing the `SessionProvider` interface i
 - Time to first insight: < 5 minutes from install
 - User can answer "what did I work on this week?" in one click
 - Decisions are searchable and linkable
-- Zero cloud dependencies after install
+- No Code Insights account or hosted data-sync dependency after install

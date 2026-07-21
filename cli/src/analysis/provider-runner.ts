@@ -4,7 +4,8 @@
  *
  * Design note: The CLI cannot import from @code-insights/server (server depends
  * on CLI — importing in the other direction would create a circular dependency).
- * All LLM providers use only Node.js built-in `fetch` (Node 18+), so this module
+ * All LLM providers use only Node.js built-in `fetch` on the supported Node.js
+ * release lines (20.x, 22.x, or 24+), so this module
  * inlines the minimal provider dispatch that mirrors server/src/llm/client.ts.
  * If the server LLM client grows substantially (new providers, streaming, etc.),
  * that work is tracked in Issue #240.
@@ -12,29 +13,65 @@
 
 import { loadConfig } from '../utils/config.js';
 import type { LLMProviderConfig } from '../types.js';
+import { validateProviderBaseUrl } from '../constants/llm-providers.js';
+import { guardOutboundCredentials } from '../privacy/outbound-credential-guard.js';
 import type { AnalysisRunner, RunAnalysisParams, RunAnalysisResult } from './runner-types.js';
+import {
+  defaultLLMCapabilities,
+  flattenContent,
+  type ChatOptions,
+  type LLMCapabilities,
+  type LLMClient,
+  type LLMMessage,
+  type LLMResponse,
+} from './llm-client.js';
 
-// ── Minimal LLM types (mirrors server/src/llm/types.ts) ──────────────────────
+type LLMChatFn = (messages: LLMMessage[], options?: ChatOptions) => Promise<LLMResponse>;
 
-interface LLMMessage {
-  role: 'system' | 'user' | 'assistant';
-  // Intentionally narrower than server/src/llm/types.ts LLMMessage (which allows ContentBlock[]).
-  // ProviderRunner always sends plain strings — prompt caching via ContentBlock[] is a
-  // dashboard/API concern. The insights CLI command builds simple system+user pairs.
-  content: string;
+function providerHttpError(provider: string, status: number): Error {
+  if (status === 401 || status === 403) {
+    return new Error(`${provider} request was rejected (HTTP ${status}).`);
+  }
+  if (status === 429) {
+    return new Error(`${provider} request was rate limited (HTTP 429).`);
+  }
+  return new Error(`${provider} request failed (HTTP ${status}).`);
 }
 
-interface LLMResponse {
-  content: string;
-  usage?: {
-    inputTokens: number;
-    outputTokens: number;
-    cacheCreationTokens?: number;
-    cacheReadTokens?: number;
-  };
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError';
 }
 
-type LLMChatFn = (messages: LLMMessage[]) => Promise<LLMResponse>;
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+async function parseProviderJson(response: Response, provider: string): Promise<unknown> {
+  try {
+    return await response.json();
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    throw new Error(`${provider} returned an invalid response.`);
+  }
+}
+
+function invalidProviderResponse(provider: string): never {
+  throw new Error(`${provider} returned an invalid response.`);
+}
+
+function normalizeRuntimeProviderConfig(config: LLMProviderConfig): LLMProviderConfig {
+  const validation = validateProviderBaseUrl(config.provider, config.baseUrl);
+  if (!validation.ok) {
+    throw new Error(validation.message);
+  }
+  const normalized = { ...config };
+  if (validation.value === undefined) {
+    delete normalized.baseUrl;
+  } else {
+    normalized.baseUrl = validation.value;
+  }
+  return normalized;
+}
 
 function replaceIsolatedSurrogates(value: string): string {
   let result = '';
@@ -57,30 +94,68 @@ function replaceIsolatedSurrogates(value: string): string {
   return result;
 }
 
+function sanitizeMessages(messages: LLMMessage[]): LLMMessage[] {
+  return messages.map((message) => ({
+    ...message,
+    content: typeof message.content === 'string'
+      ? replaceIsolatedSurrogates(message.content)
+      : message.content.map((block) => ({
+          ...block,
+          text: replaceIsolatedSurrogates(block.text),
+        })),
+  }));
+}
+
 // ── Provider implementations ──────────────────────────────────────────────────
 
 function makeOpenAIChat(apiKey: string, model: string): LLMChatFn {
-  return async (messages) => {
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 8192 }),
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({})) as { error?: { message?: string } };
-      throw new Error(err.error?.message || `OpenAI API error (HTTP ${response.status})`);
+  return async (messages, options) => {
+    let response: Response;
+    try {
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        signal: options?.signal,
+        body: JSON.stringify({
+          model,
+          messages: messages.map((message) => ({
+            role: message.role,
+            content: flattenContent(message.content),
+          })),
+          temperature: options?.temperature ?? 0.7,
+          max_tokens: 8192,
+        }),
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new Error('OpenAI request could not be completed.');
     }
-    const data = await response.json() as {
-      choices: Array<{ message: { content: string } }>;
-      usage?: { prompt_tokens: number; completion_tokens: number };
-    };
+    if (!response.ok) {
+      throw providerHttpError('OpenAI', response.status);
+    }
+    const data = await parseProviderJson(response, 'OpenAI');
+    if (!isRecord(data) || !Array.isArray(data.choices)) {
+      invalidProviderResponse('OpenAI');
+    }
+    const choice = data.choices[0];
+    if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== 'string') {
+      invalidProviderResponse('OpenAI');
+    }
+    const usage = isRecord(data.usage)
+      && typeof data.usage.prompt_tokens === 'number'
+      && typeof data.usage.completion_tokens === 'number'
+      ? {
+          prompt_tokens: data.usage.prompt_tokens,
+          completion_tokens: data.usage.completion_tokens,
+        }
+      : undefined;
     return {
-      content: data.choices[0]?.message?.content || '',
-      usage: data.usage
-        ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
+      content: choice.message.content,
+      usage: usage
+        ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }
         : undefined,
     };
   };
@@ -90,47 +165,63 @@ function makeAnthropicChat(apiKey: string, model: string, baseUrl?: string): LLM
   // baseUrl allows Anthropic-compatible endpoints (e.g. Zhipu BigModel's /api/anthropic).
   // Defaults to the official Anthropic API when unset.
   const base = (baseUrl || 'https://api.anthropic.com').trim().replace(/\/$/, '');
-  return async (messages) => {
+  return async (messages, options) => {
     const systemMsg = messages.find(m => m.role === 'system');
     const chatMsgs = messages.filter(m => m.role !== 'system');
-    const response = await fetch(`${base}/v1/messages`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'prompt-caching-2024-07-31',
-      },
-      body: JSON.stringify({
-        model,
-        max_tokens: 8192,
-        system: systemMsg?.content,
-        messages: chatMsgs.map(m => ({ role: m.role, content: m.content })),
-      }),
-    });
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({})) as { error?: { message?: string } };
-      throw new Error(err.error?.message || `Anthropic API error (HTTP ${response.status})`);
-    }
-    const data = await response.json() as {
-      content: Array<{ text: string }>;
-      usage?: {
-        input_tokens: number;
-        output_tokens: number;
-        cache_creation_input_tokens?: number;
-        cache_read_input_tokens?: number;
-      };
-    };
-    return {
-      content: data.content[0]?.text || '',
-      usage: data.usage ? {
-        inputTokens: data.usage.input_tokens,
-        outputTokens: data.usage.output_tokens,
-        ...(data.usage.cache_creation_input_tokens !== undefined && {
-          cacheCreationTokens: data.usage.cache_creation_input_tokens,
+    let response: Response;
+    try {
+      response = await fetch(`${base}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'prompt-caching-2024-07-31',
+        },
+        signal: options?.signal,
+        body: JSON.stringify({
+          model,
+          max_tokens: 8192,
+          ...(options?.temperature !== undefined && { temperature: options.temperature }),
+          system: systemMsg?.content,
+          messages: chatMsgs.map(m => ({ role: m.role, content: m.content })),
         }),
-        ...(data.usage.cache_read_input_tokens !== undefined && {
-          cacheReadTokens: data.usage.cache_read_input_tokens,
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new Error('Anthropic request could not be completed.');
+    }
+    if (!response.ok) {
+      throw providerHttpError('Anthropic', response.status);
+    }
+    const data = await parseProviderJson(response, 'Anthropic');
+    if (!isRecord(data) || !Array.isArray(data.content)) {
+      invalidProviderResponse('Anthropic');
+    }
+    const firstContent = data.content[0];
+    if (!isRecord(firstContent) || typeof firstContent.text !== 'string') {
+      invalidProviderResponse('Anthropic');
+    }
+    const usage = isRecord(data.usage)
+      && typeof data.usage.input_tokens === 'number'
+      && typeof data.usage.output_tokens === 'number'
+      ? {
+          input_tokens: data.usage.input_tokens,
+          output_tokens: data.usage.output_tokens,
+          cache_creation_input_tokens: data.usage.cache_creation_input_tokens,
+          cache_read_input_tokens: data.usage.cache_read_input_tokens,
+        }
+      : undefined;
+    return {
+      content: firstContent.text,
+      usage: usage ? {
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
+        ...(typeof usage.cache_creation_input_tokens === 'number' && {
+          cacheCreationTokens: usage.cache_creation_input_tokens,
+        }),
+        ...(typeof usage.cache_read_input_tokens === 'number' && {
+          cacheReadTokens: usage.cache_read_input_tokens,
         }),
       } : undefined,
     };
@@ -138,36 +229,68 @@ function makeAnthropicChat(apiKey: string, model: string, baseUrl?: string): LLM
 }
 
 function makeGeminiChat(apiKey: string, model: string): LLMChatFn {
-  return async (messages) => {
+  return async (messages, options) => {
     const systemMsg = messages.find(m => m.role === 'system');
     const chatMsgs = messages.filter(m => m.role !== 'system');
     const body: Record<string, unknown> = {
       contents: chatMsgs.map(m => ({
         role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }],
+        parts: [{ text: flattenContent(m.content) }],
       })),
-      generationConfig: { temperature: 0.7, maxOutputTokens: 8192, responseMimeType: 'application/json' },
+      generationConfig: {
+        temperature: options?.temperature ?? 0.7,
+        maxOutputTokens: 8192,
+        ...(options?.responseFormat !== 'text' && { responseMimeType: 'application/json' }),
+      },
     };
     if (systemMsg) {
-      body.systemInstruction = { parts: [{ text: systemMsg.content }] };
+      body.systemInstruction = { parts: [{ text: flattenContent(systemMsg.content) }] };
     }
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
-    );
+    let response: Response;
+    try {
+      response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': apiKey,
+        },
+        signal: options?.signal,
+        body: JSON.stringify(body),
+        },
+      );
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new Error('Gemini request could not be completed.');
+    }
     if (!response.ok) {
-      const err = await response.json().catch(() => ({})) as { error?: { message?: string } };
-      throw new Error(err.error?.message || `Gemini API error (HTTP ${response.status})`);
+      throw providerHttpError('Gemini', response.status);
     }
-    const data = await response.json() as {
-      candidates: Array<{ content: { parts: Array<{ text: string }> } }>;
-      usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number };
-    };
+    const data = await parseProviderJson(response, 'Gemini');
+    if (!isRecord(data) || !Array.isArray(data.candidates)) {
+      invalidProviderResponse('Gemini');
+    }
+    const candidate = data.candidates[0];
+    const content = isRecord(candidate) ? candidate.content : undefined;
+    const parts = isRecord(content) ? content.parts : undefined;
+    const firstPart = Array.isArray(parts) ? parts[0] : undefined;
+    if (!isRecord(firstPart) || typeof firstPart.text !== 'string') {
+      invalidProviderResponse('Gemini');
+    }
+    const usage = isRecord(data.usageMetadata)
+      && typeof data.usageMetadata.promptTokenCount === 'number'
+      && typeof data.usageMetadata.candidatesTokenCount === 'number'
+      ? {
+          promptTokenCount: data.usageMetadata.promptTokenCount,
+          candidatesTokenCount: data.usageMetadata.candidatesTokenCount,
+        }
+      : undefined;
     return {
-      content: data.candidates[0]?.content?.parts[0]?.text || '',
-      usage: data.usageMetadata ? {
-        inputTokens: data.usageMetadata.promptTokenCount,
-        outputTokens: data.usageMetadata.candidatesTokenCount,
+      content: firstPart.text,
+      usage: usage ? {
+        inputTokens: usage.promptTokenCount,
+        outputTokens: usage.candidatesTokenCount,
       } : undefined,
     };
   };
@@ -175,24 +298,40 @@ function makeGeminiChat(apiKey: string, model: string): LLMChatFn {
 
 function makeOllamaChat(model: string, baseUrl?: string): LLMChatFn {
   const url = (baseUrl || 'http://localhost:11434').trim().replace(/\/$/, '');
-  return async (messages) => {
-    const response = await fetch(`${url}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, messages, stream: false, options: { temperature: 0.7 } }),
-    });
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      throw new Error(`Ollama API error (HTTP ${response.status})${detail ? ` - ${detail}` : ''}`);
+  return async (messages, options) => {
+    let response: Response;
+    try {
+      response = await fetch(`${url}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: options?.signal,
+        body: JSON.stringify({
+          model,
+          messages: messages.map((message) => ({
+            role: message.role,
+            content: flattenContent(message.content),
+          })),
+          stream: false,
+          options: { temperature: options?.temperature ?? 0.7 },
+        }),
+      });
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      throw new Error('Cannot connect to the configured Ollama endpoint.');
     }
-    const data = await response.json() as {
-      message?: { content: string };
-      prompt_eval_count?: number;
-      eval_count?: number;
-    };
+    if (!response.ok) {
+      throw providerHttpError('Ollama', response.status);
+    }
+    const data = await parseProviderJson(response, 'Ollama');
+    if (!isRecord(data) || !isRecord(data.message) || typeof data.message.content !== 'string') {
+      invalidProviderResponse('Ollama');
+    }
     return {
-      content: data.message?.content || '',
-      usage: { inputTokens: data.prompt_eval_count || 0, outputTokens: data.eval_count || 0 },
+      content: data.message.content,
+      usage: {
+        inputTokens: typeof data.prompt_eval_count === 'number' ? data.prompt_eval_count : 0,
+        outputTokens: typeof data.eval_count === 'number' ? data.eval_count : 0,
+      },
     };
   };
 }
@@ -201,28 +340,33 @@ function makeLlamaCppChat(model: string, baseUrl?: string): LLMChatFn {
   // Use 0.3 temperature — small quantized models produce more consistent structured JSON
   // output at lower temperatures (LLM Expert requirement).
   const url = (baseUrl || 'http://localhost:8080').trim().replace(/\/$/, '');
-  return async (messages) => {
+  return async (messages, options) => {
     let response: Response;
     try {
       response = await fetch(`${url}/v1/chat/completions`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: options?.signal,
         body: JSON.stringify({
           model,
-          messages,
-          temperature: 0.3,
+          messages: messages.map((message) => ({
+            role: message.role,
+            content: flattenContent(message.content),
+          })),
+          temperature: options?.temperature ?? 0.3,
           max_tokens: 4096,
-          response_format: { type: 'json_object' },
+          ...(options?.responseFormat !== 'text' && {
+            response_format: { type: 'json_object' },
+          }),
         }),
       });
     } catch (err) {
+      if (isAbortError(err)) throw err;
       const cause = (err as { cause?: { code?: string } })?.cause;
       if (cause?.code === 'ECONNREFUSED' || (err instanceof TypeError && (err as TypeError).message.includes('fetch'))) {
-        throw new Error(
-          `Cannot connect to llama-server at ${url} — is it running? Start it with: llama-server -m <model.gguf>`
-        );
+        throw new Error('Cannot connect to the configured llama-server endpoint.');
       }
-      throw err;
+      throw new Error('llama-server request could not be completed.');
     }
     if (!response.ok) {
       const detail = await response.text().catch(() => '');
@@ -231,27 +375,31 @@ function makeLlamaCppChat(model: string, baseUrl?: string): LLMChatFn {
         let errorBody: { error?: { type?: string; n_prompt_tokens?: number; n_ctx?: number } } = {};
         try { errorBody = JSON.parse(detail); } catch { /* not JSON */ }
         if (errorBody?.error?.type === 'exceed_context_size_error') {
-          const nPrompt = errorBody.error.n_prompt_tokens;
-          const nCtx = errorBody.error.n_ctx;
-          const tokenInfo = (nPrompt !== undefined && nCtx !== undefined)
-            ? ` (${nPrompt} tokens requested, server context is ${nCtx})`
-            : '';
-          throw new Error(
-            `Session too large for llama-server context window${tokenInfo}. ` +
-            `Start llama-server with a larger context: llama-server -m <model.gguf> -c 32768`
-          );
+          throw new Error('Session exceeds the configured llama-server context window.');
         }
       }
-      throw new Error(`llama-server API error (HTTP ${response.status})${detail ? ` - ${detail}` : ''}`);
+      throw providerHttpError('llama-server', response.status);
     }
-    const data = await response.json() as {
-      choices: Array<{ message: { content: string } }>;
-      usage?: { prompt_tokens: number; completion_tokens: number };
-    };
+    const data = await parseProviderJson(response, 'llama-server');
+    if (!isRecord(data) || !Array.isArray(data.choices)) {
+      invalidProviderResponse('llama-server');
+    }
+    const choice = data.choices[0];
+    if (!isRecord(choice) || !isRecord(choice.message) || typeof choice.message.content !== 'string') {
+      invalidProviderResponse('llama-server');
+    }
+    const usage = isRecord(data.usage)
+      && typeof data.usage.prompt_tokens === 'number'
+      && typeof data.usage.completion_tokens === 'number'
+      ? {
+          prompt_tokens: data.usage.prompt_tokens,
+          completion_tokens: data.usage.completion_tokens,
+        }
+      : undefined;
     return {
-      content: data.choices[0]?.message?.content || '',
-      usage: data.usage
-        ? { inputTokens: data.usage.prompt_tokens, outputTokens: data.usage.completion_tokens }
+      content: choice.message.content,
+      usage: usage
+        ? { inputTokens: usage.prompt_tokens, outputTokens: usage.completion_tokens }
         : undefined,
     };
   };
@@ -270,17 +418,22 @@ function makeChatFn(config: LLMProviderConfig): LLMChatFn {
 
 // ── ProviderRunner ────────────────────────────────────────────────────────────
 
-export class ProviderRunner implements AnalysisRunner {
+export class ProviderRunner implements AnalysisRunner, LLMClient {
   readonly name: string;
-  private readonly chat: LLMChatFn;
-  private readonly _model: string;
-  private readonly _provider: string;
+  readonly model: string;
+  readonly provider: string;
+  readonly capabilities: LLMCapabilities;
+  private readonly transport: LLMChatFn;
+  private readonly _knownSecrets: string[];
 
   constructor(config: LLMProviderConfig) {
-    this.name = config.provider;
-    this._model = config.model;
-    this._provider = config.provider;
-    this.chat = makeChatFn(config);
+    const normalizedConfig = normalizeRuntimeProviderConfig(config);
+    this.name = normalizedConfig.provider;
+    this.model = normalizedConfig.model;
+    this.provider = normalizedConfig.provider;
+    this.capabilities = defaultLLMCapabilities(normalizedConfig.provider);
+    this._knownSecrets = normalizedConfig.apiKey ? [normalizedConfig.apiKey] : [];
+    this.transport = makeChatFn(normalizedConfig);
   }
 
   /**
@@ -302,12 +455,29 @@ export class ProviderRunner implements AnalysisRunner {
     return new ProviderRunner(llm);
   }
 
+  estimateTokens(text: string): number {
+    return Math.ceil(text.length / (this.provider === 'llamacpp' ? 3 : 4));
+  }
+
+  prepareMessages(messages: LLMMessage[]): LLMMessage[] {
+    const sanitized = sanitizeMessages(messages);
+    const guarded = guardOutboundCredentials(sanitized, {
+      provider: this.provider,
+      knownSecrets: this._knownSecrets,
+    });
+    return guarded.messages;
+  }
+
+  async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
+    return this.transport(this.prepareMessages(messages), options);
+  }
+
   async runAnalysis(params: RunAnalysisParams): Promise<RunAnalysisResult> {
     const start = Date.now();
 
     const messages: LLMMessage[] = [
-      { role: 'system', content: replaceIsolatedSurrogates(params.systemPrompt) },
-      { role: 'user', content: replaceIsolatedSurrogates(params.userPrompt) },
+      { role: 'system', content: params.systemPrompt },
+      { role: 'user', content: params.userPrompt },
     ];
 
     const response = await this.chat(messages);
@@ -323,8 +493,8 @@ export class ProviderRunner implements AnalysisRunner {
       ...(response.usage?.cacheReadTokens !== undefined && {
         cacheReadTokens: response.usage.cacheReadTokens,
       }),
-      model: this._model,
-      provider: this._provider,
+      model: this.model,
+      provider: this.provider,
     };
   }
 }

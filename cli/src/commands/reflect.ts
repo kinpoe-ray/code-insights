@@ -5,6 +5,8 @@ import chalk from 'chalk';
 import { loadConfig } from '../utils/config.js';
 import { getCurrentIsoWeek } from '../utils/date-utils.js';
 import { LLM_LOCK_TOKEN_HEADER } from '../analysis/llm-lock.js';
+import { dashboardFetch } from '../utils/dashboard-client.js';
+import { parseSSEStream } from '../utils/sse.js';
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -49,7 +51,7 @@ async function checkServer(baseUrl: string): Promise<void> {
 
 async function checkLlmConfigured(baseUrl: string): Promise<void> {
   try {
-    const res = await fetch(`${baseUrl}/api/config/llm`);
+    const res = await dashboardFetch(baseUrl, '/api/config/llm');
     if (res.ok) {
       const data = await res.json() as { provider?: string; model?: string };
       if (!data.provider || !data.model) {
@@ -68,8 +70,13 @@ async function checkLlmConfigured(baseUrl: string): Promise<void> {
 // SSE helpers
 // ---------------------------------------------------------------------------
 
-async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
-  const res = await fetch(url, {
+async function fetchWithSSE(
+  baseUrl: string,
+  path: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const res = await dashboardFetch(baseUrl, path, {
     method: 'POST',
     headers: getLlmRequestHeaders(),
     body: JSON.stringify(body),
@@ -83,60 +90,36 @@ async function fetchWithSSE(url: string, body: Record<string, unknown>, signal?:
 
   if (!res.body) throw new Error('No response body');
 
-  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = '';
-  let currentEvent = '';
-  let currentData = '';
   let result: Record<string, unknown> = {};
   let completed = false;
-  let streamError: Error | undefined;
 
   const spinner = ora({ text: 'Starting...', indent: 2 }).start();
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += value;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          currentData = line.slice(6);
-        } else if (line === '' && currentEvent && currentData) {
-          try {
-            const data = JSON.parse(currentData) as Record<string, unknown>;
-
-            if (currentEvent === 'progress') {
-              spinner.text = (data.message as string) || 'Processing...';
-            } else if (currentEvent === 'complete') {
-              spinner.succeed('Analysis complete');
-              result = data;
-              completed = true;
-            } else if (currentEvent === 'error') {
-              const message = typeof data.error === 'string' && data.error.trim()
-                ? data.error
-                : 'Generation failed';
-              spinner.fail(message);
-              streamError = new Error(message);
-            }
-          } catch {
-            // Skip malformed SSE events (e.g., truncated JSON from network issues)
-          }
-
-          currentEvent = '';
-          currentData = '';
-
-          if (streamError) throw streamError;
-        }
-      }
+  for await (const event of parseSSEStream(res.body, signal)) {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(event.data) as Record<string, unknown>;
+    } catch {
+      continue;
     }
-  } finally {
-    reader.releaseLock();
+
+    if (event.event === 'progress') {
+      spinner.text = (data.message as string) || 'Processing...';
+    } else if (event.event === 'complete') {
+      spinner.succeed('Analysis complete');
+      result = data;
+      completed = true;
+    } else if (event.event === 'error') {
+      const message = typeof data.error === 'string' && data.error.trim()
+        ? data.error
+        : 'Generation failed';
+      spinner.fail(message);
+      throw new Error(message);
+    }
+  }
+
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Generation aborted');
   }
 
   if (!completed) {
@@ -176,7 +159,7 @@ export async function backfillBatchToEndpoint(
   total: number,
   signal?: AbortSignal
 ): Promise<{ completed: number; failed: number }> {
-  const res = await fetch(`${baseUrl}${endpoint}`, {
+  const res = await dashboardFetch(baseUrl, endpoint, {
     method: 'POST',
     headers: getLlmRequestHeaders(),
     // force=true so outdated sessions (which already have facets) are re-processed.
@@ -191,54 +174,40 @@ export async function backfillBatchToEndpoint(
   }
   if (!res.body) throw new Error('No response body');
 
-  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = '';
-  let currentEvent = '';
-  let currentData = '';
   let result = { completed: 0, failed: 0 };
   let completed = false;
-  let streamError: Error | undefined;
 
   const spinner = ora({ text: `  Backfilling ${offset + 1}-${offset + sessionIds.length} of ${total}...`, indent: 2 }).start();
 
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += value;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          currentData = line.slice(6);
-        } else if (line === '' && currentEvent && currentData) {
-          try {
-            const data = JSON.parse(currentData) as Record<string, unknown>;
-            if (currentEvent === 'progress') {
-              const processed = (data.completed as number) + (data.failed as number);
-              spinner.text = `  Backfilling ${offset + processed + 1} of ${total}...`;
-            } else if (currentEvent === 'complete') {
-              result = { completed: data.completed as number, failed: data.failed as number };
-              spinner.succeed(`  Batch complete: ${result.completed} extracted, ${result.failed} failed`);
-              completed = true;
-            } else if (currentEvent === 'error') {
-              const message = typeof data.error === 'string' && data.error.trim()
-                ? data.error
-                : 'Backfill failed';
-              spinner.fail(message);
-              streamError = new Error(message);
-            }
-          } catch { /* skip malformed */ }
-          currentEvent = '';
-          currentData = '';
-          if (streamError) throw streamError;
-        }
-      }
+  for await (const event of parseSSEStream(res.body, signal)) {
+    let data: Record<string, unknown>;
+    try {
+      data = JSON.parse(event.data) as Record<string, unknown>;
+    } catch {
+      continue;
     }
-  } finally {
-    reader.releaseLock();
+    if (event.event === 'progress') {
+      const processed = (data.completed as number) + (data.failed as number);
+      spinner.text = `  Backfilling ${offset + processed + 1} of ${total}...`;
+    } else if (event.event === 'complete') {
+      result = {
+        completed: data.completed as number,
+        failed: data.failed as number,
+      };
+      spinner.succeed(
+        `  Batch complete: ${result.completed} extracted, ${result.failed} failed`,
+      );
+      completed = true;
+    } else if (event.event === 'error') {
+      const message = typeof data.error === 'string' && data.error.trim()
+        ? data.error
+        : 'Backfill failed';
+      spinner.fail(message);
+      throw new Error(message);
+    }
+  }
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error('Backfill aborted');
   }
   if (!completed) {
     const message = 'Backfill SSE stream ended without a complete event';
@@ -258,6 +227,7 @@ async function reflectAction(options: {
   section?: string;
   week?: string;
   project?: string;
+  source?: string;
 }): Promise<void> {
   const baseUrl = getBaseUrl();
   const week = options.week || getCurrentIsoWeek();
@@ -283,7 +253,11 @@ async function reflectAction(options: {
   const checkParams = new URLSearchParams();
   checkParams.set('period', week);
   if (options.project) checkParams.set('project', options.project);
-  const aggRes = await fetch(`${baseUrl}/api/facets/aggregated?${checkParams.toString()}`);
+  if (options.source) checkParams.set('source', options.source);
+  const aggRes = await dashboardFetch(
+    baseUrl,
+    `/api/facets/aggregated?${checkParams.toString()}`,
+  );
   if (aggRes.ok) {
     const agg = await aggRes.json() as { totalSessions: number; totalAllSessions: number };
     if (agg.totalSessions < 8) {
@@ -310,9 +284,12 @@ async function reflectAction(options: {
   if (options.project) {
     body.project = options.project;
   }
+  if (options.source) {
+    body.source = options.source;
+  }
 
   console.log();
-  const data = await fetchWithSSE(`${baseUrl}/api/reflect/generate`, body);
+  const data = await fetchWithSSE(baseUrl, '/api/reflect/generate', body);
 
   // Display results summary
   const results = data.results as Record<string, Record<string, unknown>> | undefined;
@@ -389,7 +366,10 @@ async function backfillAction(options: {
   params.set('period', options.period || 'all');
   if (options.project) params.set('project', options.project);
 
-  const missingRes = await fetch(`${baseUrl}/api/facets/missing?${params.toString()}`);
+  const missingRes = await dashboardFetch(
+    baseUrl,
+    `/api/facets/missing?${params.toString()}`,
+  );
   if (!missingRes.ok) {
     const text = await missingRes.text().catch(() => missingRes.statusText);
     console.log(chalk.red(`  Error: ${text}`));
@@ -398,7 +378,10 @@ async function backfillAction(options: {
 
   const { sessionIds: missingIds, count: missingCount } = await missingRes.json() as { sessionIds: string[]; count: number };
 
-  const outdatedRes = await fetch(`${baseUrl}/api/facets/outdated?${params.toString()}`);
+  const outdatedRes = await dashboardFetch(
+    baseUrl,
+    `/api/facets/outdated?${params.toString()}`,
+  );
   if (!outdatedRes.ok) {
     const text = await outdatedRes.text().catch(() => outdatedRes.statusText);
     console.log(chalk.red(`  Error fetching outdated sessions: ${text}`));
@@ -477,7 +460,10 @@ async function backfillPqAction(options: {
   params.set('period', options.period || 'all');
   if (options.project) params.set('project', options.project);
 
-  const missingRes = await fetch(`${baseUrl}/api/facets/missing-pq?${params.toString()}`);
+  const missingRes = await dashboardFetch(
+    baseUrl,
+    `/api/facets/missing-pq?${params.toString()}`,
+  );
   if (!missingRes.ok) {
     const text = await missingRes.text().catch(() => missingRes.statusText);
     console.log(chalk.red(`  Error: ${text}`));
@@ -486,7 +472,10 @@ async function backfillPqAction(options: {
 
   const { sessionIds: missingIds, count: missingCount } = await missingRes.json() as { sessionIds: string[]; count: number };
 
-  const outdatedRes = await fetch(`${baseUrl}/api/facets/outdated-pq?${params.toString()}`);
+  const outdatedRes = await dashboardFetch(
+    baseUrl,
+    `/api/facets/outdated-pq?${params.toString()}`,
+  );
   if (!outdatedRes.ok) {
     const text = await outdatedRes.text().catch(() => outdatedRes.statusText);
     console.log(chalk.red(`  Error fetching outdated PQ sessions: ${text}`));
@@ -574,5 +563,6 @@ export const reflectCommand = new Command('reflect')
   .option('--section <name>', 'Generate specific section: friction-wins, rules-skills, working-style')
   .option('--week <week>', 'ISO week to reflect on (e.g., 2026-W10), defaults to current week')
   .option('--project <name>', 'Scope to a single project')
+  .option('--source <tool>', 'Scope to a single source tool (claude-code, codex-cli, etc.)')
   .addCommand(backfillCommand)
   .action(reflectAction);

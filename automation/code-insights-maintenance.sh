@@ -23,6 +23,8 @@ BATCH_SIZE="${CODE_INSIGHTS_BATCH_SIZE:-5}"
 MAX_BATCHES="${CODE_INSIGHTS_MAX_BATCHES:-10}"
 DELAY="${CODE_INSIGHTS_DELAY:-10}"
 QUEUE_LIMIT="${CODE_INSIGHTS_QUEUE_LIMIT:-5}"
+WINDOW_END="${CODE_INSIGHTS_WINDOW_END:-}"
+DEADLINE_EPOCH="${CODE_INSIGHTS_DEADLINE_EPOCH:-}"
 FAIL_LOG="${CODE_INSIGHTS_FAIL_LOG:-$CONFIG_DIR/throttled-analyze.failures}"
 LOG_DIR="${CODE_INSIGHTS_LOG_DIR:-$CONFIG_DIR/logs}"
 RUN_LOG="$LOG_DIR/maintenance-$(date '+%Y%m%dT%H%M%S').log"
@@ -31,6 +33,12 @@ DASHBOARD_URL='http://127.0.0.1:7890'
 DASHBOARD_CAN_START_LOCAL=1
 
 DASHBOARD_PID=""
+PAUSE_FILE="$CONFIG_DIR/maintenance.paused"
+
+if [[ -e "$PAUSE_FILE" ]]; then
+  printf '[Code Insights] Maintenance is paused; no work was started.\n'
+  exit 0
+fi
 
 log() {
   printf '[%s] %s\n' "$(date -Iseconds)" "$*" | tee -a "$RUN_LOG"
@@ -58,6 +66,43 @@ trap 'exit_for_signal 143' TERM
 
 is_uint() {
   [[ "$1" =~ ^[0-9]+$ ]]
+}
+
+maintenance_window_has_ended() {
+  [[ -n "$WINDOW_END" ]] || return 1
+  local current_time
+  current_time=$(date '+%H:%M')
+  [[ "$current_time" == "$WINDOW_END" || "$current_time" > "$WINDOW_END" ]]
+}
+
+maintenance_stop_requested() {
+  [[ -e "$PAUSE_FILE" ]] && return 0
+  maintenance_window_has_ended
+}
+
+log_maintenance_stop() {
+  if [[ -e "$PAUSE_FILE" ]]; then
+    log 'Maintenance was paused; remaining work will resume later.'
+  else
+    log "Maintenance window ended at $WINDOW_END; remaining work will resume on the next schedule."
+  fi
+}
+
+initialize_deadline() {
+  [[ -n "$WINDOW_END" ]] || return 0
+  if [[ -z "$DEADLINE_EPOCH" ]]; then
+    local today candidate
+    today=$(date '+%Y-%m-%d') || return 1
+    if candidate=$(date -j -f '%Y-%m-%d %H:%M' "$today $WINDOW_END" '+%s' 2>/dev/null); then
+      DEADLINE_EPOCH=$candidate
+    elif candidate=$(date -d "$today $WINDOW_END" '+%s' 2>/dev/null); then
+      DEADLINE_EPOCH=$candidate
+    else
+      log "Could not calculate today's maintenance deadline for $WINDOW_END."
+      return 1
+    fi
+  fi
+  export CODE_INSIGHTS_DEADLINE_EPOCH="$DEADLINE_EPOCH"
 }
 
 read_configured_dashboard_port() {
@@ -133,6 +178,10 @@ validate_environment() {
   is_uint "$MAX_BATCHES" && [[ "$MAX_BATCHES" -gt 0 ]] || { log 'Invalid CODE_INSIGHTS_MAX_BATCHES'; return 64; }
   is_uint "$DELAY" || { log 'Invalid CODE_INSIGHTS_DELAY'; return 64; }
   is_uint "$QUEUE_LIMIT" && [[ "$QUEUE_LIMIT" -gt 0 ]] || { log 'Invalid CODE_INSIGHTS_QUEUE_LIMIT'; return 64; }
+  [[ -z "$WINDOW_END" || "$WINDOW_END" =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]] \
+    || { log 'Invalid CODE_INSIGHTS_WINDOW_END (expected HH:MM)'; return 64; }
+  [[ -z "$DEADLINE_EPOCH" ]] || { is_uint "$DEADLINE_EPOCH" && [[ "$DEADLINE_EPOCH" -gt 0 ]]; } \
+    || { log 'Invalid CODE_INSIGHTS_DEADLINE_EPOCH'; return 64; }
   [[ -n "$CODE_INSIGHTS_BIN" && -x "$CODE_INSIGHTS_BIN" ]] || { log 'code-insights executable not found'; return 69; }
   [[ -n "$SQLITE_BIN" && -x "$SQLITE_BIN" ]] || { log 'sqlite3 executable not found'; return 69; }
   [[ -n "$CURL_BIN" && -x "$CURL_BIN" ]] || { log 'curl executable not found'; return 69; }
@@ -153,6 +202,33 @@ run_pending_queue() {
     log "Queue processing failed with status $status; continuing with bounded database analysis."
   fi
   return "$status"
+}
+
+run_history_refresh() {
+  local output status
+  local args=(reanalyze run --batch-size "$BATCH_SIZE" --retry-failed --json)
+  if [[ -n "$DEADLINE_EPOCH" ]]; then
+    args+=(--deadline-epoch "$DEADLINE_EPOCH")
+  fi
+
+  log "Advancing the durable history reanalysis campaign by up to $BATCH_SIZE session(s)."
+  output=$(NO_COLOR=1 "$CODE_INSIGHTS_BIN" "${args[@]}" 2>&1)
+  status=$?
+  [[ -z "$output" ]] || printf '%s\n' "$output" | tee -a "$RUN_LOG"
+  if [[ "$status" -ne 0 ]]; then
+    log "Durable history reanalysis failed with status $status; legacy analysis was not started."
+    return "$status"
+  fi
+  if grep -Fq '"active":true' <<< "$output"; then
+    HISTORY_REFRESH_WAS_ACTIVE=1
+    return 0
+  fi
+  if grep -Fq '"active":false' <<< "$output"; then
+    HISTORY_REFRESH_WAS_ACTIVE=0
+    return 0
+  fi
+  log 'Could not determine durable history reanalysis state; legacy analysis was not started.'
+  return 1
 }
 
 run_sync() {
@@ -188,10 +264,17 @@ drain_analysis() {
   # Retry a bounded set quarantined by an earlier day. Failures created during
   # this run are intentionally deferred until tomorrow.
   if [[ -s "$FAIL_LOG" ]]; then
+    if maintenance_window_has_ended; then
+      log "Maintenance window ended at $WINDOW_END; remaining analysis will resume on the next schedule."
+      return 3
+    fi
     log "Retrying up to $BATCH_SIZE previously quarantined session(s)."
     run_analysis_batch --retry-failed
     status=$?
-    if [[ "$status" -eq 2 ]]; then
+    if [[ "$status" -eq 3 ]]; then
+      log_maintenance_stop
+      return 3
+    elif [[ "$status" -eq 2 ]]; then
       log 'Rate limit reached while retrying; stopping until the next schedule.'
       return 2
     elif [[ "$status" -ne 0 ]]; then
@@ -200,11 +283,18 @@ drain_analysis() {
   fi
 
   for ((batch = 1; batch <= MAX_BATCHES; batch++)); do
+    if maintenance_window_has_ended; then
+      log "Maintenance window ended at $WINDOW_END; remaining analysis will resume on the next schedule."
+      return 3
+    fi
     log "Analysis batch $batch/$MAX_BATCHES (newest sessions first)."
     run_analysis_batch
     status=$?
 
-    if [[ "$status" -eq 2 ]]; then
+    if [[ "$status" -eq 3 ]]; then
+      log_maintenance_stop
+      return 3
+    elif [[ "$status" -eq 2 ]]; then
       log 'Rate limit reached; stopping until the next schedule.'
       return 2
     elif [[ "$status" -ne 0 ]]; then
@@ -329,7 +419,16 @@ refresh_previous_week() {
     return 0
   fi
 
+  if maintenance_stop_requested; then
+    log_maintenance_stop
+    return 3
+  fi
   ensure_dashboard || return 1
+  if maintenance_stop_requested; then
+    log_maintenance_stop
+    stop_dashboard
+    return 3
+  fi
   log "Refreshing reflection for $REFLECT_WEEK (${snapshot_session_count:-none} -> $facet_count analyzed sessions)."
   output=$(NO_COLOR=1 "$CODE_INSIGHTS_BIN" reflect --week "$REFLECT_WEEK" 2>&1)
   status=$?
@@ -355,23 +454,59 @@ mkdir -p "$LOG_DIR"
 find "$LOG_DIR" -type f -name 'maintenance-*.log' -mtime +30 -delete 2>/dev/null || true
 
 validate_environment || exit $?
+initialize_deadline || exit $?
 if [[ "${CODE_INSIGHTS_LOCK_HELD:-}" != "1" ]]; then
   exec "$CODE_INSIGHTS_BIN" lock-run /bin/bash "$0" "${ORIGINAL_ARGS[@]}"
+fi
+if maintenance_window_has_ended; then
+  log "Maintenance window ended at $WINDOW_END; no work was started."
+  exit 0
 fi
 
 log 'Code Insights maintenance started.'
 overall_status=0
 run_sync || overall_status=1
+if maintenance_stop_requested; then
+  log_maintenance_stop
+  exit 0
+fi
 run_pending_queue || overall_status=1
+if maintenance_stop_requested; then
+  log_maintenance_stop
+  exit 0
+fi
+
+HISTORY_REFRESH_WAS_ACTIVE=0
+run_history_refresh
+history_refresh_status=$?
+if [[ "$history_refresh_status" -ne 0 ]]; then
+  exit "$history_refresh_status"
+fi
+if [[ "$HISTORY_REFRESH_WAS_ACTIVE" -eq 1 ]]; then
+  log 'Durable history reanalysis remains active; legacy analysis and reflection were skipped.'
+  exit 0
+fi
 
 drain_analysis
 analysis_status=$?
 if [[ "$analysis_status" -eq 2 ]]; then
   exit 2
+elif [[ "$analysis_status" -eq 3 ]]; then
+  exit 0
 elif [[ "$analysis_status" -ne 0 ]]; then
   overall_status=1
 fi
 
-refresh_previous_week || overall_status=1
+if maintenance_stop_requested; then
+  log_maintenance_stop
+  exit 0
+fi
+refresh_previous_week
+reflect_status=$?
+if [[ "$reflect_status" -eq 3 ]]; then
+  exit 0
+elif [[ "$reflect_status" -ne 0 ]]; then
+  overall_status=1
+fi
 log "Code Insights maintenance finished with status $overall_status."
 exit "$overall_status"

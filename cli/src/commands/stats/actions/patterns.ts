@@ -8,6 +8,7 @@ import type { StatsFlags } from '../data/types.js';
 import { resolveDataSource } from '../data/source.js';
 import { handleStatsError } from './error-handler.js';
 import { loadConfig } from '../../../utils/config.js';
+import { dashboardFetch } from '../../../utils/dashboard-client.js';
 import { sectionHeader } from '../render/layout.js';
 
 interface AggregatedData {
@@ -66,7 +67,10 @@ export async function patternsAction(flags: StatsFlags): Promise<void> {
     if (flags.project) params.set('project', flags.project);
     if (flags.source) params.set('source', flags.source);
 
-    const res = await fetch(`${baseUrl}/api/reflect/results?${params.toString()}`);
+    const res = await dashboardFetch(
+      baseUrl,
+      `/api/reflect/results?${params.toString()}`,
+    );
     if (!res.ok) {
       console.log(chalk.red(`  Failed to fetch patterns: ${res.statusText}`));
       return;
@@ -134,7 +138,10 @@ export async function patternsAction(flags: StatsFlags): Promise<void> {
     console.log();
 
     // Check for cached reflect snapshot
-    const snapshotRes = await fetch(`${baseUrl}/api/reflect/snapshot?${params.toString()}`);
+    const snapshotRes = await dashboardFetch(
+      baseUrl,
+      `/api/reflect/snapshot?${params.toString()}`,
+    );
     if (snapshotRes.ok) {
       const snapshotData = await snapshotRes.json() as {
         snapshot: {

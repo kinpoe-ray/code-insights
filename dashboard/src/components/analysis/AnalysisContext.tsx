@@ -19,6 +19,7 @@ import { getSessionTitle } from '@/lib/utils';
 import type { Session } from '@/lib/types';
 import { toast } from 'sonner';
 import { parseSSEStream } from '@/lib/sse';
+import { dashboardFetch } from '@/lib/dashboard-http';
 
 export interface AnalysisState {
   status: 'idle' | 'analyzing' | 'complete' | 'error';
@@ -157,7 +158,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           : `/api/analysis/prompt-quality/stream?sessionId=${encodeURIComponent(session.id)}`;
 
       try {
-        const response = await fetch(endpoint, {
+        const response = await dashboardFetch(endpoint, {
           signal: controller.signal,
         });
 
@@ -170,7 +171,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           throw new Error('No response body for SSE stream');
         }
 
-        for await (const sseEvent of parseSSEStream(response.body)) {
+        for await (const sseEvent of parseSSEStream(
+          response.body,
+          controller.signal,
+        )) {
           if (controller.signal.aborted) return;
 
           try {

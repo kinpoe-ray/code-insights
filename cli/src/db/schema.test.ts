@@ -167,6 +167,7 @@ describe('runMigrations', () => {
     const colNames = columns.map(c => c.name);
     expect(colNames).toContain('period');
     expect(colNames).toContain('project_id');
+    expect(colNames).toContain('source_scope');
     expect(colNames).toContain('results_json');
     expect(colNames).toContain('generated_at');
     expect(colNames).toContain('window_start');
@@ -177,7 +178,7 @@ describe('runMigrations', () => {
     db.close();
   });
 
-  it('V4 reflect_snapshots has composite primary key (period, project_id)', () => {
+  it('V11 reflect_snapshots has composite primary key (period, project_id, source_scope)', () => {
     const db = new Database(':memory:');
     runMigrations(db);
 
@@ -186,21 +187,22 @@ describe('runMigrations', () => {
       .all() as Array<{ name: string; pk: number }>;
 
     const pkColumns = columns.filter(c => c.pk > 0).sort((a, b) => a.pk - b.pk);
-    expect(pkColumns).toHaveLength(2);
+    expect(pkColumns).toHaveLength(3);
     expect(pkColumns[0].name).toBe('period');
     expect(pkColumns[1].name).toBe('project_id');
+    expect(pkColumns[2].name).toBe('source_scope');
 
     db.close();
   });
 
-  it('V4 reflect_snapshots supports upsert on composite PK', () => {
+  it('V11 reflect_snapshots supports upsert within one source scope', () => {
     const db = new Database(':memory:');
     runMigrations(db);
 
     const insert = db.prepare(`
-      INSERT INTO reflect_snapshots (period, project_id, results_json, generated_at, window_start, window_end, session_count, facet_count)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(period, project_id) DO UPDATE SET
+      INSERT INTO reflect_snapshots (period, project_id, source_scope, results_json, generated_at, window_start, window_end, session_count, facet_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(period, project_id, source_scope) DO UPDATE SET
         results_json = excluded.results_json,
         generated_at = excluded.generated_at,
         session_count = excluded.session_count,
@@ -208,10 +210,10 @@ describe('runMigrations', () => {
     `);
 
     // Insert initial snapshot
-    insert.run('30d', '__all__', '{"a":1}', '2025-06-15T10:00:00Z', '2025-05-16T10:00:00Z', '2025-06-15T10:00:00Z', 25, 100);
+    insert.run('30d', '__all__', 'claude-code', '{"a":1}', '2025-06-15T10:00:00Z', '2025-05-16T10:00:00Z', '2025-06-15T10:00:00Z', 25, 100);
 
     // Upsert with updated data
-    insert.run('30d', '__all__', '{"a":2}', '2025-06-16T10:00:00Z', '2025-05-17T10:00:00Z', '2025-06-16T10:00:00Z', 30, 120);
+    insert.run('30d', '__all__', 'claude-code', '{"a":2}', '2025-06-16T10:00:00Z', '2025-05-17T10:00:00Z', '2025-06-16T10:00:00Z', 30, 120);
 
     const rows = db.prepare('SELECT * FROM reflect_snapshots').all() as Array<{ results_json: string; session_count: number }>;
     expect(rows).toHaveLength(1);
@@ -298,12 +300,12 @@ describe('runMigrations', () => {
     db.close();
   });
 
-  it('V10 schema version is 10 after migration', () => {
+  it('latest schema version is V12 after migration', () => {
     const db = new Database(':memory:');
     runMigrations(db);
 
     const row = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(10);
+    expect(row.v).toBe(12);
 
     db.close();
   });

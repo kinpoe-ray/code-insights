@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
+import type { MiddlewareHandler } from 'hono';
 import { existsSync, readFileSync } from 'fs';
 import { relative, join } from 'path';
 import { openUrl } from '@code-insights/cli/utils/browser';
@@ -19,12 +20,28 @@ import telemetryRouter from './routes/telemetry.js';
 import facetsRouter from './routes/facets.js';
 import reflectRouter from './routes/reflect.js';
 import dispatchRouter from './routes/dispatch.js';
+import { createLocalDashboardSecurity } from './security/local-dashboard-security.js';
+import {
+  createAnalysisQueuePump,
+  type AnalysisQueuePumpOptions,
+} from './analysis/queue-pump.js';
+import { createAnalysisQueueRouter } from './routes/analysis-queue.js';
 
 export interface ServerOptions {
   port: number;
   // Absolute path to the dashboard/dist directory
   staticDir: string;
   openBrowser: boolean;
+  processQueue?: AnalysisQueuePumpOptions['processQueue'];
+}
+
+export interface CreateAppOptions {
+  /**
+   * Production startServer always supplies this middleware. Route tests may
+   * omit it to exercise handlers directly without a bootstrap ceremony.
+   */
+  security?: MiddlewareHandler;
+  analysisQueueWake?: () => void;
 }
 
 /**
@@ -32,8 +49,12 @@ export interface ServerOptions {
  * Does NOT add static file serving or call serve() — that's startServer's job.
  * Exported so tests can use app.request() without starting a real server.
  */
-export function createApp(): Hono {
+export function createApp(options: CreateAppOptions = {}): Hono {
   const app = new Hono();
+
+  if (options.security) {
+    app.use('*', options.security);
+  }
 
   // Global error handler — prevents stack trace leakage to clients.
   // Detects malformed JSON bodies (SyntaxError) and returns 400 instead of 500.
@@ -52,7 +73,12 @@ export function createApp(): Hono {
   app.route('/api/messages', messagesRouter);
   app.route('/api/insights', insightsRouter);
   app.route('/api/analysis', analysisRouter);
-  app.route('/api/analysis/queue', analysisQueueRouter);
+  app.route(
+    '/api/analysis/queue',
+    options.analysisQueueWake
+      ? createAnalysisQueueRouter({ wake: options.analysisQueueWake })
+      : analysisQueueRouter,
+  );
   app.route('/api/analytics', analyticsRouter);
   app.route('/api/config', configRouter);
   app.route('/api/export', exportRouter);
@@ -62,7 +88,7 @@ export function createApp(): Hono {
   app.route('/api/dispatch', dispatchRouter);
 
   // Health check
-  app.get('/api/health', (c) => c.json({ ok: true, version: '0.1.0' }));
+  app.get('/api/health', (c) => c.json({ ok: true }));
 
   // API 404 catch-all — must come AFTER all /api sub-routers and BEFORE static serving.
   // Without this, unmatched /api/* routes fall through to the SPA fallback and return
@@ -79,9 +105,15 @@ export function createApp(): Hono {
  * Called by the CLI `dashboard` command.
  */
 export async function startServer(options: ServerOptions): Promise<void> {
-  const { port, staticDir, openBrowser } = options;
+  const { port, staticDir, openBrowser, processQueue } = options;
+  const queuePump = processQueue
+    ? createAnalysisQueuePump({ processQueue })
+    : null;
 
-  const app = createApp();
+  const app = createApp({
+    security: createLocalDashboardSecurity(),
+    analysisQueueWake: queuePump?.wake,
+  });
 
   // Static file serving — only if the dashboard has been built.
   // serveStatic requires a path relative to process.cwd(), not an absolute path.
@@ -119,6 +151,7 @@ export async function startServer(options: ServerOptions): Promise<void> {
   // 'exit' handler in cli/src/db/client.ts run WAL checkpoint via closeDb().
   // 3s timeout guards against PostHog SDK stalling on network issues.
   const shutdown = async () => {
+    queuePump?.stop();
     await Promise.race([
       shutdownTelemetry(),
       new Promise<void>((resolve) => setTimeout(resolve, 3000)),
@@ -128,11 +161,12 @@ export async function startServer(options: ServerOptions): Promise<void> {
   process.on('SIGINT', () => { void shutdown(); });
   process.on('SIGTERM', () => { void shutdown(); });
 
-  serve({ fetch: app.fetch, port }, (info) => {
+  serve({ fetch: app.fetch, port, hostname: '127.0.0.1' }, (info) => {
     const url = `http://localhost:${info.port}`;
     console.log(`  Code Insights dashboard running at ${url}`);
     if (openBrowser) {
       openUrl(url);
     }
+    queuePump?.wake();
   });
 }

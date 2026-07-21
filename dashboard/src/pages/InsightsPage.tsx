@@ -203,7 +203,7 @@ export default function InsightsPage() {
     setDispatchPrefill(prefill);
     setDrawerOpen(true);
     markDispatchOpened();
-    captureDispatchOpenedFromInsights(primarySession.session_character);
+    captureDispatchOpenedFromInsights();
   }
 
   function handleCalloutDismiss() {
