@@ -29,6 +29,10 @@ assert_not_contains() {
 mkdir -p "$TMP_ROOT/bin" "$TMP_ROOT/home/.code-insights"
 touch "$TMP_ROOT/home/.code-insights/data.db"
 
+HOST_NODE_BIN=$(command -v node 2>/dev/null || true)
+[[ -n "$HOST_NODE_BIN" ]] || fail 'node executable not found'
+ln -s "$HOST_NODE_BIN" "$TMP_ROOT/bin/node"
+
 cat > "$TMP_ROOT/bin/code-insights" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
