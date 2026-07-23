@@ -39,7 +39,7 @@ import type {
  * change in a way that must not be mixed inside one durable campaign.
  */
 export const LEGACY_TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v1`;
-export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v4`;
+export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v5`;
 
 export function pipelineRevisionForAnalysisLanguage(
   analysisLanguage: AnalysisLanguage,
@@ -376,7 +376,7 @@ async function runPromptQualityPass(
     throw new Error('Prompt quality request exceeds the provider context window.');
   }
   const startedAt = Date.now();
-  const response = await runner.chat(preparedRequest.messages);
+  const response = await runner.chat(preparedRequest.messages, { temperature: 0 });
   return {
     rawJson: response.content,
     durationMs: Date.now() - startedAt,
@@ -386,6 +386,29 @@ async function runPromptQualityPass(
     cacheReadTokens: response.usage?.cacheReadTokens,
     model: runner.model,
     provider: runner.provider,
+  };
+}
+
+function combinePromptQualityAttempts(
+  attempts: RunAnalysisResult[],
+): RunAnalysisResult {
+  const latest = attempts.at(-1);
+  if (!latest) {
+    throw new Error('Prompt quality analysis did not produce an attempt.');
+  }
+  return {
+    ...latest,
+    inputTokens: attempts.reduce((sum, attempt) => sum + attempt.inputTokens, 0),
+    outputTokens: attempts.reduce((sum, attempt) => sum + attempt.outputTokens, 0),
+    cacheCreationTokens: attempts.reduce(
+      (sum, attempt) => sum + (attempt.cacheCreationTokens ?? 0),
+      0,
+    ),
+    cacheReadTokens: attempts.reduce(
+      (sum, attempt) => sum + (attempt.cacheReadTokens ?? 0),
+      0,
+    ),
+    durationMs: attempts.reduce((sum, attempt) => sum + attempt.durationMs, 0),
   };
 }
 
@@ -407,11 +430,19 @@ export async function preparePromptQualityPass(
     }
   }
 
-  const result = await runPromptQualityPass(input, runner, analysisLanguage);
-  const parsed = parsePromptQualityResponse(result.rawJson);
+  const attempts = [await runPromptQualityPass(input, runner, analysisLanguage)];
+  let parsed = parsePromptQualityResponse(attempts[0].rawJson);
   if (!parsed.success) {
-    throw new Error(`Prompt quality analysis failed: ${parsed.error.error_message}`);
+    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage));
+    parsed = parsePromptQualityResponse(attempts[1].rawJson);
   }
+  if (!parsed.success) {
+    throw new Error(
+      `Prompt quality analysis failed: ${parsed.error.error_type} `
+      + `(response length ${parsed.error.response_length}).`,
+    );
+  }
+  const result = combinePromptQualityAttempts(attempts);
   const estimatedCostUsd = isAnalysisLLMClient(runner)
     ? calculateAnalysisCost(result.provider, result.model, {
         inputTokens: result.inputTokens,
@@ -425,7 +456,7 @@ export async function preparePromptQualityPass(
       input,
       result.provider,
       result.model,
-      normalizeUsage({ ...result, estimatedCostUsd, chunkCount: 1 }),
+      normalizeUsage({ ...result, estimatedCostUsd, chunkCount: attempts.length }),
       analysisLanguage,
     ),
     kind: 'prompt_quality',

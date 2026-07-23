@@ -415,6 +415,10 @@ describe('runInsightsCommand — provider mode (no --native)', () => {
       .mockResolvedValueOnce({
         rawJson: '{not valid prompt quality json', durationMs: 80,
         inputTokens: 30, outputTokens: 30, model: 'gpt-4o', provider: 'openai',
+      })
+      .mockResolvedValueOnce({
+        rawJson: '{still not valid prompt quality json', durationMs: 80,
+        inputTokens: 30, outputTokens: 30, model: 'gpt-4o', provider: 'openai',
       });
 
     const { runInsightsCommand } = await import('../insights.js');
@@ -877,7 +881,7 @@ describe('runInsightsCommand — resume detection', () => {
     expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
   });
 
-  it('requires the current v3 policy for a directly requested analysis', async () => {
+  it('requires the current v5 policy for a directly requested analysis', async () => {
     seedSession(mockDb, 'sess1', 10);
     markSessionCurrent(mockDb, 'sess1');
     mockDb.prepare(`

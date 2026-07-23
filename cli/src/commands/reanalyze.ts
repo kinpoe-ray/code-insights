@@ -416,7 +416,12 @@ function releaseItemClaim(
 }
 
 function classifyFailure(error: unknown): {
-  code: 'RATE_LIMIT' | 'AUTHENTICATION' | 'INPUT_CHANGED' | 'ANALYSIS_FAILED';
+  code:
+    | 'RATE_LIMIT'
+    | 'AUTHENTICATION'
+    | 'INPUT_CHANGED'
+    | 'INVALID_MODEL_OUTPUT'
+    | 'ANALYSIS_FAILED';
   safeMessage: string;
   stopReason: CampaignStopReason | null;
 } {
@@ -442,6 +447,13 @@ function classifyFailure(error: unknown): {
     return {
       code: 'INPUT_CHANGED',
       safeMessage: 'Session changed after campaign creation; previous results were kept.',
+      stopReason: null,
+    };
+  }
+  if (/\b(?:no_json_found|json_parse_error|invalid_structure)\b/i.test(message)) {
+    return {
+      code: 'INVALID_MODEL_OUTPUT',
+      safeMessage: 'Model structured output remained invalid after retry; previous results were kept.',
       stopReason: null,
     };
   }
