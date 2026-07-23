@@ -17,6 +17,7 @@ import {
 import { calculateAnalysisCost } from './analysis-pricing.js';
 import { saveAnalysisUsage, type SaveAnalysisUsageData } from './analysis-usage-db.js';
 import { prepareBoundedConversationRequest, type LLMClient } from './llm-client.js';
+import { sanitizeMessageReferences } from './message-references.js';
 import { formatMessagesForAnalysis } from './message-format.js';
 import type { AnalysisResponse, PromptQualityResponse, SQLiteMessageRow } from './prompt-types.js';
 import {
@@ -33,7 +34,7 @@ import type { AnalysisRunner, RunAnalysisResult } from './runner-types.js';
  * change in a way that must not be mixed inside one durable campaign.
  */
 export const LEGACY_TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v1`;
-export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v2`;
+export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v3`;
 
 export function pipelineRevisionForAnalysisLanguage(
   analysisLanguage: AnalysisLanguage,
@@ -460,9 +461,17 @@ export function publishPreparedTwoPass(
     assertStageMatchesInput(sessionStage, currentInput);
     assertStageMatchesInput(promptQualityStage, currentInput);
 
-    const sessionInsights = convertToInsightRows(sessionStage.response, currentInput.session);
-    const promptQualityInsight = convertPQToInsightRow(
+    const filtered = sanitizeMessageReferences(
+      sessionStage.response,
       promptQualityStage.response,
+      currentInput.messages,
+    );
+    const sessionInsights = convertToInsightRows(
+      filtered.sessionResponse,
+      currentInput.session,
+    );
+    const promptQualityInsight = convertPQToInsightRow(
+      filtered.promptQualityResponse,
       currentInput.session,
     );
     saveInsightsToDb([...sessionInsights, promptQualityInsight], db);

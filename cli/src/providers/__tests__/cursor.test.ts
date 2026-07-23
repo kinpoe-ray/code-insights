@@ -31,6 +31,32 @@ function virtualPath(dbPath: string): string {
   return `${dbPath}#${COMPOSER_ID}`;
 }
 
+function makeWorkspaceDb(
+  cursorDataDir: string,
+  workspaceHash: string,
+  projectPath: string,
+  composerIds: string[],
+): string {
+  const workspaceDir = path.join(cursorDataDir, 'workspaceStorage', workspaceHash);
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workspaceDir, 'workspace.json'),
+    JSON.stringify({ folder: `file://${projectPath}` }),
+  );
+
+  const dbPath = path.join(workspaceDir, 'state.vscdb');
+  const db = new Database(dbPath);
+  db.exec('CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value TEXT);');
+  db.prepare('INSERT INTO ItemTable (key, value) VALUES (?, ?)').run(
+    'composer.composerData',
+    JSON.stringify({
+      allComposers: composerIds.map(composerId => ({ composerId, name: `Session ${composerId}` })),
+    }),
+  );
+  db.close();
+  return dbPath;
+}
+
 function userBubble(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return { bubbleId: 'bubble-user-1', type: 1, text: 'How do I fix the login bug?', ...overrides };
 }
@@ -51,7 +77,198 @@ describe('CursorProvider — parsing accuracy fixes', () => {
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
+  // ── Discovery / canonical source ─────────────────────────────────────────
+
+  it('discovers one canonical global source when workspace and global storage contain the same composer', async () => {
+    const cursorDataDir = path.join(tempDir, 'Cursor', 'User');
+    const projectPath = path.join(tempDir, 'projects', 'real-workspace');
+    makeWorkspaceDb(cursorDataDir, 'workspace-hash', projectPath, [COMPOSER_ID]);
+    fs.mkdirSync(path.join(cursorDataDir, 'globalStorage'), { recursive: true });
+    const globalDbPath = makeCursorDb(
+      path.join(cursorDataDir, 'globalStorage'),
+      {
+        conversation: [
+          userBubble({ createdAt: '2026-07-20T06:12:25.123Z' }),
+          assistantBubble({ createdAt: '2026-07-20T06:12:26.456Z' }),
+        ],
+      },
+    );
+    const isolatedProvider = new CursorProvider(cursorDataDir);
+
+    const discovered = await isolatedProvider.discover();
+
+    expect(discovered).toEqual([virtualPath(globalDbPath)]);
+  });
+
+  it('keeps the real workspace project path when parsing a canonical global source', async () => {
+    const cursorDataDir = path.join(tempDir, 'Cursor', 'User');
+    const projectPath = path.join(tempDir, 'projects', 'real-workspace');
+    makeWorkspaceDb(cursorDataDir, 'workspace-hash', projectPath, [COMPOSER_ID]);
+    fs.mkdirSync(path.join(cursorDataDir, 'globalStorage'), { recursive: true });
+    makeCursorDb(
+      path.join(cursorDataDir, 'globalStorage'),
+      {
+        conversation: [
+          userBubble({ createdAt: '2026-07-20T06:12:25.123Z' }),
+          assistantBubble({ createdAt: '2026-07-20T06:12:26.456Z' }),
+        ],
+      },
+    );
+    const isolatedProvider = new CursorProvider(cursorDataDir);
+    const [canonicalSource] = await isolatedProvider.discover();
+
+    const session = await isolatedProvider.parse(canonicalSource);
+
+    expect(session).not.toBeNull();
+    expect(session!.projectPath).toBe(projectPath);
+    expect(session!.projectName).toBe('real-workspace');
+  });
+
+  it('does not reintroduce unrelated global composers after applying a project filter', async () => {
+    const cursorDataDir = path.join(tempDir, 'Cursor', 'User');
+    const matchingProject = path.join(tempDir, 'projects', 'real-workspace');
+    const unrelatedProject = path.join(tempDir, 'projects', 'unrelated-workspace');
+    const unrelatedComposerId = 'unrelated-composer';
+    makeWorkspaceDb(cursorDataDir, 'matching-hash', matchingProject, [COMPOSER_ID]);
+    makeWorkspaceDb(cursorDataDir, 'unrelated-hash', unrelatedProject, [unrelatedComposerId]);
+    fs.mkdirSync(path.join(cursorDataDir, 'globalStorage'), { recursive: true });
+    const globalDbPath = makeCursorDb(
+      path.join(cursorDataDir, 'globalStorage'),
+      { conversation: [userBubble(), assistantBubble()] },
+    );
+    const globalDb = new Database(globalDbPath);
+    globalDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
+      `composerData:${unrelatedComposerId}`,
+      JSON.stringify({ conversation: [userBubble(), assistantBubble()] }),
+    );
+    globalDb.close();
+    const isolatedProvider = new CursorProvider(cursorDataDir);
+
+    const discovered = await isolatedProvider.discover({ projectFilter: 'real-workspace' });
+
+    expect(discovered).toEqual([virtualPath(globalDbPath)]);
+  });
+
+  it('changes only the affected composer fingerprint when workspace attribution changes', async () => {
+    const cursorDataDir = path.join(tempDir, 'Cursor', 'User');
+    const firstWorkspaceHash = 'first-workspace-hash';
+    const firstProject = path.join(tempDir, 'projects', 'first-project');
+    const renamedFirstProject = path.join(tempDir, 'projects', 'renamed-first-project');
+    const secondProject = path.join(tempDir, 'projects', 'second-project');
+    const secondComposerId = 'second-composer';
+    const globalOnlyComposerId = 'global-only-composer';
+    makeWorkspaceDb(cursorDataDir, firstWorkspaceHash, firstProject, [COMPOSER_ID]);
+    makeWorkspaceDb(cursorDataDir, 'second-workspace-hash', secondProject, [secondComposerId]);
+    fs.mkdirSync(path.join(cursorDataDir, 'globalStorage'), { recursive: true });
+    const globalDbPath = makeCursorDb(
+      path.join(cursorDataDir, 'globalStorage'),
+      { conversation: [userBubble(), assistantBubble()] },
+    );
+    const globalDb = new Database(globalDbPath);
+    globalDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
+      `composerData:${secondComposerId}`,
+      JSON.stringify({ conversation: [userBubble(), assistantBubble()] }),
+    );
+    globalDb.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
+      `composerData:${globalOnlyComposerId}`,
+      JSON.stringify({ conversation: [userBubble(), assistantBubble()] }),
+    );
+    globalDb.close();
+    const isolatedProvider = new CursorProvider(cursorDataDir);
+    const initialSources = await isolatedProvider.discover();
+    const firstSource = initialSources.find(source => source.endsWith(`#${COMPOSER_ID}`))!;
+    const secondSource = initialSources.find(source => source.endsWith(`#${secondComposerId}`))!;
+    const globalOnlySource = initialSources.find(source => source.endsWith(`#${globalOnlyComposerId}`))!;
+    const initialFirstFingerprint = isolatedProvider.getSourceFingerprint(firstSource);
+    const initialSecondFingerprint = isolatedProvider.getSourceFingerprint(secondSource);
+
+    expect(isolatedProvider.getSourceFingerprint(globalOnlySource)).toBeNull();
+
+    fs.writeFileSync(
+      path.join(cursorDataDir, 'workspaceStorage', firstWorkspaceHash, 'workspace.json'),
+      JSON.stringify({ folder: `file://${renamedFirstProject}` }),
+    );
+    await isolatedProvider.discover();
+
+    expect(isolatedProvider.getSourceFingerprint(firstSource)).not.toBe(initialFirstFingerprint);
+    expect(isolatedProvider.getSourceFingerprint(secondSource)).toBe(initialSecondFingerprint);
+    expect(isolatedProvider.getSourceFingerprint(globalOnlySource)).toBeNull();
+  });
+
   // ── Timestamps ────────────────────────────────────────────────────────────
+
+  it('uses the bubble createdAt timestamp exposed by current Cursor storage', async () => {
+    const userCreatedAt = '2026-07-20T06:12:25.123Z';
+    const assistantCreatedAt = '2026-07-20T06:12:26.456Z';
+    const dbPath = makeCursorDb(tempDir, {
+      conversation: [
+        userBubble({ createdAt: userCreatedAt }),
+        assistantBubble({ createdAt: assistantCreatedAt }),
+      ],
+    });
+
+    const session = await provider.parse(virtualPath(dbPath));
+
+    expect(session).not.toBeNull();
+    expect(session!.messages.map(message => message.timestamp.toISOString())).toEqual([
+      userCreatedAt,
+      assistantCreatedAt,
+    ]);
+  });
+
+  it('does not move endedAt behind the latest message when metadata is stale', async () => {
+    const firstMessageAt = '2026-07-20T06:12:25.123Z';
+    const staleMetadataAt = Date.parse('2026-07-20T06:15:00.000Z');
+    const latestMessageAt = '2026-07-20T06:20:26.456Z';
+    const dbPath = makeCursorDb(tempDir, {
+      lastUpdatedAt: staleMetadataAt,
+      conversation: [
+        userBubble({ createdAt: firstMessageAt }),
+        assistantBubble({ createdAt: latestMessageAt }),
+      ],
+    });
+
+    const session = await provider.parse(virtualPath(dbPath));
+
+    expect(session).not.toBeNull();
+    expect(session!.endedAt.toISOString()).toBe(latestMessageAt);
+    expect(Math.max(...session!.messages.map(message => message.timestamp.getTime())))
+      .toBeLessThanOrEqual(session!.endedAt.getTime());
+  });
+
+  it('keeps endedAt at the latest message even when metadata is later', async () => {
+    const firstMessageAt = '2026-07-20T06:12:25.123Z';
+    const latestMessageAt = '2026-07-20T06:20:26.456Z';
+    const metadataAt = '2026-07-20T06:25:00.000Z';
+    const dbPath = makeCursorDb(tempDir, {
+      lastUpdatedAt: Date.parse(metadataAt),
+      conversation: [
+        userBubble({ createdAt: firstMessageAt }),
+        assistantBubble({ createdAt: latestMessageAt }),
+      ],
+    });
+
+    const session = await provider.parse(virtualPath(dbPath));
+
+    expect(session).not.toBeNull();
+    expect(session!.endedAt.toISOString()).toBe(latestMessageAt);
+  });
+
+  it('uses composer metadata for both bounds when messages have no wall-clock timestamps', async () => {
+    const createdAt = '2026-07-20T06:12:25.123Z';
+    const lastUpdatedAt = '2026-07-20T06:25:00.000Z';
+    const dbPath = makeCursorDb(tempDir, {
+      createdAt: Date.parse(createdAt),
+      lastUpdatedAt: Date.parse(lastUpdatedAt),
+      conversation: [userBubble(), assistantBubble()],
+    });
+
+    const session = await provider.parse(virtualPath(dbPath));
+
+    expect(session).not.toBeNull();
+    expect(session!.startedAt.toISOString()).toBe(createdAt);
+    expect(session!.endedAt.toISOString()).toBe(lastUpdatedAt);
+  });
 
   it('uses timingInfo.clientRpcSendTime as the timestamp for assistant bubbles', async () => {
     const rpcTime = 1748076005959;
@@ -102,6 +319,61 @@ describe('CursorProvider — parsing accuracy fixes', () => {
     expect(session).not.toBeNull();
     const userMsg = session!.messages.find(m => m.type === 'user');
     expect(userMsg!.timestamp.getTime()).toBe(0);
+  });
+
+  it('emits an exact replayed bubble once without double-counting its usage', async () => {
+    const replayedAssistant = assistantBubble({
+      bubbleId: 'replayed-assistant',
+      createdAt: '2026-07-20T06:12:26.456Z',
+      tokenCount: { inputTokens: 100, outputTokens: 50 },
+    });
+    const dbPath = makeCursorDb(tempDir, {
+      conversation: [
+        userBubble({ createdAt: '2026-07-20T06:12:25.123Z' }),
+        replayedAssistant,
+        { ...replayedAssistant },
+      ],
+    });
+
+    const session = await provider.parse(virtualPath(dbPath));
+
+    expect(session).not.toBeNull();
+    expect(session!.messages).toHaveLength(2);
+    expect(session!.assistantMessageCount).toBe(1);
+    expect(session!.usage).toMatchObject({
+      totalInputTokens: 100,
+      totalOutputTokens: 50,
+    });
+  });
+
+  it('rejects conflicting payloads that reuse one bubble ID', async () => {
+    const dbPath = makeCursorDb(tempDir, {
+      conversation: [
+        userBubble({ bubbleId: 'conflict', text: 'First payload' }),
+        userBubble({ bubbleId: 'conflict', text: 'Different payload' }),
+        assistantBubble(),
+      ],
+    });
+
+    await expect(provider.parse(virtualPath(dbPath))).rejects.toThrow(
+      /conflicting Cursor bubble ID/i,
+    );
+  });
+
+  it('rejects an incomplete headers-only snapshot instead of deleting the missing turn', async () => {
+    const dbPath = makeCursorDb(tempDir, {
+      fullConversationHeadersOnly: [{ bubbleId: 'broken-bubble', type: 1 }],
+    });
+    const db = new Database(dbPath);
+    db.prepare('INSERT INTO cursorDiskKV (key, value) VALUES (?, ?)').run(
+      `bubbleId:${COMPOSER_ID}:broken-bubble`,
+      '{not-json}',
+    );
+    db.close();
+
+    await expect(provider.parse(virtualPath(dbPath))).rejects.toThrow(
+      /Cursor bubble/i,
+    );
   });
 
   // ── Cost (usageData) ───────────────────────────────────────────────────────

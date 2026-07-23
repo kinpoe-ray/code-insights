@@ -20,7 +20,6 @@ import {
   preparePromptQualityPass,
   prepareSessionAnalysisPass,
   publishPreparedTwoPass,
-  LEGACY_TWO_PASS_PIPELINE_REVISION,
   pipelineRevisionForAnalysisLanguage,
   type FrozenSessionAnalysisInput,
 } from '../analysis/two-pass-analysis.js';
@@ -71,12 +70,8 @@ function isAlreadyAnalyzedInAnyLanguage(
   if (typeof runner.provider !== 'string' || typeof runner.model !== 'string') {
     return false;
   }
-  const supportedRevisions = [
-    LEGACY_TWO_PASS_PIPELINE_REVISION,
-    `${LEGACY_TWO_PASS_PIPELINE_REVISION}/lang-zh-CN`,
-    `${LEGACY_TWO_PASS_PIPELINE_REVISION}/lang-en-US`,
-    ...(['auto', 'zh-CN', 'en-US'] as const).map(pipelineRevisionForAnalysisLanguage),
-  ];
+  const supportedRevisions = (['auto', 'zh-CN', 'en-US'] as const)
+    .map(pipelineRevisionForAnalysisLanguage);
   const revisionPlaceholders = supportedRevisions.map(() => '?').join(', ');
   const row = db.prepare(`
     SELECT COALESCE(MAX(completed_passes), 0) AS completed_passes

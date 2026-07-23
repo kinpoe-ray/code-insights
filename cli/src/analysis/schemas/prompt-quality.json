@@ -40,7 +40,7 @@
           },
           "category": { "type": "string" },
           "label": { "type": "string" },
-          "message_ref": { "type": "string" },
+          "message_ref": { "type": "string", "pattern": "^User#[0-9]+$" },
           "original": { "type": "string" },
           "better_prompt": { "type": "string" },
           "why": { "type": "string" },
@@ -76,7 +76,7 @@
             "enum": ["deficit", "strength"]
           },
           "description": { "type": "string" },
-          "message_ref": { "type": "string" },
+          "message_ref": { "type": "string", "pattern": "^User#[0-9]+$" },
           "impact": {
             "type": "string",
             "enum": ["high", "medium", "low"]

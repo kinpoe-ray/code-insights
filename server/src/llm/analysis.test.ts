@@ -134,10 +134,16 @@ const VALID_ANALYSIS_RESPONSE = {
       choice: 'Vitest',
       reasoning: 'Fast',
       confidence: 85,
+      evidence: ['User#0: Need testing'],
     },
   ],
   learnings: [
-    { title: 'Testing helps', takeaway: 'Write tests early', confidence: 80 },
+    {
+      title: 'Testing helps',
+      takeaway: 'Write tests early',
+      confidence: 80,
+      evidence: ['User#0: Write tests early'],
+    },
   ],
   facets: {
     outcome_satisfaction: 'high',
@@ -161,9 +167,21 @@ const VALID_PQ_RESPONSE = {
   efficiency_score: 75,
   assessment: 'Good prompting.',
   message_overhead: 'low',
-  takeaways: [{ before: 'vague', after: 'specific', category: 'vague-request' }],
+  takeaways: [
+    {
+      before: 'vague',
+      after: 'specific',
+      category: 'vague-request',
+      message_ref: 'User#0',
+    },
+  ],
   findings: [
-    { category: 'precise-request', type: 'strength', description: 'Clear goals' },
+    {
+      category: 'precise-request',
+      type: 'strength',
+      description: 'Clear goals',
+      message_ref: 'User#0',
+    },
   ],
   dimension_scores: {
     context_provision: 80,
@@ -386,12 +404,36 @@ describe('analyzeSession', () => {
     const response = {
       ...VALID_ANALYSIS_RESPONSE,
       decisions: [
-        { title: 'High confidence', situation: 'a', choice: 'b', reasoning: 'c', confidence: 85 },
-        { title: 'Low confidence', situation: 'a', choice: 'b', reasoning: 'c', confidence: 50 },
+        {
+          title: 'High confidence',
+          situation: 'a',
+          choice: 'b',
+          reasoning: 'c',
+          confidence: 85,
+          evidence: ['User#0: grounded'],
+        },
+        {
+          title: 'Low confidence',
+          situation: 'a',
+          choice: 'b',
+          reasoning: 'c',
+          confidence: 50,
+          evidence: ['User#0: grounded'],
+        },
       ],
       learnings: [
-        { title: 'Good learning', takeaway: 'Keep at it', confidence: 80 },
-        { title: 'Weak learning', takeaway: 'Maybe', confidence: 60 },
+        {
+          title: 'Good learning',
+          takeaway: 'Keep at it',
+          confidence: 80,
+          evidence: ['User#0: grounded'],
+        },
+        {
+          title: 'Weak learning',
+          takeaway: 'Maybe',
+          confidence: 60,
+          evidence: ['User#0: grounded'],
+        },
       ],
     };
 
@@ -403,6 +445,77 @@ describe('analyzeSession', () => {
     // 1 summary + 1 decision (85) + 1 learning (80) = 3 (50 and 60 filtered)
     expect(types).toEqual(['summary', 'decision', 'learning']);
     expect(result.insights.length).toBe(3);
+  });
+
+  it('persists only decisions and learnings grounded in the analyzed conversation', async () => {
+    const response = {
+      ...VALID_ANALYSIS_RESPONSE,
+      decisions: [
+        {
+          title: 'Grounded decision',
+          situation: 'Need a reliable test',
+          choice: 'Use an integration test',
+          reasoning: 'It verifies persistence',
+          confidence: 90,
+          evidence: ['User #0: requested verification', 'User#9: fabricated'],
+        },
+        {
+          title: 'Fabricated decision',
+          situation: 'Unknown',
+          choice: 'Guess',
+          reasoning: 'No conversation support',
+          confidence: 90,
+          evidence: ['User#9: fabricated'],
+        },
+      ],
+      learnings: [
+        {
+          title: 'Grounded learning',
+          takeaway: 'Keep evidence tied to a real turn',
+          confidence: 90,
+          evidence: ['Assistant #0: confirmed behavior'],
+        },
+        {
+          title: 'Ungrounded learning',
+          takeaway: 'Invent a citation',
+          confidence: 90,
+          evidence: [],
+        },
+      ],
+    };
+    const messages = [
+      makeMessage({ id: 'user-1', type: 'user', content: 'Please verify persistence.' }),
+      makeMessage({ id: 'assistant-1', type: 'assistant', content: 'I will verify it.' }),
+    ];
+    mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
+
+    const result = await analyzeSession(makeSession(), messages);
+
+    expect(result.success).toBe(true);
+    expect(result.insights.map(insight => insight.title)).toEqual([
+      'Test Summary',
+      'Grounded decision',
+      'Grounded learning',
+    ]);
+    const persisted = testDb.prepare(
+      "SELECT type, title, metadata FROM insights WHERE session_id = ? AND type IN ('decision', 'learning') ORDER BY type",
+    ).all('sess-test') as Array<{ type: string; title: string; metadata: string }>;
+    expect(persisted.map(row => ({
+      type: row.type,
+      title: row.title,
+      evidence: JSON.parse(row.metadata).evidence,
+    }))).toEqual([
+      {
+        type: 'decision',
+        title: 'Grounded decision',
+        evidence: ['User#0: requested verification'],
+      },
+      {
+        type: 'learning',
+        title: 'Grounded learning',
+        evidence: ['Assistant#0: confirmed behavior'],
+      },
+    ]);
   });
 
   it('facet normalization — task-decomposition mapped to structured-planning', async () => {
@@ -517,6 +630,58 @@ describe('analyzePromptQuality', () => {
       "SELECT * FROM insights WHERE session_id = ? AND type = 'prompt_quality'",
     ).get('sess-test');
     expect(dbRow).toBeTruthy();
+  });
+
+  it('persists only prompt-quality items that reference a real user turn', async () => {
+    const response = {
+      ...VALID_PQ_RESPONSE,
+      findings: [
+        {
+          ...VALID_PQ_RESPONSE.findings[0],
+          description: 'Grounded finding',
+          message_ref: 'User #1: second request',
+        },
+        {
+          ...VALID_PQ_RESPONSE.findings[0],
+          description: 'Fabricated finding',
+          message_ref: 'User#2',
+        },
+      ],
+      takeaways: [
+        {
+          ...VALID_PQ_RESPONSE.takeaways[0],
+          label: 'Grounded takeaway',
+          message_ref: 'User#0',
+        },
+        {
+          ...VALID_PQ_RESPONSE.takeaways[0],
+          label: 'Fabricated takeaway',
+          message_ref: 'msg-1',
+        },
+      ],
+    };
+    mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
+
+    const result = await analyzePromptQuality(makeSession(), twoUserMessages);
+
+    expect(result.success).toBe(true);
+    const resultMetadata = JSON.parse(result.insights[0].metadata!);
+    expect(resultMetadata.findings).toEqual([
+      expect.objectContaining({
+        description: 'Grounded finding',
+        message_ref: 'User#1',
+      }),
+    ]);
+    expect(resultMetadata.takeaways).toEqual([
+      expect.objectContaining({
+        label: 'Grounded takeaway',
+        message_ref: 'User#0',
+      }),
+    ]);
+    const persisted = testDb.prepare(
+      "SELECT metadata FROM insights WHERE session_id = ? AND type = 'prompt_quality'",
+    ).get('sess-test') as { metadata: string };
+    expect(JSON.parse(persisted.metadata)).toEqual(resultMetadata);
   });
 
   it('budgets the final prepared prompt-quality request for a small context', async () => {

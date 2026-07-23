@@ -1,7 +1,16 @@
 import { Hono } from 'hono';
 import { getDb } from '@code-insights/cli/db/client';
+import {
+  sanitizePromptQualityMessageReferences,
+  sanitizeSessionMessageReferences,
+} from '@code-insights/cli/analysis/message-references';
+import type {
+  AnalysisResponse,
+  PromptQualityResponse,
+} from '@code-insights/cli/analysis/prompt-types';
 import { randomUUID } from 'crypto';
 import { parseIntParam } from '../utils.js';
+import { loadSessionMessages } from './route-helpers.js';
 
 /** Escape SQLite LIKE wildcard characters so user input is treated as literal text. */
 function escapeLike(s: string): string {
@@ -89,26 +98,90 @@ app.post('/', async (c) => {
   const now = new Date().toISOString();
 
   try {
-    db.prepare(`
-      INSERT INTO insights (
-        id, session_id, project_id, project_name, type, title, content,
-        summary, bullets, confidence, source, metadata, timestamp, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'llm', ?, ?, ?)
-    `).run(
-      id,
-      body.sessionId,
-      body.projectId,
-      body.projectName ?? '',
-      body.type,
-      body.title,
-      body.content,
-      body.summary ?? '',
-      body.bullets ? JSON.stringify(body.bullets) : null,
-      body.confidence ?? 0,
-      body.metadata ? JSON.stringify(body.metadata) : null,
-      now,
-      now,
-    );
+    const persist = db.transaction((): { error?: string } => {
+      const sessionProject = db.prepare(`
+        SELECT project_id, project_name
+        FROM sessions
+        WHERE id = ? AND deleted_at IS NULL
+      `).get(body.sessionId) as {
+        project_id: string;
+        project_name: string;
+      } | undefined;
+      if (!sessionProject) return { error: 'Invalid sessionId' };
+      if (sessionProject.project_id !== body.projectId) {
+        return { error: 'projectId does not match the session project' };
+      }
+
+      let metadata = body.metadata;
+      if (body.type === 'decision' || body.type === 'learning') {
+        const rawMetadata = (
+          metadata !== null
+          && typeof metadata === 'object'
+          && !Array.isArray(metadata)
+        ) ? metadata : {};
+        const sanitized = sanitizeSessionMessageReferences({
+          summary: { title: '', content: '', bullets: [] },
+          decisions: body.type === 'decision' ? [{
+            title: body.title,
+            reasoning: body.content,
+            evidence: rawMetadata.evidence as string[] | undefined,
+          }] : [],
+          learnings: body.type === 'learning' ? [{
+            title: body.title,
+            takeaway: body.content,
+            evidence: rawMetadata.evidence as string[] | undefined,
+          }] : [],
+        } satisfies AnalysisResponse, loadSessionMessages(db, body.sessionId));
+
+        const sanitizedInsight = body.type === 'decision'
+          ? sanitized.decisions[0]
+          : sanitized.learnings[0];
+        if (!sanitizedInsight) {
+          return {
+            error: `${body.type} requires at least one valid evidence reference`,
+          };
+        }
+        metadata = {
+          ...rawMetadata,
+          evidence: sanitizedInsight.evidence,
+        };
+      }
+      if (body.type === 'prompt_quality' && metadata !== undefined && metadata !== null) {
+        if (typeof metadata !== 'object' || Array.isArray(metadata)) {
+          return { error: 'prompt_quality metadata must be an object' };
+        }
+        metadata = {
+          ...sanitizePromptQualityMessageReferences(
+            metadata as unknown as PromptQualityResponse,
+            loadSessionMessages(db, body.sessionId),
+          ),
+        };
+      }
+
+      db.prepare(`
+        INSERT INTO insights (
+          id, session_id, project_id, project_name, type, title, content,
+          summary, bullets, confidence, source, metadata, timestamp, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'llm', ?, ?, ?)
+      `).run(
+        id,
+        body.sessionId,
+        body.projectId,
+        sessionProject.project_name,
+        body.type,
+        body.title,
+        body.content,
+        body.summary ?? '',
+        body.bullets ? JSON.stringify(body.bullets) : null,
+        body.confidence ?? 0,
+        metadata ? JSON.stringify(metadata) : null,
+        now,
+        now,
+      );
+      return {};
+    });
+    const result = persist();
+    if (result.error) return c.json({ error: result.error }, 400);
   } catch (err) {
     if (err instanceof Error && err.message.includes('FOREIGN KEY constraint failed')) {
       return c.json({ error: 'Invalid sessionId or projectId' }, 400);

@@ -209,6 +209,82 @@ describe('Sessions routes', () => {
       expect(row.deleted_at).not.toBeNull();
     });
 
+    it('recalculates project aggregates before returning success', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-active', 'proj-1', {
+        ended_at: '2025-06-15T11:00:00.000Z',
+        message_count: 8,
+      });
+      seedSession('sess-delete', 'proj-1', {
+        ended_at: '2025-06-15T12:00:00.000Z',
+        message_count: 12,
+      });
+      testDb.prepare(`
+        UPDATE sessions SET
+          total_input_tokens = ?,
+          total_output_tokens = ?,
+          cache_creation_tokens = ?,
+          cache_read_tokens = ?,
+          estimated_cost_usd = ?,
+          usage_source = 'jsonl'
+        WHERE id = ?
+      `).run(100, 20, 5, 25, 0.15, 'sess-active');
+      testDb.prepare(`
+        UPDATE sessions SET
+          total_input_tokens = ?,
+          total_output_tokens = ?,
+          cache_creation_tokens = ?,
+          cache_read_tokens = ?,
+          estimated_cost_usd = ?,
+          usage_source = 'jsonl'
+        WHERE id = ?
+      `).run(200, 40, 10, 50, 0.30, 'sess-delete');
+      testDb.prepare(`
+        UPDATE projects SET
+          session_count = 2,
+          total_input_tokens = 300,
+          total_output_tokens = 60,
+          cache_creation_tokens = 15,
+          cache_read_tokens = 75,
+          estimated_cost_usd = 0.45,
+          last_activity = '2025-06-15T12:00:00.000Z'
+        WHERE id = 'proj-1'
+      `).run();
+
+      const app = createApp();
+      const deleteResponse = await app.request('/api/sessions/sess-delete', {
+        method: 'DELETE',
+      });
+      expect(deleteResponse.status).toBe(200);
+
+      const projectResponse = await app.request('/api/projects/proj-1');
+      expect(projectResponse.status).toBe(200);
+      const { project } = await projectResponse.json();
+      expect(project).toEqual(expect.objectContaining({
+        session_count: 1,
+        total_input_tokens: 100,
+        total_output_tokens: 20,
+        cache_creation_tokens: 5,
+        cache_read_tokens: 25,
+        estimated_cost_usd: 0.15,
+        last_activity: '2025-06-15T11:00:00.000Z',
+      }));
+
+      expect(testDb.prepare(`
+        SELECT sessions_with_usage, total_input_tokens, total_output_tokens,
+               cache_creation_tokens, cache_read_tokens, estimated_cost_usd
+        FROM usage_stats
+        WHERE id = 1
+      `).get()).toEqual({
+        sessions_with_usage: 1,
+        total_input_tokens: 100,
+        total_output_tokens: 20,
+        cache_creation_tokens: 5,
+        cache_read_tokens: 25,
+        estimated_cost_usd: 0.15,
+      });
+    });
+
     it('returns 404 for non-existent session', async () => {
       const app = createApp();
       const res = await app.request('/api/sessions/nonexistent', { method: 'DELETE' });

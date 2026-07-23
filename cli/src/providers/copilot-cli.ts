@@ -23,7 +23,6 @@ export class CopilotCliProvider implements SessionProvider {
     // Walk session-state/ and history-session-state/ directories
     for (const subdir of ['session-state', 'history-session-state']) {
       const sessionsDir = path.join(copilotHome, subdir);
-      if (!fs.existsSync(sessionsDir)) continue;
       collectEventsFiles(sessionsDir, files);
     }
 
@@ -61,15 +60,28 @@ function collectEventsFiles(dir: string, files: string[]): void {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return;
+  } catch (error: unknown) {
+    // Missing optional roots mean "no history". Other failures make discovery
+    // incomplete, so surface them instead of letting a migration treat a
+    // partial file list as authoritative.
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    const reason = error instanceof Error ? error.message : 'Unknown filesystem error';
+    throw new Error(`Failed to discover Copilot CLI sessions in ${dir}: ${reason}`);
   }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
     const eventsPath = path.join(dir, entry.name, 'events.jsonl');
-    if (fs.existsSync(eventsPath)) {
+    try {
+      fs.statSync(eventsPath);
       files.push(eventsPath);
+    } catch (error: unknown) {
+      // A session directory without an events file (or one removed while
+      // scanning) is not history. Permission and I/O failures are incomplete
+      // discovery and must stop one-time migrations.
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      const reason = error instanceof Error ? error.message : 'Unknown filesystem error';
+      throw new Error(`Failed to discover Copilot CLI session ${eventsPath}: ${reason}`);
     }
   }
 }
@@ -179,16 +191,20 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
 
     // Accumulator for current assistant turn
     let currentAssistantText = '';
+    let currentAssistantId: string | null = null;
     let currentToolCalls: ToolCall[] = [];
     let currentToolResults: ToolResult[] = [];
     let toolCounter = 0;
 
     function flushAssistantTurn(): void {
       const text = currentAssistantText.trim();
-      if (!text && currentToolCalls.length === 0) return;
+      if (!text && currentToolCalls.length === 0) {
+        currentAssistantId = null;
+        return;
+      }
 
       messages.push({
-        id: `copilot-assistant-${messages.length}`,
+        id: currentAssistantId || generatedEntityId(sessionId, 'assistant', messages.length),
         sessionId: sessionId,
         type: 'assistant',
         content: text.slice(0, 10000),
@@ -202,16 +218,19 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
 
       // Reset accumulators
       currentAssistantText = '';
+      currentAssistantId = null;
       currentToolCalls = [];
       currentToolResults = [];
     }
 
-    for (const line of lines) {
+    for (const [lineIndex, line] of lines.entries()) {
       let event: CopilotEvent;
       try {
         event = JSON.parse(line) as CopilotEvent;
       } catch {
-        continue;
+        // Sync treats this file as a complete replaceable snapshot. Reject even
+        // a malformed final line; a later sync can retry after the writer closes it.
+        throw new Error(`Malformed Copilot event at line ${lineIndex + 1}: ${filePath}`);
       }
 
       // Extract timestamp from event root first (Copilot CLI stores timestamp at
@@ -250,8 +269,11 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
 
           const userContent = extractText(data);
           if (userContent) {
+            const sourceId = toSourceId(data.id);
             messages.push({
-              id: (data.id as string) || `copilot-user-${messages.length}`,
+              id: sourceId
+                ? scopedSourceId(sessionId, 'user', sourceId)
+                : generatedEntityId(sessionId, 'user', messages.length),
               sessionId: sessionId,
               type: 'user',
               content: userContent.slice(0, 10000),
@@ -267,6 +289,10 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
         }
 
         case 'assistant.message': {
+          const sourceId = toSourceId(data.id);
+          if (!currentAssistantId && sourceId) {
+            currentAssistantId = scopedSourceId(sessionId, 'assistant', sourceId);
+          }
           const text = extractText(data);
           if (text) {
             currentAssistantText += text + '\n';
@@ -276,7 +302,10 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
           const toolRequests = data.toolRequests as Array<Record<string, unknown>> | undefined;
           if (toolRequests) {
             for (const tr of toolRequests) {
-              const tcId = (tr.toolCallId as string) || `copilot-tool-${++toolCounter}`;
+              const sourceId = toSourceId(tr.toolCallId);
+              const tcId = sourceId
+                ? scopedSourceId(sessionId, 'tool', sourceId)
+                : generatedEntityId(sessionId, 'tool', ++toolCounter);
               const tcName = (tr.name as string) || 'unknown_tool';
               let tcInput: Record<string, unknown> = {};
               if (typeof tr.arguments === 'string') {
@@ -295,6 +324,10 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
         }
 
         case 'assistant.message_delta': {
+          const sourceId = toSourceId(data.id);
+          if (!currentAssistantId && sourceId) {
+            currentAssistantId = scopedSourceId(sessionId, 'assistant', sourceId);
+          }
           const delta = (data.delta as string) || (data.text as string) || '';
           if (delta) {
             currentAssistantText += delta;
@@ -303,8 +336,11 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
         }
 
         case 'tool.execution_start': {
-          // toolCallId is the correct field; data.id doesn't exist in the Copilot CLI format
-          const toolCallId = (data.toolCallId as string) || (data.id as string) || '';
+          // Prefer the canonical toolCallId, with data.id for older event formats.
+          const sourceId = toSourceId(data.toolCallId) || toSourceId(data.id);
+          const toolCallId = sourceId
+            ? scopedSourceId(sessionId, 'tool', sourceId)
+            : null;
           // Skip if already tracked from assistant.message toolRequests to avoid duplicates
           if (toolCallId && currentToolCalls.some(tc => tc.id === toolCallId)) {
             break;
@@ -313,7 +349,7 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
           const toolName = (data.toolName as string) || (data.name as string) || 'unknown_tool';
           const toolInput = (data.parameters || data.arguments || {}) as Record<string, unknown>;
           currentToolCalls.push({
-            id: toolCallId || `copilot-tool-${toolCounter}`,
+            id: toolCallId || generatedEntityId(sessionId, 'tool', toolCounter),
             name: toolName,
             input: toolInput,
           });
@@ -336,9 +372,12 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
           } else {
             toolOutput = (data.output as string) || '';
           }
-          const toolId = (data.toolCallId as string) || (data.id as string) || (currentToolCalls.length > 0
-            ? currentToolCalls[currentToolCalls.length - 1].id
-            : `copilot-tool-${toolCounter}`);
+          const sourceId = toSourceId(data.toolCallId) || toSourceId(data.id);
+          const toolId = sourceId
+            ? scopedSourceId(sessionId, 'tool', sourceId)
+            : (currentToolCalls.length > 0
+                ? currentToolCalls[currentToolCalls.length - 1].id
+                : generatedEntityId(sessionId, 'tool', toolCounter));
           if (toolOutput) {
             currentToolResults.push({
               toolUseId: toolId,
@@ -351,8 +390,11 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
         case 'subagent.started': {
           toolCounter++;
           const agentName = (data.name as string) || (data.agentName as string) || 'subagent';
+          const sourceId = toSourceId(data.id);
           currentToolCalls.push({
-            id: (data.id as string) || `copilot-subagent-${toolCounter}`,
+            id: sourceId
+              ? scopedSourceId(sessionId, 'subagent', sourceId)
+              : generatedEntityId(sessionId, 'subagent', toolCounter),
             name: `subagent:${agentName}`,
             input: (data.parameters || data.arguments || data.input || {}) as Record<string, unknown>,
           });
@@ -361,9 +403,12 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
 
         case 'subagent.completed': {
           const agentOutput = (data.output as string) || (data.result as string) || '';
-          const agentId = (data.id as string) || (currentToolCalls.length > 0
-            ? currentToolCalls[currentToolCalls.length - 1].id
-            : `copilot-subagent-${toolCounter}`);
+          const sourceId = toSourceId(data.id);
+          const agentId = sourceId
+            ? scopedSourceId(sessionId, 'subagent', sourceId)
+            : (currentToolCalls.length > 0
+                ? currentToolCalls[currentToolCalls.length - 1].id
+                : generatedEntityId(sessionId, 'subagent', toolCounter));
           if (agentOutput) {
             currentToolResults.push({
               toolUseId: agentId,
@@ -449,8 +494,8 @@ function parseCopilotSession(filePath: string): ParsedSession | null {
     session.sessionCharacter = titleResult.character || detectSessionCharacter(session);
 
     return session;
-  } catch {
-    return null;
+  } catch (error) {
+    throw error;
   }
 }
 
@@ -476,4 +521,20 @@ function parseTimestamp(data: Record<string, unknown>): Date | null {
   if (!ts) return null;
   const d = new Date(ts as string | number);
   return isNaN(d.getTime()) ? null : d;
+}
+
+type CopilotEntity = 'user' | 'assistant' | 'tool' | 'subagent';
+
+function toSourceId(value: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  const sourceId = String(value);
+  return sourceId ? sourceId : null;
+}
+
+function scopedSourceId(sessionId: string, entity: CopilotEntity, sourceId: string): string {
+  return `${sessionId}:${entity}:source:${sourceId}`;
+}
+
+function generatedEntityId(sessionId: string, entity: CopilotEntity, ordinal: number): string {
+  return `${sessionId}:${entity}:generated:${ordinal}`;
 }

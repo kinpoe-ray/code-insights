@@ -21,6 +21,7 @@
     "./analysis/prompt-types": "./dist/analysis/prompt-types.js",
     "./analysis/prompt-constants": "./dist/analysis/prompt-constants.js",
     "./analysis/message-format": "./dist/analysis/message-format.js",
+    "./analysis/message-references": "./dist/analysis/message-references.js",
     "./analysis/response-parsers": "./dist/analysis/response-parsers.js",
     "./analysis/normalize-utils": "./dist/analysis/normalize-utils.js",
     "./analysis/friction-normalize": "./dist/analysis/friction-normalize.js",

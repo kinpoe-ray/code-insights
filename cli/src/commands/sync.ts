@@ -5,8 +5,14 @@ import ora from 'ora';
 import { loadSyncState, saveSyncState } from '../utils/config.js';
 import { autoDetectOllama } from '../utils/ollama-detect.js';
 import { trackEvent, identifyUser, captureError, classifyError } from '../utils/telemetry.js';
-import { insertSessionWithProjectAndReturnIsNew, insertMessages, recalculateUsageStats } from '../db/write.js';
+import {
+  insertMessages,
+  insertSessionWithProjectAndReturnIsNew,
+  recalculateUsageStats,
+  replaceSessionSnapshot,
+} from '../db/write.js';
 import { advanceDbSyncIdentity, getDb, getDbIdentity, getDbPath, getMigrationResult } from '../db/client.js';
+import { sessionExists } from '../db/read.js';
 import { getAllProviders, getProvider } from '../providers/registry.js';
 import { setProviderVerbose } from '../providers/context.js';
 import { invalidateAnalysisUsage } from '../analysis/analysis-usage-db.js';
@@ -36,6 +42,7 @@ interface FileSnapshot {
   lastModified: string;
   mtimeMs: number;
   size: number;
+  signature: string;
 }
 
 interface StableParseResult {
@@ -43,7 +50,7 @@ interface StableParseResult {
   snapshot: FileSnapshot;
 }
 
-const CODEX_PARSE_ATTEMPTS = 2;
+const SNAPSHOT_PARSE_ATTEMPTS = 2;
 
 /**
  * Core sync logic — reusable from stats commands and other callers.
@@ -178,15 +185,23 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
   let totalMessageCount = 0;
   let totalErrorCount = 0;
   let totalUpdatedExisting = 0;
+  const successfullySyncedSessionIds = new Set<string>();
   const sessionsByProvider: Record<string, number> = {};
   for (const provider of providers) {
     const providerName = provider.getProviderName();
     const isCodexProvider = providerName === 'codex-cli';
+    const isCopilotProvider = providerName === 'copilot-cli';
+    const usesCompleteSnapshots = isCodexProvider || isCopilotProvider || providerName === 'cursor';
+    const usesEffectiveCompleteSnapshot = usesCompleteSnapshots || !!options.force;
     const needsCodexIdMigration = isCodexProvider &&
       syncState.migrations?.codexScopedMessageIds !== true;
-    // A project-filtered discovery is not authoritative for all Codex files.
+    const needsCopilotIdMigration = isCopilotProvider &&
+      syncState.migrations?.copilotScopedMessageIds !== true;
+    // A project-filtered discovery is not authoritative for all provider files.
     // Leave the one-time global migration for the next unfiltered sync.
     const runCodexIdMigration = needsCodexIdMigration && !options.project;
+    const runCopilotIdMigration = needsCopilotIdMigration && !options.project;
+    const runScopedIdMigration = runCodexIdMigration || runCopilotIdMigration;
     try {
       if (providers.length > 1) {
         log(chalk.cyan(`\n  Syncing ${providerName}...`));
@@ -199,12 +214,13 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 
       if (sessionFiles.length === 0) continue;
 
-      // The scoped Codex message-ID migration must reparse unchanged historical
+      // Scoped message-ID migrations must reparse unchanged historical
       // transcripts once so legacy global IDs cannot coexist with the new IDs.
       const filesToSync = filterFilesToSync(
         sessionFiles,
         syncState,
-        !!options.force || runCodexIdMigration,
+        !!options.force || runScopedIdMigration,
+        provider,
       );
 
       if (filesToSync.length === 0) {
@@ -231,33 +247,84 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 
         try {
           // Parse session
-          const parsed = isCodexProvider
+          const parsed = usesEffectiveCompleteSnapshot
             ? await parseStableFile(provider, filePath)
             : { session: await provider.parse(filePath), snapshot: undefined };
           const { session } = parsed;
           if (!session) {
+            const { realPath, sessionFragment } = splitVirtualPath(filePath);
+            const previousFile = previousSyncState.files[realPath];
+            const previousSessionId = providerName === 'cursor' && sessionFragment
+              ? `cursor:${sessionFragment}`
+              : previousFile?.sessionId;
+            // null cannot currently distinguish an authoritative empty snapshot
+            // from a provider that could not parse a previously valid session.
+            // Preserve the stored data and retry instead of checkpointing data loss.
+            if (
+              usesEffectiveCompleteSnapshot
+              &&
+              previousSessionId
+              && previousSessionId !== '__empty__'
+              && sessionExists(previousSessionId)
+            ) {
+              totalErrorCount++;
+              providerErrorCount++;
+              spinner.warn(`Preserving previously synced session after an empty parse: ${fileName}`);
+              continue;
+            }
             // Track null-parse files so they aren't re-discovered on every sync run
-            updateSyncState(syncState, filePath, '__empty__', parsed.snapshot);
+            updateSyncState(
+              syncState,
+              filePath,
+              '__empty__',
+              parsed.snapshot,
+              provider.getSourceFingerprint?.(filePath),
+            );
             saveSyncState(syncState);
             continue;
           }
 
-          // Skip trivial sessions (≤2 messages) — likely abandoned prompts with no content
-          if (session.messageCount <= 2) {
-            updateSyncState(syncState, filePath, session.id, parsed.snapshot);
+          // New trivial sessions are not useful enough to store. Existing
+          // sessions still replace their snapshot so stale rows cannot survive
+          // when a source shrinks from a longer conversation to ≤2 messages.
+          const storedTrivialSession = session.messageCount <= 2
+            && sessionExists(session.id);
+          if (
+            session.messageCount <= 2
+            && (!usesEffectiveCompleteSnapshot || !storedTrivialSession)
+          ) {
+            updateSyncState(
+              syncState,
+              filePath,
+              session.id,
+              parsed.snapshot,
+              provider.getSourceFingerprint?.(filePath),
+            );
             saveSyncState(syncState);
+            if (options.force && storedTrivialSession) {
+              successfullySyncedSessionIds.add(session.id);
+              providerSyncedCount++;
+              providerUpdatedCount++;
+              totalSyncedCount++;
+              totalUpdatedExisting++;
+            }
             continue;
           }
 
-          // Write session and messages to SQLite
-          const isNew = insertSessionWithProjectAndReturnIsNew(session, !!options.force);
-          // Codex providers parse complete transcript snapshots. Always replace
-          // their message set so index-based IDs cannot leave stale rows after
-          // an insertion or after upgrading from the legacy global ID scheme.
-          insertMessages(session, !!options.force || isCodexProvider);
+          // Complete-snapshot providers, and every forced snapshot replacement,
+          // keep the session/project metadata and all messages in one
+          // transaction with strict collision checks.
+          let isNew: boolean;
+          let snapshotChanged = false;
+          if (usesEffectiveCompleteSnapshot) {
+            ({ isNew, snapshotChanged } = replaceSessionSnapshot(session, !!options.force));
+          } else {
+            isNew = insertSessionWithProjectAndReturnIsNew(session, !!options.force);
+            insertMessages(session, !!options.force);
+          }
           const codexTranscriptChanged = isCodexProvider && parsed.snapshot !== undefined &&
             fileSnapshotChangedSinceSync(previousSyncState, filePath, parsed.snapshot);
-          if (!isNew && (runCodexIdMigration || codexTranscriptChanged)) {
+          if (!isNew && (snapshotChanged || runScopedIdMigration || codexTranscriptChanged)) {
             // Legacy message-ID repair and later transcript edits can both
             // change analysis inputs without changing message_count. Preserve
             // visible insights, but force both analysis passes to recompute.
@@ -266,10 +333,17 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
 
           // Update and persist sync state after each file
           // so progress survives crashes
-          updateSyncState(syncState, filePath, session.id, parsed.snapshot);
+          updateSyncState(
+            syncState,
+            filePath,
+            session.id,
+            parsed.snapshot,
+            provider.getSourceFingerprint?.(filePath),
+          );
           saveSyncState(syncState);
+          successfullySyncedSessionIds.add(session.id);
 
-          if (!isNew && !options.force) {
+          if (!isNew) {
             providerUpdatedCount++;
             totalUpdatedExisting++;
           }
@@ -296,6 +370,14 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
         saveSyncState(syncState);
         log(chalk.gray('  ✔ Migrated Codex messages to session-scoped IDs'));
       }
+      if (runCopilotIdMigration && providerErrorCount === 0) {
+        syncState.migrations = {
+          ...syncState.migrations,
+          copilotScopedMessageIds: true,
+        };
+        saveSyncState(syncState);
+        log(chalk.gray('  ✔ Migrated Copilot CLI messages to session-scoped IDs'));
+      }
 
       sessionsByProvider[providerName] = providerSyncedCount;
 
@@ -319,18 +401,24 @@ export async function runSync(options: SyncOptions = {}): Promise<SyncResult> {
     }
   }
 
-  // Resurrect soft-deleted sessions on --force so users get a clean slate
-  if (options.force && !options.dryRun) {
+  // A scoped or partially failed force sync is authoritative only for sessions
+  // it actually processed. Never resurrect unrelated soft-deleted history.
+  if (options.force && !options.dryRun && successfullySyncedSessionIds.size > 0) {
     const db = getDb();
-    db.prepare('UPDATE sessions SET deleted_at = NULL WHERE deleted_at IS NOT NULL').run();
+    const resurrect = db.prepare(`
+      UPDATE sessions
+      SET deleted_at = NULL
+      WHERE id = ? AND deleted_at IS NOT NULL
+    `);
+    for (const sessionId of successfullySyncedSessionIds) {
+      resurrect.run(sessionId);
+    }
   }
 
-  // Reconcile usage stats after force sync (skip if nothing changed)
-  const shouldRecalculateUsageStats = options.force
-    ? (totalSyncedCount > 0 || totalErrorCount > 0)
-    : totalUpdatedExisting > 0;
-
-  if (!options.dryRun && shouldRecalculateUsageStats) {
+  // Always reconcile after a writable run. A previous process may have
+  // checkpointed its files and exited before reaching this aggregate update;
+  // the next otherwise-up-to-date run must still self-heal usage_stats.
+  if (!options.dryRun) {
     spinner.start('Recalculating usage stats...');
     try {
       recalculateUsageStats();
@@ -470,7 +558,6 @@ export async function syncSingleFile(options: {
   const session = await provider.parse(options.filePath);
   if (!session) return;
 
-  // Data quality invariant: skip trivial sessions (matches runSync filter at line ~194)
   if (session.messageCount <= 2) return;
 
   insertSessionWithProjectAndReturnIsNew(session, false);
@@ -480,14 +567,19 @@ export async function syncSingleFile(options: {
 /**
  * Filter files to only those that need syncing
  */
-function filterFilesToSync(files: string[], syncState: SyncState, force?: boolean): string[] {
+function filterFilesToSync(
+  files: string[],
+  syncState: SyncState,
+  force: boolean | undefined,
+  provider: SessionProvider,
+): string[] {
   if (force) return files;
 
   return files.filter((filePath) => {
     const { realPath, sessionFragment } = splitVirtualPath(filePath);
-    let stat: ReturnType<typeof fs.statSync>;
+    let snapshot: FileSnapshot;
     try {
-      stat = fs.statSync(realPath);
+      snapshot = getFileSnapshot(filePath);
     } catch (err: unknown) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
         console.warn(`[sync] skipping disappeared file: ${realPath}`);
@@ -495,21 +587,36 @@ function filterFilesToSync(files: string[], syncState: SyncState, force?: boolea
       }
       throw err;
     }
-    const lastModified = stat.mtime.toISOString();
     const fileState = syncState.files[realPath];
 
     // If file was never synced, sync it
     if (!fileState) return true;
 
+    const changed = fileState.fileSignature !== undefined
+      ? fileState.fileSignature !== snapshot.signature
+      : fileState.lastModified !== snapshot.lastModified
+        || (fileState.fileSize !== undefined && fileState.fileSize !== snapshot.size);
+
     if (sessionFragment) {
       // Virtual path (multi-session DB).
       // If the DB file changed, re-sync all sessions from it.
-      if (fileState.lastModified !== lastModified ||
-          (fileState.fileSize !== undefined && fileState.fileSize !== stat.size)) return true;
+      if (changed) return true;
 
       // Otherwise only sync sessions we haven't seen yet.
       if (fileState.syncedSessionIds) {
-        return !fileState.syncedSessionIds.includes(sessionFragment);
+        if (!fileState.syncedSessionIds.includes(sessionFragment)) return true;
+        if (provider.getSourceFingerprint) {
+          const currentFingerprint = provider.getSourceFingerprint(filePath);
+          const previousFingerprint = fileState.virtualSourceFingerprints?.[sessionFragment];
+          // A null fingerprint means this virtual session has no auxiliary
+          // provider-owned input. Legacy checkpoints therefore remain valid,
+          // while a prior non-null fingerprint disappearing still invalidates.
+          if (currentFingerprint === null && previousFingerprint === undefined) {
+            return false;
+          }
+          return previousFingerprint !== currentFingerprint;
+        }
+        return false;
       }
 
       // Virtual path but no syncedSessionIds tracked yet — needs sync
@@ -517,23 +624,49 @@ function filterFilesToSync(files: string[], syncState: SyncState, force?: boolea
     }
 
     // For regular files, check if modified since last sync
-    return fileState.lastModified !== lastModified ||
-      (fileState.fileSize !== undefined && fileState.fileSize !== stat.size);
+    return changed;
   });
 }
 
 function getFileSnapshot(filePath: string): FileSnapshot {
   const { realPath } = splitVirtualPath(filePath);
-  const stat = fs.statSync(realPath);
+  const paths = [realPath, `${realPath}-wal`];
+  const parts = paths.map(candidate => {
+    try {
+      const stat = fs.statSync(candidate);
+      return {
+        path: candidate === realPath ? 'main' : 'wal',
+        lastModified: stat.mtime.toISOString(),
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+      };
+    } catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT' && candidate !== realPath) {
+        return null;
+      }
+      throw error;
+    }
+  }).filter((part): part is {
+    path: string;
+    lastModified: string;
+    mtimeMs: number;
+    size: number;
+  } => part !== null);
+  const mtimeMs = Math.max(...parts.map(part => part.mtimeMs));
+  const size = parts.reduce((total, part) => total + part.size, 0);
+  const latest = parts.reduce((current, part) => (
+    part.mtimeMs > current.mtimeMs ? part : current
+  ));
   return {
-    lastModified: stat.mtime.toISOString(),
-    mtimeMs: stat.mtimeMs,
-    size: stat.size,
+    lastModified: latest.lastModified,
+    mtimeMs,
+    size,
+    signature: JSON.stringify(parts),
   };
 }
 
 function snapshotsMatch(left: FileSnapshot, right: FileSnapshot): boolean {
-  return left.mtimeMs === right.mtimeMs && left.size === right.size;
+  return left.signature === right.signature;
 }
 
 function fileSnapshotChangedSinceSync(
@@ -545,20 +678,22 @@ function fileSnapshotChangedSinceSync(
   const previous = state.files[realPath];
   if (!previous) return false;
 
-  return previous.lastModified !== snapshot.lastModified ||
-    (previous.fileSize !== undefined && previous.fileSize !== snapshot.size);
+  return previous.fileSignature !== undefined
+    ? previous.fileSignature !== snapshot.signature
+    : previous.lastModified !== snapshot.lastModified
+      || (previous.fileSize !== undefined && previous.fileSize !== snapshot.size);
 }
 
 /**
- * Parse an append-only Codex rollout from one stable filesystem snapshot.
- * A growing active transcript is retried once. If it changes again, callers
+ * Parse a provider session from one stable filesystem snapshot.
+ * An actively changing source is retried once. If it changes again, callers
  * leave both SQLite and sync-state untouched so the next sync can try again.
  */
 async function parseStableFile(
   provider: SessionProvider,
   filePath: string,
 ): Promise<StableParseResult> {
-  for (let attempt = 1; attempt <= CODEX_PARSE_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= SNAPSHOT_PARSE_ATTEMPTS; attempt++) {
     const before = getFileSnapshot(filePath);
     const session = await provider.parse(filePath);
     const after = getFileSnapshot(filePath);
@@ -568,7 +703,7 @@ async function parseStableFile(
     }
   }
 
-  throw new Error(`Codex transcript changed while parsing: ${filePath}`);
+  throw new Error(`Session source changed while parsing: ${filePath}`);
 }
 
 /**
@@ -579,30 +714,56 @@ function updateSyncState(
   filePath: string,
   sessionId: string,
   parsedSnapshot?: FileSnapshot,
+  sourceFingerprint?: string | null,
 ): void {
   const { realPath, sessionFragment } = splitVirtualPath(filePath);
   const currentSnapshot = parsedSnapshot ?? getFileSnapshot(filePath);
-  const { lastModified, size: fileSize } = currentSnapshot;
+  const {
+    lastModified,
+    size: fileSize,
+    signature: fileSignature,
+  } = currentSnapshot;
 
   if (sessionFragment) {
     // Virtual path: track the session fragment in syncedSessionIds
     const existing = state.files[realPath];
-    const syncedIds = existing?.syncedSessionIds || [];
+    const sameSnapshot = existing !== undefined && (
+      existing.fileSignature !== undefined
+        ? existing.fileSignature === fileSignature
+        : existing.lastModified === lastModified
+          && (existing.fileSize === undefined || existing.fileSize === fileSize)
+    );
+    // A changed multi-session DB starts a new reconciliation generation.
+    // Retaining the old IDs would hide fragments not reached before a crash.
+    const syncedIds = sameSnapshot ? [...(existing.syncedSessionIds || [])] : [];
+    const virtualSourceFingerprints = sameSnapshot
+      ? { ...(existing.virtualSourceFingerprints || {}) }
+      : {};
     if (!syncedIds.includes(sessionFragment)) {
       syncedIds.push(sessionFragment);
+    }
+    if (sourceFingerprint === null) {
+      delete virtualSourceFingerprints[sessionFragment];
+    } else if (sourceFingerprint !== undefined) {
+      virtualSourceFingerprints[sessionFragment] = sourceFingerprint;
     }
     state.files[realPath] = {
       lastModified,
       fileSize,
+      fileSignature,
       lastSyncedLine: 0,
       sessionId,
       syncedSessionIds: syncedIds,
+      ...(Object.keys(virtualSourceFingerprints).length > 0
+        ? { virtualSourceFingerprints }
+        : {}),
     };
   } else {
     // Regular file path
     state.files[realPath] = {
       lastModified,
       fileSize,
+      fileSignature,
       lastSyncedLine: 0,
       sessionId,
     };

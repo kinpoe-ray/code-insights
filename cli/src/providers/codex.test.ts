@@ -23,6 +23,18 @@ function userMessageLine(message: string, id = 'msg-u1'): string {
   });
 }
 
+function replayedUserMessageLine(
+  message: string,
+  clientId: string,
+  timestamp = '2026-01-01T10:01:00Z',
+): string {
+  return JSON.stringify({
+    type: 'event_msg',
+    timestamp,
+    payload: { type: 'user_message', message, client_id: clientId },
+  });
+}
+
 function assistantLine(text: string): string {
   return JSON.stringify({
     type: 'response_item',
@@ -75,6 +87,62 @@ describe('CodexProvider — Format A system context filtering', () => {
     expect(session).not.toBeNull();
     expect(session!.userMessageCount).toBe(1);
     expect(session!.assistantMessageCount).toBe(1);
+  });
+
+  it('emits a replayed user event only once when timestamp and full message match', async () => {
+    const content = buildJSONL([
+      sessionMeta(),
+      replayedUserMessageLine('Run the integrity check', 'client-a'),
+      replayedUserMessageLine('Run the integrity check', 'client-b'),
+      assistantLine('The integrity check passed.'),
+      taskCompleteLine(),
+    ]);
+
+    const filePath = path.join(tempDir, 'rollout-replayed-user.jsonl');
+    fs.writeFileSync(filePath, content);
+
+    const provider = new CodexProvider();
+    const session = await provider.parse(filePath);
+
+    expect(session).not.toBeNull();
+    expect(session!.messages.filter(message => message.type === 'user')).toHaveLength(1);
+  });
+
+  it('keeps identical user messages sent at different timestamps', async () => {
+    const content = buildJSONL([
+      sessionMeta(),
+      replayedUserMessageLine('Run it again', 'client-a', '2026-01-01T10:01:00Z'),
+      replayedUserMessageLine('Run it again', 'client-b', '2026-01-01T10:01:01Z'),
+      assistantLine('Done twice.'),
+      taskCompleteLine(),
+    ]);
+
+    const filePath = path.join(tempDir, 'rollout-repeated-prompt.jsonl');
+    fs.writeFileSync(filePath, content);
+
+    const provider = new CodexProvider();
+    const session = await provider.parse(filePath);
+
+    expect(session!.messages.filter(message => message.type === 'user')).toHaveLength(2);
+  });
+
+  it('compares the full user message before applying the storage length limit', async () => {
+    const sharedPrefix = 'x'.repeat(10_000);
+    const content = buildJSONL([
+      sessionMeta(),
+      replayedUserMessageLine(`${sharedPrefix}a`, 'client-a'),
+      replayedUserMessageLine(`${sharedPrefix}b`, 'client-b'),
+      assistantLine('Both long prompts were handled.'),
+      taskCompleteLine(),
+    ]);
+
+    const filePath = path.join(tempDir, 'rollout-long-prompts.jsonl');
+    fs.writeFileSync(filePath, content);
+
+    const provider = new CodexProvider();
+    const session = await provider.parse(filePath);
+
+    expect(session!.messages.filter(message => message.type === 'user')).toHaveLength(2);
   });
 
   it('rejects when a discovered rollout file cannot be read', async () => {

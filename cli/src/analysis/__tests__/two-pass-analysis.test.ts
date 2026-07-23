@@ -114,7 +114,7 @@ describe('two-pass preparation and publication', () => {
       pipelineRevisionForAnalysisLanguage,
     } = await import('../two-pass-analysis.js');
     const { ANALYSIS_VERSION } = await import('../analysis-db.js');
-    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v2`);
+    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v3`);
     expect(pipelineRevisionForAnalysisLanguage('auto')).toBe(TWO_PASS_PIPELINE_REVISION);
     expect(pipelineRevisionForAnalysisLanguage('zh-CN'))
       .toBe(`${TWO_PASS_PIPELINE_REVISION}/lang-zh-CN`);
@@ -159,13 +159,13 @@ describe('two-pass preparation and publication', () => {
       kind: 'session', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: sessionResponse,
       analysisLanguage: 'zh-CN',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
     });
     expect(pqStage).toMatchObject({
       kind: 'prompt_quality', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: pqResponse,
       analysisLanguage: 'zh-CN',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
     });
     expect(sessionStage.inputRevision).toBe(pqStage.inputRevision);
     expect(runner.runAnalysis).toHaveBeenCalledTimes(2);
@@ -293,7 +293,7 @@ describe('two-pass preparation and publication', () => {
       provider: 'new-provider',
       model: 'new-model',
       analysisLanguage: 'zh-CN' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
       usage,
       response: sessionResponse,
     };
@@ -322,16 +322,111 @@ describe('two-pass preparation and publication', () => {
       {
         analysis_type: 'prompt_quality', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
       {
         analysis_type: 'session', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
     ]);
+  });
+
+  it('publishes only message references that exist in the frozen conversation', async () => {
+    const { loadFrozenSessionInput, publishPreparedTwoPass } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const usage = {
+      inputTokens: 10,
+      outputTokens: 5,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      estimatedCostUsd: 0.03,
+      durationMs: 20,
+      chunkCount: 1,
+    };
+    const response: AnalysisResponse = {
+      ...sessionResponse,
+      decisions: [{
+        title: 'Keep valid evidence only',
+        reasoning: 'The decision is grounded in the stored prompt.',
+        confidence: 90,
+        evidence: [
+          'User#0: valid user turn',
+          'User#1: out-of-range user turn',
+          'Assistant#0: out-of-range assistant turn',
+          'msg-1',
+        ],
+      }],
+    };
+    const promptQualityResponse: PromptQualityResponse = {
+      ...pqResponse,
+      findings: [
+        {
+          category: 'precise-request',
+          type: 'strength',
+          description: 'Valid finding',
+          message_ref: 'User#0',
+          impact: 'medium',
+          confidence: 90,
+        },
+        {
+          category: 'precise-request',
+          type: 'deficit',
+          description: 'Out-of-range finding',
+          message_ref: 'User#1',
+          impact: 'low',
+          confidence: 80,
+        },
+      ],
+      takeaways: [
+        {
+          type: 'reinforce',
+          category: 'precise-request',
+          label: 'Valid takeaway',
+          message_ref: 'User#0',
+        },
+        {
+          type: 'improve',
+          category: 'precise-request',
+          label: 'Malformed takeaway',
+          message_ref: 'msg-1',
+        },
+      ],
+    };
+    const sessionStage = {
+      schemaVersion: 1 as const,
+      kind: 'session' as const,
+      sessionId: 'sess1',
+      inputRevision: frozen.inputRevision,
+      sessionMessageCount: frozen.session.message_count,
+      provider: 'new-provider',
+      model: 'new-model',
+      analysisLanguage: 'zh-CN' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      usage,
+      response,
+    };
+    const pqStage = {
+      ...sessionStage,
+      kind: 'prompt_quality' as const,
+      response: promptQualityResponse,
+    };
+
+    publishPreparedTwoPass(frozen, sessionStage, pqStage);
+
+    const decision = mockDb.prepare(
+      `SELECT metadata FROM insights WHERE session_id = 'sess1' AND type = 'decision'`,
+    ).get() as { metadata: string };
+    const promptQuality = mockDb.prepare(
+      `SELECT metadata FROM insights WHERE session_id = 'sess1' AND type = 'prompt_quality'`,
+    ).get() as { metadata: string };
+    expect(JSON.parse(decision.metadata).evidence).toEqual(['User#0: valid user turn']);
+    expect(JSON.parse(promptQuality.metadata)).toMatchObject({
+      findings: [{ description: 'Valid finding', message_ref: 'User#0' }],
+      takeaways: [{ label: 'Valid takeaway', message_ref: 'User#0' }],
+    });
   });
 
   it('rejects publication when prepared passes use different languages', async () => {
@@ -347,14 +442,14 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'zh-CN' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
     };
     const pqStage = {
       ...sessionStage,
       kind: 'prompt_quality' as const,
       response: pqResponse,
       analysisLanguage: 'en-US' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-en-US',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-en-US',
     };
 
     expect(() => publishPreparedTwoPass(frozen, sessionStage, pqStage))
@@ -402,7 +497,7 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'auto' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -441,7 +536,7 @@ describe('two-pass preparation and publication', () => {
         sessionMessageCount: frozen.session.message_count,
         provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
         analysisLanguage: 'auto' as const,
-        pipelineRevision: 'analysis-3.0.0/two-pass-v2',
+        pipelineRevision: 'analysis-3.0.0/two-pass-v3',
       };
       const pqStage = {
         ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -474,7 +569,7 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'auto' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,

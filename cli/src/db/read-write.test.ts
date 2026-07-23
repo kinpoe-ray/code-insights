@@ -27,18 +27,26 @@ vi.mock('../utils/device.js', () => ({
     platform: 'darwin',
     username: 'testuser',
   }),
-  generateStableProjectId: (path: string) => ({
-    projectId: 'proj-' + path.split('/').pop(),
-    source: 'path-hash' as const,
-    gitRemoteUrl: null,
-  }),
+  generateStableProjectId: (path: string) => {
+    const projectName = path.split('/').pop();
+    return {
+      projectId: 'proj-' + projectName,
+      source: 'path-hash' as const,
+      gitRemoteUrl: `https://example.test/${projectName}.git`,
+    };
+  },
   getGitRemoteUrl: () => null,
 }));
 
 // Dynamic imports AFTER mocks are declared — vitest hoists vi.mock()
 // above these imports, so the modules receive the mocked dependencies.
 const { sessionExists, getSessions, getProjects, getLastSession, getSessionCount, getProjectList, getDeletedSessionCount } = await import('./read.js');
-const { insertSessionWithProject, insertMessages } = await import('./write.js');
+const {
+  insertSessionWithProject,
+  insertMessages,
+  recalculateUsageStats,
+  replaceSessionSnapshot,
+} = await import('./write.js');
 
 // ──────────────────────────────────────────────────────
 // Test suite
@@ -77,6 +85,209 @@ describe('Database read/write operations', () => {
       // Still exactly one session row
       const sessions = getSessions();
       expect(sessions).toHaveLength(1);
+    });
+
+    it('refreshes parser-owned timestamps and source metadata on re-sync', () => {
+      const original = makeParsedSession({
+        id: 'session-refresh',
+        startedAt: new Date('2000-01-01T00:00:00.000Z'),
+        endedAt: new Date('2000-01-01T00:01:00.000Z'),
+        gitBranch: 'old-branch',
+        claudeVersion: 'old-version',
+        sourceTool: 'cursor',
+      });
+      const reparsed = makeParsedSession({
+        ...original,
+        startedAt: new Date('2026-01-01T00:00:00.000Z'),
+        endedAt: new Date('2026-01-01T00:01:00.000Z'),
+        gitBranch: 'main',
+        claudeVersion: 'new-version',
+        sourceTool: 'codex-cli',
+      });
+
+      insertSessionWithProject(original);
+      insertSessionWithProject(reparsed);
+
+      expect(testDb.prepare(`
+        SELECT started_at, ended_at, git_branch, claude_version, source_tool
+        FROM sessions WHERE id = ?
+      `).get('session-refresh')).toEqual({
+        started_at: '2026-01-01T00:00:00.000Z',
+        ended_at: '2026-01-01T00:01:00.000Z',
+        git_branch: 'main',
+        claude_version: 'new-version',
+        source_tool: 'codex-cli',
+      });
+    });
+
+    it('moves a reparsed session to its correct project and reconciles both project aggregates', () => {
+      const original = makeParsedSession({
+        id: 'session-moved',
+        projectPath: '/projects/alpha',
+        projectName: 'alpha',
+        startedAt: new Date('2025-01-01T10:00:00.000Z'),
+        endedAt: new Date('2025-01-01T11:00:00.000Z'),
+        messageCount: 10,
+        usage: {
+          totalInputTokens: 100,
+          totalOutputTokens: 20,
+          cacheCreationTokens: 5,
+          cacheReadTokens: 25,
+          estimatedCostUsd: 0.15,
+          modelsUsed: ['model-a'],
+          primaryModel: 'model-a',
+          usageSource: 'jsonl',
+        },
+      });
+      const reparsed = makeParsedSession({
+        ...original,
+        projectPath: '/projects/beta',
+        projectName: 'beta',
+        startedAt: new Date('2025-02-01T10:00:00.000Z'),
+        endedAt: new Date('2025-02-01T12:00:00.000Z'),
+        messageCount: 12,
+        usage: {
+          ...original.usage!,
+          totalInputTokens: 200,
+          totalOutputTokens: 40,
+          cacheCreationTokens: 10,
+          cacheReadTokens: 50,
+          estimatedCostUsd: 0.30,
+          modelsUsed: ['model-b'],
+          primaryModel: 'model-b',
+        },
+      });
+
+      insertSessionWithProject(original);
+      insertSessionWithProject(reparsed);
+
+      expect(testDb.prepare(`
+        SELECT project_id, project_name, project_path, git_remote_url
+        FROM sessions
+        WHERE id = ?
+      `).get('session-moved')).toEqual({
+        project_id: 'proj-beta',
+        project_name: 'beta',
+        project_path: '/projects/beta',
+        git_remote_url: 'https://example.test/beta.git',
+      });
+
+      expect(testDb.prepare(`
+        SELECT session_count, total_input_tokens, total_output_tokens,
+               cache_creation_tokens, cache_read_tokens, estimated_cost_usd,
+               last_activity = created_at AS uses_safe_empty_activity
+        FROM projects
+        WHERE id = 'proj-alpha'
+      `).get()).toEqual({
+        session_count: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        estimated_cost_usd: 0,
+        uses_safe_empty_activity: 1,
+      });
+      expect(testDb.prepare(`
+        SELECT session_count, total_input_tokens, total_output_tokens,
+               cache_creation_tokens, cache_read_tokens, estimated_cost_usd,
+               last_activity
+        FROM projects
+        WHERE id = 'proj-beta'
+      `).get()).toEqual({
+        session_count: 1,
+        total_input_tokens: 200,
+        total_output_tokens: 40,
+        cache_creation_tokens: 10,
+        cache_read_tokens: 50,
+        estimated_cost_usd: 0.30,
+        last_activity: '2025-02-01T12:00:00.000Z',
+      });
+
+      expect(testDb.prepare(`
+        SELECT
+          COUNT(*) AS session_count,
+          COALESCE(SUM(message_count), 0) AS message_count,
+          COALESCE(SUM(
+            COALESCE(total_input_tokens, 0) +
+            COALESCE(total_output_tokens, 0) +
+            COALESCE(cache_creation_tokens, 0) +
+            COALESCE(cache_read_tokens, 0)
+          ), 0) AS total_tokens,
+          MIN(started_at) AS first_session_at,
+          MAX(ended_at) AS last_session_at
+        FROM sessions
+        WHERE project_id = 'proj-alpha' AND deleted_at IS NULL
+      `).get()).toEqual({
+        session_count: 0,
+        message_count: 0,
+        total_tokens: 0,
+        first_session_at: null,
+        last_session_at: null,
+      });
+      expect(testDb.prepare(`
+        SELECT
+          COUNT(*) AS session_count,
+          SUM(message_count) AS message_count,
+          SUM(
+            COALESCE(total_input_tokens, 0) +
+            COALESCE(total_output_tokens, 0) +
+            COALESCE(cache_creation_tokens, 0) +
+            COALESCE(cache_read_tokens, 0)
+          ) AS total_tokens,
+          MIN(started_at) AS first_session_at,
+          MAX(ended_at) AS last_session_at
+        FROM sessions
+        WHERE project_id = 'proj-beta' AND deleted_at IS NULL
+      `).get()).toEqual({
+        session_count: 1,
+        message_count: 12,
+        total_tokens: 300,
+        first_session_at: '2025-02-01T10:00:00.000Z',
+        last_session_at: '2025-02-01T12:00:00.000Z',
+      });
+    });
+
+    it('keeps existing insights aligned when a session moves to another project', () => {
+      const original = makeParsedSession({
+        id: 'session-with-insight',
+        projectPath: '/projects/alpha',
+        projectName: 'alpha',
+      });
+      const reparsed = makeParsedSession({
+        ...original,
+        projectPath: '/projects/beta',
+        projectName: 'beta',
+      });
+
+      insertSessionWithProject(original);
+      testDb.prepare(`
+        INSERT INTO insights (
+          id, session_id, project_id, project_name, type, title,
+          content, summary, confidence, timestamp
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        'insight-for-moved-session',
+        original.id,
+        'proj-alpha',
+        'alpha',
+        'learning',
+        'Existing insight',
+        'Insight content',
+        'Insight summary',
+        0.9,
+        '2025-01-01T00:00:00.000Z',
+      );
+
+      insertSessionWithProject(reparsed);
+
+      expect(testDb.prepare(`
+        SELECT project_id, project_name
+        FROM insights
+        WHERE id = ?
+      `).get('insight-for-moved-session')).toEqual({
+        project_id: 'proj-beta',
+        project_name: 'beta',
+      });
     });
 
     it('inserts the project record alongside the session', () => {
@@ -293,6 +504,47 @@ describe('Database read/write operations', () => {
       expect(projects[0].name).toBe('beta');
       expect(projects[1].name).toBe('alpha');
     });
+
+    it('clears aggregates for projects with no active sessions during a full recalculation', () => {
+      const session = makeParsedSession({
+        id: 'only-session',
+        projectPath: '/projects/empty-after-delete',
+        projectName: 'empty-after-delete',
+        endedAt: new Date('2025-06-15T12:00:00.000Z'),
+        usage: {
+          totalInputTokens: 100,
+          totalOutputTokens: 20,
+          cacheCreationTokens: 5,
+          cacheReadTokens: 25,
+          estimatedCostUsd: 0.15,
+          modelsUsed: ['model-a'],
+          primaryModel: 'model-a',
+          usageSource: 'jsonl',
+        },
+      });
+      insertSessionWithProject(session);
+      testDb.prepare(
+        "UPDATE sessions SET deleted_at = datetime('now') WHERE id = ?",
+      ).run(session.id);
+
+      recalculateUsageStats();
+
+      expect(testDb.prepare(`
+        SELECT session_count, total_input_tokens, total_output_tokens,
+               cache_creation_tokens, cache_read_tokens, estimated_cost_usd,
+               last_activity = created_at AS uses_safe_empty_activity
+        FROM projects
+        WHERE id = 'proj-empty-after-delete'
+      `).get()).toEqual({
+        session_count: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        cache_creation_tokens: 0,
+        cache_read_tokens: 0,
+        estimated_cost_usd: 0,
+        uses_safe_empty_activity: 1,
+      });
+    });
   });
 
   // ────────────────────────────────────────────────────
@@ -428,6 +680,76 @@ describe('Database read/write operations', () => {
         .get('msg-think') as { thinking: string | null };
 
       expect(row.thinking).toBe('Let me consider the options...');
+    });
+  });
+
+  describe('replaceSessionSnapshot', () => {
+    it('atomically replaces a complete snapshot and reports whether analysis input changed', () => {
+      const original = makeParsedSession({
+        id: 'snapshot-session',
+        messageCount: 4,
+        userMessageCount: 2,
+        assistantMessageCount: 2,
+        messages: [
+          makeParsedMessage({ id: 'keep-1', sessionId: 'snapshot-session' }),
+          makeParsedMessage({ id: 'stale', sessionId: 'snapshot-session', type: 'assistant' }),
+          makeParsedMessage({ id: 'keep-2', sessionId: 'snapshot-session' }),
+          makeParsedMessage({ id: 'keep-3', sessionId: 'snapshot-session', type: 'assistant' }),
+        ],
+      });
+      const replacement = makeParsedSession({
+        ...original,
+        messageCount: 3,
+        userMessageCount: 2,
+        assistantMessageCount: 1,
+        messages: original.messages.filter(message => message.id !== 'stale'),
+      });
+
+      expect(replaceSessionSnapshot(original)).toEqual({
+        isNew: true,
+        snapshotChanged: true,
+      });
+      expect(replaceSessionSnapshot(replacement)).toEqual({
+        isNew: false,
+        snapshotChanged: true,
+      });
+      expect(replaceSessionSnapshot(replacement)).toEqual({
+        isNew: false,
+        snapshotChanged: false,
+      });
+
+      const storedSession = testDb.prepare(
+        'SELECT message_count FROM sessions WHERE id = ?',
+      ).get('snapshot-session') as { message_count: number };
+      const storedMessages = testDb.prepare(
+        'SELECT id FROM messages WHERE session_id = ? ORDER BY id',
+      ).all('snapshot-session') as Array<{ id: string }>;
+      expect(storedSession.message_count).toBe(3);
+      expect(storedMessages).toEqual([{ id: 'keep-1' }, { id: 'keep-2' }, { id: 'keep-3' }]);
+    });
+
+    it('rolls back the session update when a message ID belongs to another session', () => {
+      const first = makeParsedSession({
+        id: 'snapshot-first',
+        messageCount: 1,
+        userMessageCount: 1,
+        assistantMessageCount: 0,
+        messages: [makeParsedMessage({ id: 'shared-id', sessionId: 'snapshot-first' })],
+      });
+      const second = makeParsedSession({
+        id: 'snapshot-second',
+        messageCount: 1,
+        userMessageCount: 1,
+        assistantMessageCount: 0,
+        messages: [makeParsedMessage({ id: 'shared-id', sessionId: 'snapshot-second' })],
+      });
+      replaceSessionSnapshot(first);
+
+      expect(() => replaceSessionSnapshot(second)).toThrow();
+      expect(sessionExists('snapshot-second')).toBe(false);
+      expect(testDb.prepare(
+        'SELECT session_id FROM messages WHERE id = ?',
+      ).get('shared-id')).toEqual({ session_id: 'snapshot-first' });
     });
   });
 

@@ -1,5 +1,4 @@
 import { getDb } from './client.js';
-import { sessionExists } from './read.js';
 import { generateStableProjectId, getDeviceInfo } from '../utils/device.js';
 import type { ParsedSession, ParsedMessage } from '../types.js';
 import type BetterSqlite3 from 'better-sqlite3';
@@ -31,8 +30,11 @@ let _stmtUpdateProjectWithUsage: BetterSqlite3.Statement | null = null;
 let _stmtUpdateProjectCountOnly: BetterSqlite3.Statement | null = null;
 let _stmtUpsertSession: BetterSqlite3.Statement | null = null;
 let _stmtInsertMessage: BetterSqlite3.Statement | null = null;
-let _stmtReplaceMessage: BetterSqlite3.Statement | null = null;
+let _stmtStrictInsertMessage: BetterSqlite3.Statement | null = null;
 let _stmtUpsertUsageStatsIncrement: BetterSqlite3.Statement | null = null;
+let _stmtSelectProjectAggregate: BetterSqlite3.Statement | null = null;
+let _stmtApplyProjectAggregate: BetterSqlite3.Statement | null = null;
+let _stmtUpdateSessionInsightProject: BetterSqlite3.Statement | null = null;
 
 function getStmts() {
   const db = getDb();
@@ -44,8 +46,11 @@ function getStmts() {
     _stmtUpdateProjectCountOnly = null;
     _stmtUpsertSession = null;
     _stmtInsertMessage = null;
-    _stmtReplaceMessage = null;
+    _stmtStrictInsertMessage = null;
     _stmtUpsertUsageStatsIncrement = null;
+    _stmtSelectProjectAggregate = null;
+    _stmtApplyProjectAggregate = null;
+    _stmtUpdateSessionInsightProject = null;
   }
 
   if (!_stmtUpsertProjectBase) {
@@ -106,9 +111,14 @@ function getStmts() {
         ?, ?, ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
+        project_id             = excluded.project_id,
+        project_name           = excluded.project_name,
+        project_path           = excluded.project_path,
+        git_remote_url         = excluded.git_remote_url,
         generated_title         = COALESCE(sessions.generated_title, excluded.generated_title),
         title_source            = excluded.title_source,
         session_character       = excluded.session_character,
+        started_at              = excluded.started_at,
         ended_at                = excluded.ended_at,
         summary                 = excluded.summary,
         message_count           = excluded.message_count,
@@ -118,6 +128,9 @@ function getStmts() {
         compact_count           = excluded.compact_count,
         auto_compact_count      = excluded.auto_compact_count,
         slash_commands          = excluded.slash_commands,
+        git_branch              = excluded.git_branch,
+        claude_version          = excluded.claude_version,
+        source_tool             = excluded.source_tool,
         total_input_tokens      = excluded.total_input_tokens,
         total_output_tokens     = excluded.total_output_tokens,
         cache_creation_tokens   = excluded.cache_creation_tokens,
@@ -139,10 +152,11 @@ function getStmts() {
     `);
   }
 
-  if (!_stmtReplaceMessage) {
-    // Used by --force sync to overwrite existing message content (e.g. after a parsing fix).
-    _stmtReplaceMessage = db.prepare(`
-      INSERT OR REPLACE INTO messages (
+  if (!_stmtStrictInsertMessage) {
+    // A complete snapshot deletes only its own rows first. Any remaining ID
+    // collision belongs to another session and must fail instead of moving it.
+    _stmtStrictInsertMessage = db.prepare(`
+      INSERT INTO messages (
         id, session_id, type, content, thinking,
         tool_calls, tool_results, usage, timestamp, parent_id
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -164,14 +178,55 @@ function getStmts() {
     `);
   }
 
+  if (!_stmtSelectProjectAggregate) {
+    _stmtSelectProjectAggregate = db.prepare(`
+      SELECT
+        COUNT(*)                   AS session_count,
+        SUM(total_input_tokens)    AS total_input,
+        SUM(total_output_tokens)   AS total_output,
+        SUM(cache_creation_tokens) AS cache_creation,
+        SUM(cache_read_tokens)     AS cache_read,
+        SUM(estimated_cost_usd)    AS total_cost,
+        MAX(ended_at)              AS last_activity
+      FROM sessions
+      WHERE project_id = ? AND deleted_at IS NULL
+    `);
+  }
+
+  if (!_stmtApplyProjectAggregate) {
+    _stmtApplyProjectAggregate = db.prepare(`
+      UPDATE projects SET
+        session_count         = ?,
+        total_input_tokens    = ?,
+        total_output_tokens   = ?,
+        cache_creation_tokens = ?,
+        cache_read_tokens     = ?,
+        estimated_cost_usd    = ?,
+        last_activity         = COALESCE(?, created_at),
+        updated_at            = datetime('now')
+      WHERE id = ?
+    `);
+  }
+
+  if (!_stmtUpdateSessionInsightProject) {
+    _stmtUpdateSessionInsightProject = db.prepare(`
+      UPDATE insights
+      SET project_id = ?, project_name = ?
+      WHERE session_id = ?
+    `);
+  }
+
   return {
     upsertProjectBase: _stmtUpsertProjectBase,
     updateProjectWithUsage: _stmtUpdateProjectWithUsage,
     updateProjectCountOnly: _stmtUpdateProjectCountOnly,
     upsertSession: _stmtUpsertSession,
     insertMessage: _stmtInsertMessage,
-    replaceMessage: _stmtReplaceMessage,
+    strictInsertMessage: _stmtStrictInsertMessage,
     upsertUsageStatsIncrement: _stmtUpsertUsageStatsIncrement,
+    selectProjectAggregate: _stmtSelectProjectAggregate,
+    applyProjectAggregate: _stmtApplyProjectAggregate,
+    updateSessionInsightProject: _stmtUpdateSessionInsightProject,
   };
 }
 
@@ -199,18 +254,26 @@ function insertSessionWithProjectInternal(session: ParsedSession, isForce: boole
   const { projectId, source: projectIdSource, gitRemoteUrl } = generateStableProjectId(session.projectPath);
   const deviceInfo = getDeviceInfo();
 
-  const isNew = !sessionExists(session.id);
+  const tx = db.transaction((): boolean => {
+    const existing = db.prepare(
+      'SELECT project_id FROM sessions WHERE id = ?',
+    ).get(session.id) as { project_id: string } | undefined;
+    const isNew = existing === undefined;
 
-  const tx = db.transaction(() => {
     upsertProject(projectId, session, projectIdSource, gitRemoteUrl, isNew, isForce);
     upsertSession(session, projectId, gitRemoteUrl, deviceInfo);
     if (isNew) {
       updateGlobalUsageStats(session, isForce);
     }
+    reconcileProjectAggregate(projectId);
+    if (existing && existing.project_id !== projectId) {
+      reconcileProjectAggregate(existing.project_id);
+    }
+    return isNew;
   });
 
   try {
-    tx();
+    return tx();
   } catch (err: unknown) {
     const code = (err as { code?: string }).code;
     if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') {
@@ -219,7 +282,6 @@ function insertSessionWithProjectInternal(session: ParsedSession, isForce: boole
     }
     throw err;
   }
-  return isNew;
 }
 
 
@@ -299,6 +361,145 @@ function upsertSession(
     session.usage?.primaryModel ?? null,
     session.usage?.usageSource ?? null,
   );
+  stmts.updateSessionInsightProject.run(projectId, session.projectName, session.id);
+}
+
+function reconcileProjectAggregate(projectId: string): void {
+  const stmts = getStmts();
+  const aggregate = stmts.selectProjectAggregate.get(projectId) as {
+    session_count: number;
+    total_input: number | null;
+    total_output: number | null;
+    cache_creation: number | null;
+    cache_read: number | null;
+    total_cost: number | null;
+    last_activity: string | null;
+  };
+
+  stmts.applyProjectAggregate.run(
+    aggregate.session_count,
+    aggregate.total_input ?? 0,
+    aggregate.total_output ?? 0,
+    aggregate.cache_creation ?? 0,
+    aggregate.cache_read ?? 0,
+    aggregate.total_cost ?? 0,
+    aggregate.last_activity,
+    projectId,
+  );
+}
+
+function messageValues(msg: ParsedMessage): [
+  string,
+  string,
+  ParsedMessage['type'],
+  string,
+  string | null,
+  string | null,
+  string | null,
+  string | null,
+  string,
+  string | null,
+] {
+  return [
+    msg.id,
+    msg.sessionId,
+    msg.type,
+    truncate(msg.content, CONTENT_MAX),
+    msg.thinking ? truncate(msg.thinking, THINKING_MAX) : null,
+    msg.toolCalls.length > 0
+      ? JSON.stringify(msg.toolCalls.map(tc => ({
+        id: tc.id,
+        name: tc.name,
+        input: JSON.stringify(tc.input).slice(0, TOOL_INPUT_MAX),
+      })))
+      : null,
+    msg.toolResults.length > 0
+      ? JSON.stringify(msg.toolResults.map(tr => ({
+        toolUseId: tr.toolUseId,
+        output: truncate(tr.output, TOOL_RESULT_MAX),
+      })))
+      : null,
+    msg.usage ? JSON.stringify(msg.usage) : null,
+    msg.timestamp.toISOString(),
+    msg.parentId,
+  ];
+}
+
+function storedAnalysisInput(db: BetterSqlite3.Database, sessionId: string): string {
+  const session = db.prepare(`
+    SELECT id, project_id, project_name, project_path, summary, ended_at,
+           message_count, compact_count, auto_compact_count, slash_commands
+    FROM sessions
+    WHERE id = ?
+  `).get(sessionId) ?? null;
+  const messages = db.prepare(`
+    SELECT id, session_id, type, content, thinking, tool_calls, tool_results,
+           usage, timestamp, parent_id
+    FROM messages
+    WHERE session_id = ?
+    ORDER BY timestamp ASC, id ASC
+  `).all(sessionId);
+  return JSON.stringify({ session, messages });
+}
+
+export interface ReplaceSessionSnapshotResult {
+  isNew: boolean;
+  snapshotChanged: boolean;
+}
+
+/**
+ * Atomically upsert a session and replace its complete message snapshot.
+ * Strict message inserts turn cross-session ID collisions into a rollback.
+ */
+export function replaceSessionSnapshot(
+  session: ParsedSession,
+  isForce = false,
+): ReplaceSessionSnapshotResult {
+  if (session.messages.some(message => message.sessionId !== session.id)) {
+    throw new Error(`[write] Message session mismatch in snapshot ${session.id}`);
+  }
+
+  const db = getDb();
+  const { projectId, source: projectIdSource, gitRemoteUrl } = generateStableProjectId(session.projectPath);
+  const deviceInfo = getDeviceInfo();
+  const stmts = getStmts();
+  const tx = db.transaction((): ReplaceSessionSnapshotResult => {
+    const existing = db.prepare(
+      'SELECT project_id FROM sessions WHERE id = ?',
+    ).get(session.id) as { project_id: string } | undefined;
+    const isNew = existing === undefined;
+    const before = storedAnalysisInput(db, session.id);
+
+    upsertProject(projectId, session, projectIdSource, gitRemoteUrl, isNew, isForce);
+    upsertSession(session, projectId, gitRemoteUrl, deviceInfo);
+    if (isNew) {
+      updateGlobalUsageStats(session, isForce);
+    }
+    reconcileProjectAggregate(projectId);
+    if (existing && existing.project_id !== projectId) {
+      reconcileProjectAggregate(existing.project_id);
+    }
+
+    db.prepare('DELETE FROM messages WHERE session_id = ?').run(session.id);
+    for (const message of session.messages) {
+      stmts.strictInsertMessage.run(...messageValues(message));
+    }
+
+    return {
+      isNew,
+      snapshotChanged: before !== storedAnalysisInput(db, session.id),
+    };
+  });
+
+  try {
+    return tx();
+  } catch (err: unknown) {
+    const code = (err as { code?: string }).code;
+    if (code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED') {
+      throw new Error(`[write] DB locked while replacing session ${session.id} — try again`);
+    }
+    throw err;
+  }
 }
 
 /**
@@ -316,31 +517,9 @@ export function insertMessages(session: ParsedSession, isForce = false): void {
     if (isForce) {
       db.prepare('DELETE FROM messages WHERE session_id = ?').run(session.id);
     }
-    const stmt = isForce ? stmts.replaceMessage : stmts.insertMessage;
+    const stmt = isForce ? stmts.strictInsertMessage : stmts.insertMessage;
     for (const msg of messages) {
-      stmt.run(
-        msg.id,
-        msg.sessionId,
-        msg.type,
-        truncate(msg.content, CONTENT_MAX),
-        msg.thinking ? truncate(msg.thinking, THINKING_MAX) : null,
-        msg.toolCalls.length > 0
-          ? JSON.stringify(msg.toolCalls.map(tc => ({
-              id: tc.id,
-              name: tc.name,
-              input: JSON.stringify(tc.input).slice(0, TOOL_INPUT_MAX),
-            })))
-          : null,
-        msg.toolResults.length > 0
-          ? JSON.stringify(msg.toolResults.map(tr => ({
-              toolUseId: tr.toolUseId,
-              output: truncate(tr.output, TOOL_RESULT_MAX),
-            })))
-          : null,
-        msg.usage ? JSON.stringify(msg.usage) : null,
-        msg.timestamp.toISOString(),
-        msg.parentId,
-      );
+      stmt.run(...messageValues(msg));
     }
   });
 
@@ -359,8 +538,10 @@ export function insertMessages(session: ParsedSession, isForce = false): void {
  * After a --force sync, recalculate usage_stats singleton from all sessions.
  * Also recalculates per-project usage totals.
  */
-export function recalculateUsageStats(): { sessionsWithUsage: number; totalTokens: number; estimatedCostUsd: number } {
-  const db = getDb();
+export function recalculateUsageStats(
+  database?: BetterSqlite3.Database,
+): { sessionsWithUsage: number; totalTokens: number; estimatedCostUsd: number } {
+  const db = database ?? getDb();
 
   const tx = db.transaction(() => {
     // Aggregate global stats from all sessions that have usage data
@@ -404,7 +585,21 @@ export function recalculateUsageStats(): { sessionsWithUsage: number; totalToken
       global.sessions_with_usage ?? 0,
     );
 
-    // Recalculate per-project usage totals
+    // Start from an empty-project baseline so projects whose last active
+    // session was deleted do not retain stale aggregate values.
+    db.prepare(`
+      UPDATE projects SET
+        session_count         = 0,
+        total_input_tokens    = 0,
+        total_output_tokens   = 0,
+        cache_creation_tokens = 0,
+        cache_read_tokens     = 0,
+        estimated_cost_usd    = 0,
+        last_activity         = created_at,
+        updated_at            = datetime('now')
+    `).run();
+
+    // Recalculate per-project usage totals for projects with active sessions.
     const perProject = db.prepare(`
       SELECT
         project_id,

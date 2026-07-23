@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { getDb } from '@code-insights/cli/db/client';
+import { recalculateUsageStats } from '@code-insights/cli/db/write';
 import { parseIntParam } from '../utils.js';
 
 /** Escape SQLite LIKE wildcard characters so user input is treated as literal text. */
@@ -122,9 +123,16 @@ app.patch('/:id', async (c) => {
 
 app.delete('/:id', (c) => {
   const db = getDb();
-  const result = db.prepare(
-    `UPDATE sessions SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
-  ).run(c.req.param('id'));
+  const softDelete = db.transaction(() => {
+    const result = db.prepare(
+      `UPDATE sessions SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`
+    ).run(c.req.param('id'));
+    if (result.changes > 0) {
+      recalculateUsageStats(db);
+    }
+    return result;
+  });
+  const result = softDelete();
   if (result.changes === 0) return c.json({ error: 'Not found' }, 404);
   return c.json({ ok: true });
 });

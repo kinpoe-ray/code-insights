@@ -149,13 +149,26 @@ describe('prompt-quality.json schema sync', () => {
   });
 
   it('findings items have required category, type, description, message_ref, impact, confidence fields', () => {
-    const fSchema = (schema.properties?.findings as { items?: { required?: string[] } })?.items;
+    const fSchema = (schema.properties?.findings as {
+      items?: {
+        required?: string[];
+        properties?: Record<string, { pattern?: string }>;
+      };
+    })?.items;
     expect(fSchema?.required).toContain('category');
     expect(fSchema?.required).toContain('type');
     expect(fSchema?.required).toContain('description');
     expect(fSchema?.required).toContain('message_ref');
     expect(fSchema?.required).toContain('impact');
     expect(fSchema?.required).toContain('confidence');
+    expect(fSchema?.properties?.message_ref?.pattern).toBe('^User#[0-9]+$');
+  });
+
+  it('takeaway message references use the exact User#N label format', () => {
+    const takeawaySchema = (schema.properties?.takeaways as {
+      items?: { properties?: Record<string, { pattern?: string }> };
+    })?.items;
+    expect(takeawaySchema?.properties?.message_ref?.pattern).toBe('^User#[0-9]+$');
   });
 
   it('schema file is valid JSON', () => {

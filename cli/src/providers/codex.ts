@@ -203,6 +203,7 @@ function parseFormatA(content: string): ParsedSession | null {
 
   const messages: ParsedMessage[] = [];
   const usageEntries: CodexUsage[] = [];
+  const seenUserEvents = new Set<string>();
   let model = meta.model || '';
   let lastTimestamp = new Date(meta.timestamp);
 
@@ -295,9 +296,18 @@ function parseFormatA(content: string): ParsedSession | null {
       case 'user_message':
       case 'userMessage': {
         // event_msg/user_message: the real user prompt (payload.message = text string)
-        flushAssistantTurn();
         // event_msg user_message stores the text directly in payload.message
         const msgText = (payload.message as string) || '';
+        if (msgText && !isSystemContextMessage(msgText) && typeof event.timestamp === 'string') {
+          // Subagent rollouts can replay the same event with a different client_id.
+          // Compare the exact raw timestamp and full, untruncated message so a
+          // genuine repeated prompt or a long prompt with a different suffix survives.
+          const replayKey = JSON.stringify([event.timestamp, msgText]);
+          if (seenUserEvents.has(replayKey)) break;
+          seenUserEvents.add(replayKey);
+        }
+
+        flushAssistantTurn();
         if (msgText && !isSystemContextMessage(msgText)) {
           messages.push({
             id: `${sessionId}:user:${(payload.id as string) || messages.length}`,

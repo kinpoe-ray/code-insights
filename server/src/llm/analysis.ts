@@ -4,6 +4,7 @@
 
 import { createAnalysisEngine } from '@code-insights/cli/analysis/analysis-engine';
 import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
+import { sanitizeSessionMessageReferences } from '@code-insights/cli/analysis/message-references';
 import { createLLMClient, isLLMConfigured } from './client.js';
 import type { SQLiteMessageRow } from './prompt-types.js';
 import {
@@ -110,7 +111,8 @@ export async function analyzeSession(
     }
 
     options?.onProgress?.({ phase: 'saving' });
-    const insights = convertToInsightRows(outcome.response, session);
+    const sanitizedResponse = sanitizeSessionMessageReferences(outcome.response, messages);
+    const insights = convertToInsightRows(sanitizedResponse, session);
 
     saveInsightsToDb(insights);
     deleteSessionInsights(session.id, {
@@ -118,8 +120,8 @@ export async function analyzeSession(
       excludeIds: insights.map((insight) => insight.id),
     });
 
-    if (outcome.response.facets) {
-      saveFacetsToDb(session.id, outcome.response.facets, ANALYSIS_VERSION);
+    if (sanitizedResponse.facets) {
+      saveFacetsToDb(session.id, sanitizedResponse.facets, ANALYSIS_VERSION);
     }
 
     if (outcome.usage.inputTokens > 0 || outcome.usage.outputTokens > 0) {
