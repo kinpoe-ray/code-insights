@@ -39,6 +39,8 @@ export type HistoryRefreshItemStatus = 'pending' | 'session_staged' | 'failed' |
 export interface HistoryRefreshCampaignSpec {
   provider: string;
   model: string;
+  analysisVersion?: string;
+  pipelineRevision?: string;
   /** SHA-256 (or equivalent opaque digest) of the endpoint; never the endpoint or API key. */
   baseUrlFingerprint: string;
   scope: HistoryRefreshScope;
@@ -439,6 +441,12 @@ function assertCampaignSpec(spec: HistoryRefreshCampaignSpec): void {
     ['provider', spec.provider],
     ['model', spec.model],
     ['baseUrlFingerprint', spec.baseUrlFingerprint],
+    ...(spec.analysisVersion === undefined
+      ? []
+      : [['analysisVersion', spec.analysisVersion] as const]),
+    ...(spec.pipelineRevision === undefined
+      ? []
+      : [['pipelineRevision', spec.pipelineRevision] as const]),
   ] as const) {
     if (value.trim() === '') {
       throw new Error(`History refresh ${name} is required`);
@@ -509,11 +517,13 @@ export function createHistoryRefreshCampaign(
 ): HistoryRefreshCampaign {
   assertCampaignSpec(spec);
   const scope = normalizeScope(spec.scope);
+  const analysisVersion = spec.analysisVersion ?? ANALYSIS_VERSION;
+  const pipelineRevision = spec.pipelineRevision ?? TWO_PASS_PIPELINE_REVISION;
   const intentFingerprint = sha256(JSON.stringify({
     provider: spec.provider,
     model: spec.model,
-    analysisVersion: ANALYSIS_VERSION,
-    pipelineRevision: TWO_PASS_PIPELINE_REVISION,
+    analysisVersion,
+    pipelineRevision,
     baseUrlFingerprint: spec.baseUrlFingerprint,
     scope,
   }));
@@ -558,8 +568,8 @@ export function createHistoryRefreshCampaign(
       intentFingerprint,
       spec.provider,
       spec.model,
-      ANALYSIS_VERSION,
-      TWO_PASS_PIPELINE_REVISION,
+      analysisVersion,
+      pipelineRevision,
       spec.baseUrlFingerprint,
       preview.scopeJson,
       preview.selectionFingerprint,

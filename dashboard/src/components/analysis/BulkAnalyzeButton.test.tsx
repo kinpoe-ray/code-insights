@@ -9,6 +9,7 @@ import type {
 import type { LLMConfig, Session } from '@/lib/types';
 import { ANALYSIS_BATCH_RECEIPT_KEY } from '@/hooks/useAnalysisQueue';
 import { BulkAnalyzeButton } from './BulkAnalyzeButton';
+import { LocaleProvider } from '@/i18n/LocaleProvider';
 
 const enqueueAnalysisBatch = vi.hoisted(() => vi.fn());
 const fetchAnalysisQueue = vi.hoisted(() => vi.fn());
@@ -138,10 +139,12 @@ function setup(
   );
   render(
     <QueryClientProvider client={queryClient}>
-      <BulkAnalyzeButton
-        sessions={sessions}
-        onComplete={options.onComplete}
-      />
+      <LocaleProvider>
+        <BulkAnalyzeButton
+          sessions={sessions}
+          onComplete={options.onComplete}
+        />
+      </LocaleProvider>
     </QueryClientProvider>,
   );
   return queryClient;
@@ -185,6 +188,13 @@ describe('BulkAnalyzeButton durable batches', () => {
       'button',
       { name: /analyze 2 sessions/i },
     )).toBeEnabled();
+  });
+
+  it('renders batch analysis controls in Chinese when selected', () => {
+    localStorage.setItem('code-insights.locale', 'zh-CN');
+    renderWithSessions([makeSession('s1'), makeSession('s2')]);
+
+    expect(screen.getByRole('button', { name: '分析 2 个会话' })).toBeInTheDocument();
   });
 
   it('submits all ids in one POST and stores the returned receipt', async () => {
@@ -432,7 +442,9 @@ function renderWithSessions(sessions: Session[]) {
   queryClient.setQueryData(['analysisQueue'], emptyQueue);
   return render(
     <QueryClientProvider client={queryClient}>
-      <BulkAnalyzeButton sessions={sessions} />
+      <LocaleProvider>
+        <BulkAnalyzeButton sessions={sessions} />
+      </LocaleProvider>
     </QueryClientProvider>,
   );
 }

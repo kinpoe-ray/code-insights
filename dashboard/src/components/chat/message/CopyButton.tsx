@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { Copy, Check } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface CopyButtonProps {
   text: string;
 }
 
 export function CopyButton({ text }: CopyButtonProps) {
+  const { t } = useLocale();
   const [copied, setCopied] = useState(false);
   const handleCopy = async () => {
     await navigator.clipboard.writeText(text);
@@ -16,8 +18,8 @@ export function CopyButton({ text }: CopyButtonProps) {
     <button
       onClick={handleCopy}
       className="absolute top-2 right-2 p-1.5 rounded-md bg-background/80 hover:bg-background border border-border opacity-0 group-hover/code:opacity-100 transition-opacity"
-      title="Copy code"
-      aria-label={copied ? 'Copied' : 'Copy code'}
+      title={t('chat.copyCode')}
+      aria-label={copied ? t('chat.copied') : t('chat.copyCode')}
     >
       {copied ? <Check className="h-3.5 w-3.5 text-green-500" /> : <Copy className="h-3.5 w-3.5 text-muted-foreground" />}
     </button>

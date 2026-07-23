@@ -4,7 +4,8 @@ import {
   validateProviderBaseUrl,
 } from '@code-insights/cli/constants/llm-providers';
 import { loadConfig, saveConfig } from '@code-insights/cli/utils/config';
-import type { ClaudeInsightConfig, LLMProviderConfig } from '@code-insights/cli/types';
+import type { AnalysisLanguage, ClaudeInsightConfig, LLMProviderConfig } from '@code-insights/cli/types';
+import { configuredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 import { loadLLMConfig, testLLMConfig } from '../llm/client.js';
 import { llmBusyPayload, runWithLlmLock } from '../llm/llm-lock.js';
 import { discoverOllamaModels } from '../llm/providers/ollama.js';
@@ -13,6 +14,7 @@ import { discoverLlamaCppModels } from '../llm/providers/llamacpp.js';
 const app = new Hono();
 
 const VALID_PROVIDERS = PROVIDERS.map((provider) => provider.id);
+const VALID_ANALYSIS_LANGUAGES: AnalysisLanguage[] = ['auto', 'zh-CN', 'en-US'];
 
 function maskApiKey(key: string | undefined): string | undefined {
   if (!key || key.length < 8) return key ? '***' : undefined;
@@ -26,6 +28,7 @@ app.get('/llm', (c) => {
 
   return c.json({
     dashboardPort: config?.dashboard?.port ?? 7890,
+    analysisLanguage: configuredAnalysisLanguage(config),
     provider: llm?.provider,
     model: llm?.model,
     apiKey: maskApiKey(llm?.apiKey),
@@ -43,6 +46,7 @@ app.get('/llm', (c) => {
 app.put('/llm', async (c) => {
   const body = await c.req.json<{
     dashboardPort?: number;
+    analysisLanguage?: AnalysisLanguage;
     provider?: string;
     model?: string;
     apiKey?: string;
@@ -54,6 +58,16 @@ app.put('/llm', async (c) => {
   };
 
   let changed = false;
+
+  if (body.analysisLanguage !== undefined) {
+    if (!VALID_ANALYSIS_LANGUAGES.includes(body.analysisLanguage)) {
+      return c.json({
+        error: `analysisLanguage must be one of: ${VALID_ANALYSIS_LANGUAGES.join(', ')}`,
+      }, 400);
+    }
+    config.dashboard = { ...config.dashboard, analysisLanguage: body.analysisLanguage };
+    changed = true;
+  }
 
   // Update dashboard port if provided
   if (body.dashboardPort !== undefined) {

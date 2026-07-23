@@ -49,7 +49,7 @@ function campaign(overrides: Partial<TestCampaign> = {}): TestCampaign {
     provider: 'anthropic',
     model: 'glm-5.2',
     analysisVersion: '3.0.0',
-    pipelineRevision: 'analysis-3.0.0/two-pass-v1',
+    pipelineRevision: 'analysis-3.0.0/two-pass-v2',
     baseUrlFingerprint: 'endpoint-fingerprint',
     scope: {},
     status: 'active',
@@ -288,6 +288,26 @@ describe('reanalyze command', () => {
     expect(deps.createCampaign).toHaveReturnedWith(active);
   });
 
+  it('freezes the selected analysis language in the campaign pipeline', async () => {
+    const zhConfig: ClaudeInsightConfig = {
+      ...config,
+      dashboard: { ...config.dashboard, analysisLanguage: 'zh-CN' },
+    };
+    const { deps } = makeDependencies({
+      loadConfig: vi.fn(() => zhConfig),
+    });
+
+    await parse(deps, ['start', '--yes']);
+
+    expect(deps.createCampaign).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      }),
+      'selection-fingerprint',
+    );
+  });
+
   it('guards unattended start with the previewed expected member count', async () => {
     const { deps } = makeDependencies();
 
@@ -330,6 +350,35 @@ describe('reanalyze command', () => {
       processed: 3,
       stopReason: 'batch_limit',
     });
+  });
+
+  it('uses the campaign-frozen language for both paid passes', async () => {
+    const zhConfig: ClaudeInsightConfig = {
+      ...config,
+      dashboard: { ...config.dashboard, analysisLanguage: 'zh-CN' },
+    };
+    const zhCampaign = campaign({
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      totalItems: 1,
+    });
+    const { deps } = makeDependencies({
+      loadConfig: vi.fn(() => zhConfig),
+      getActive: vi.fn(() => zhCampaign as never),
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--json']);
+
+    expect(deps.prepareSessionPass).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      'zh-CN',
+    );
+    expect(deps.preparePromptQualityPass).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      'zh-CN',
+    );
   });
 
   it('reports a campaign completed by this batch as no longer active', async () => {
@@ -705,9 +754,11 @@ describe('reanalyze command', () => {
     expect(deps.acquireLock).not.toHaveBeenCalled();
   });
 
-  it('refuses a campaign created by a different analysis pipeline before any paid call', async () => {
+  it('refuses a legacy v1 campaign before any paid call', async () => {
     const { deps } = makeDependencies({
-      getActive: vi.fn(() => campaign({ pipelineRevision: 'two-pass-v0' }) as never),
+      getActive: vi.fn(() => campaign({
+        pipelineRevision: 'analysis-3.0.0/two-pass-v1',
+      }) as never),
     });
 
     await expect(parse(deps, ['run'])).rejects.toThrow(/configuration.*campaign/i);

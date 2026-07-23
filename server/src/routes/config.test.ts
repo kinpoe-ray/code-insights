@@ -127,6 +127,32 @@ describe('Config routes', () => {
 
       expect(body.baseUrl).toBeUndefined();
     });
+
+    it('returns the saved analysis language', async () => {
+      configMocks.loadConfig.mockReturnValue({
+        sync: { claudeDir: '~/.claude/projects', excludeProjects: [] },
+        dashboard: { analysisLanguage: 'zh-CN' },
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/config/llm');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ analysisLanguage: 'zh-CN' });
+    });
+
+    it('falls back to auto when the config file contains an unsupported analysis language', async () => {
+      configMocks.loadConfig.mockReturnValue({
+        sync: { claudeDir: '~/.claude/projects', excludeProjects: [] },
+        dashboard: { analysisLanguage: 'fr-FR' },
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/config/llm');
+
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ analysisLanguage: 'auto' });
+    });
   });
 
   describe('PUT /api/config/llm', () => {
@@ -224,6 +250,66 @@ describe('Config routes', () => {
         body: JSON.stringify({ provider: 'anthropic', model: 'claude-3-5-sonnet-20241022' }),
       });
       expect(vi.mocked(saveConfig)).toHaveBeenCalledOnce();
+    });
+
+    it('saves analysis language without dropping any existing configuration', async () => {
+      configMocks.loadConfig.mockReturnValue({
+        sync: {
+          claudeDir: '~/.claude/projects',
+          excludeProjects: ['archived-project'],
+        },
+        dashboard: {
+          port: 8123,
+          llm: {
+            provider: 'anthropic',
+            model: 'glm-5.2',
+            apiKey: 'existing-secret-key',
+            baseUrl: 'https://gateway.example.test/anthropic',
+          },
+          analysisLanguage: 'auto',
+        },
+        telemetry: false,
+      });
+      const app = createApp();
+      const res = await app.request('/api/config/llm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysisLanguage: 'en-US' }),
+      });
+
+      expect(res.status).toBe(200);
+      expect(configMocks.saveConfig).toHaveBeenCalledWith({
+        sync: {
+          claudeDir: '~/.claude/projects',
+          excludeProjects: ['archived-project'],
+        },
+        dashboard: {
+          port: 8123,
+          llm: {
+            provider: 'anthropic',
+            model: 'glm-5.2',
+            apiKey: 'existing-secret-key',
+            baseUrl: 'https://gateway.example.test/anthropic',
+          },
+          analysisLanguage: 'en-US',
+        },
+        telemetry: false,
+      });
+    });
+
+    it('rejects an unsupported analysis language', async () => {
+      const app = createApp();
+      const res = await app.request('/api/config/llm', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ analysisLanguage: 'fr-FR' }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'analysisLanguage must be one of: auto, zh-CN, en-US',
+      });
+      expect(configMocks.saveConfig).not.toHaveBeenCalled();
     });
 
     it('clears a stale base URL when switching to a provider that does not support it', async () => {

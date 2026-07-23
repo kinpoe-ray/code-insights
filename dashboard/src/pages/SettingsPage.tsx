@@ -3,6 +3,8 @@ import { toast } from 'sonner';
 import { useLlmConfig, useSaveLlmConfig } from '@/hooks/useConfig';
 import { useUserProfile, normalizeGithubUsername } from '@/hooks/useUserProfile';
 import { fetchOllamaModels, fetchLlamaCppModels, testLlmConfig } from '@/lib/api';
+import type { AnalysisLanguage } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -92,6 +94,7 @@ const PROVIDERS: ProviderInfo[] = [
 ];
 
 export default function SettingsPage() {
+  const { t } = useLocale();
   const { data: llmConfig, isLoading: configLoading } = useLlmConfig();
   const saveMutation = useSaveLlmConfig();
   const { profile, saveProfile } = useUserProfile();
@@ -115,7 +118,7 @@ export default function SettingsPage() {
 
   const handleSaveProfile = async () => {
     await saveProfile(profileName, profileGithubUsername);
-    toast.success('Profile saved');
+    toast.success(t('settings.profile.saved'));
   };
 
   const [llmProvider, setLlmProvider] = useState<LLMProvider>('openai');
@@ -124,6 +127,7 @@ export default function SettingsPage() {
   const [llmApiKey, setLlmApiKey] = useState('');
   const [llmBaseUrl, setLlmBaseUrl] = useState('');
   const [llmConfigured, setLlmConfigured] = useState(false);
+  const [analysisLanguage, setAnalysisLanguage] = useState<AnalysisLanguage>('auto');
   const [llmTesting, setLlmTesting] = useState(false);
   const [llmTestError, setLlmTestError] = useState<string | null>(null);
   const [ollamaDiscoveredModels, setOllamaDiscoveredModels] = useState<string[]>([]);
@@ -137,6 +141,7 @@ export default function SettingsPage() {
   // Populate form from loaded config
   useEffect(() => {
     if (!llmConfig) return;
+    setAnalysisLanguage(llmConfig.analysisLanguage ?? 'auto');
     if (llmConfig.provider) {
       setLlmProvider(llmConfig.provider);
       setLlmConfigured(true);
@@ -156,6 +161,18 @@ export default function SettingsPage() {
     // apiKey is masked by server — leave blank for re-entry
     if (llmConfig.baseUrl) setLlmBaseUrl(llmConfig.baseUrl);
   }, [llmConfig]);
+
+  const handleAnalysisLanguageChange = async (nextLanguage: AnalysisLanguage) => {
+    const previousLanguage = analysisLanguage;
+    setAnalysisLanguage(nextLanguage);
+    try {
+      await saveMutation.mutateAsync({ analysisLanguage: nextLanguage });
+      toast.success(t('settings.analysisLanguage.saved'));
+    } catch (error) {
+      setAnalysisLanguage(previousLanguage);
+      toast.error(error instanceof Error ? error.message : t('settings.analysisLanguage.saveFailed'));
+    }
+  };
 
   // Default model when provider changes
   useEffect(() => {
@@ -207,11 +224,11 @@ export default function SettingsPage() {
     const effectiveModel = customModel.trim() || llmModel;
 
     if (providerInfo.requiresApiKey && !llmApiKey) {
-      setLlmTestError('API key is required');
+      setLlmTestError(t('settings.ai.apiKeyRequired'));
       return;
     }
     if (!effectiveModel) {
-      setLlmTestError('Please select a model');
+      setLlmTestError(t('settings.ai.modelRequired'));
       return;
     }
 
@@ -239,12 +256,12 @@ export default function SettingsPage() {
         });
         setLlmConfigured(true);
         setLlmTestError(null);
-        toast.success('AI provider configured successfully');
+        toast.success(t('settings.ai.configured'));
       } else {
-        setLlmTestError(testResult.error || 'Failed to connect');
+        setLlmTestError(testResult.error || t('settings.ai.connectFailed'));
       }
     } catch (err) {
-      setLlmTestError(err instanceof Error ? err.message : 'Failed to save configuration');
+      setLlmTestError(err instanceof Error ? err.message : t('settings.ai.saveFailed'));
     } finally {
       setLlmTesting(false);
     }
@@ -257,16 +274,16 @@ export default function SettingsPage() {
       setLlmApiKey('');
       setCustomModel('');
       setLlmTestError(null);
-      toast.success('AI provider configuration cleared');
+      toast.success(t('settings.ai.cleared'));
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Failed to clear configuration';
+      const msg = err instanceof Error ? err.message : t('settings.ai.clearFailed');
       setLlmTestError(msg);
       toast.error(msg);
     }
   };
 
   const progressItems = [
-    { label: 'AI Provider', done: llmConfigured, required: true },
+    { label: t('settings.ai.progressLabel'), done: llmConfigured, required: true },
   ];
   const requiredDone = progressItems.filter((p) => p.required && p.done).length;
   const requiredTotal = progressItems.filter((p) => p.required).length;
@@ -275,8 +292,8 @@ export default function SettingsPage() {
     return (
       <div className="p-6 space-y-6">
         <div>
-          <h1 className="text-2xl font-bold">Settings</h1>
-          <p className="text-muted-foreground">Configure your Code Insights dashboard</p>
+          <h1 className="text-2xl font-bold">{t('settings.title')}</h1>
+          <p className="text-muted-foreground">{t('settings.subtitle')}</p>
         </div>
         <div className="h-32 flex items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
@@ -288,8 +305,8 @@ export default function SettingsPage() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Settings</h1>
-        <p className="text-muted-foreground">Configure your Code Insights dashboard</p>
+        <h1 className="text-2xl font-bold">{t('settings.title')}</h1>
+        <p className="text-muted-foreground">{t('settings.subtitle')}</p>
       </div>
 
       {/* User Profile Card */}
@@ -297,10 +314,10 @@ export default function SettingsPage() {
         <CardHeader>
           <div className="flex items-center gap-2">
             <User className="h-5 w-5" />
-            <CardTitle className="text-base">Your Profile</CardTitle>
+            <CardTitle className="text-base">{t('settings.profile.title')}</CardTitle>
           </div>
           <CardDescription>
-            Your name and GitHub avatar appear in the footer of downloaded share cards
+            {t('settings.profile.description')}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -310,7 +327,7 @@ export default function SettingsPage() {
               {profileAvatarUrl && !profileAvatarError ? (
                 <img
                   src={profileAvatarUrl}
-                  alt="GitHub avatar preview"
+                  alt={t('settings.profile.avatarAlt')}
                   className="h-full w-full object-cover"
                   onError={() => setProfileAvatarError(true)}
                   onLoad={() => setProfileAvatarError(false)}
@@ -322,30 +339,30 @@ export default function SettingsPage() {
               )}
             </div>
             <div className="text-sm">
-              <p className="font-medium">{profileName.trim() || 'Your Name'}</p>
+              <p className="font-medium">{profileName.trim() || t('settings.profile.defaultName')}</p>
               {profileNormalizedUsername ? (
                 <p className="text-muted-foreground text-xs">@{profileNormalizedUsername}</p>
               ) : (
-                <p className="text-muted-foreground text-xs italic">Enter your GitHub username</p>
+                <p className="text-muted-foreground text-xs italic">{t('settings.profile.enterGithub')}</p>
               )}
             </div>
           </div>
 
           <div>
-            <label className="text-sm font-medium">Display Name</label>
+            <label className="text-sm font-medium">{t('settings.profile.displayName')}</label>
             <Input
               className="mt-1"
-              placeholder="e.g. Srikanth Rao"
+              placeholder={t('settings.profile.displayPlaceholder')}
               value={profileName}
               onChange={(e) => setProfileName(e.target.value)}
             />
           </div>
 
           <div>
-            <label className="text-sm font-medium">GitHub Username</label>
+            <label className="text-sm font-medium">{t('settings.profile.githubUsername')}</label>
             <Input
               className="mt-1"
-              placeholder="e.g. melagiri"
+              placeholder={t('settings.profile.githubPlaceholder')}
               value={profileGithubUsername}
               onChange={(e) => {
                 setProfileGithubUsername(e.target.value);
@@ -353,7 +370,7 @@ export default function SettingsPage() {
               }}
             />
             <p className="text-xs text-muted-foreground mt-1">
-              Used to load your GitHub avatar on share cards. No @ prefix needed.
+              {t('settings.profile.githubHelp')}
             </p>
           </div>
 
@@ -361,7 +378,7 @@ export default function SettingsPage() {
             onClick={handleSaveProfile}
             disabled={!profileName.trim() || !profileNormalizedUsername}
           >
-            Save Profile
+            {t('settings.profile.save')}
           </Button>
         </CardContent>
       </Card>
@@ -369,7 +386,7 @@ export default function SettingsPage() {
       {/* Setup progress strip */}
       <div className="rounded-lg border bg-card px-4 py-3 flex items-center gap-4 flex-wrap">
         <span className="text-sm font-medium shrink-0">
-          Setup: {requiredDone} of {requiredTotal} required configs complete
+          {t('settings.setup.progress', { done: requiredDone, total: requiredTotal })}
         </span>
         <div className="flex items-center gap-3 flex-wrap">
           {progressItems.map((item) => (
@@ -393,39 +410,43 @@ export default function SettingsPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
               <Cpu className="h-5 w-5" />
-              <CardTitle className="text-base">AI Analysis Provider</CardTitle>
+              <CardTitle className="text-base">{t('settings.ai.title')}</CardTitle>
             </div>
             {llmConfigured ? (
               <Badge variant="outline" className="text-green-600 border-green-600">
                 <CheckCircle className="mr-1 h-3 w-3" />
-                Connected
+                {t('settings.ai.connected')}
               </Badge>
             ) : (
               <Badge variant="outline" className="text-amber-600 border-amber-600">
                 <XCircle className="mr-1 h-3 w-3" />
-                Not Configured
+                {t('settings.ai.notConfigured')}
               </Badge>
             )}
           </div>
           <CardDescription>
-            Configure an LLM provider to analyze sessions and generate insights
+            {t('settings.ai.description')}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           {/* Provider Selection */}
           <div>
-            <label className="text-sm font-medium">Provider</label>
+            <label className="text-sm font-medium">{t('settings.ai.provider')}</label>
             <Select
               value={llmProvider}
               onValueChange={(v) => handleProviderChange(v as LLMProvider)}
             >
               <SelectTrigger className="mt-1">
-                <SelectValue placeholder="Select provider" />
+                <SelectValue placeholder={t('settings.ai.selectProvider')} />
               </SelectTrigger>
               <SelectContent>
                 {PROVIDERS.map((provider) => (
                   <SelectItem key={provider.id} value={provider.id}>
-                    {provider.name}
+                    {provider.id === 'ollama'
+                      ? `Ollama (${t('settings.ai.local')})`
+                      : provider.id === 'llamacpp'
+                        ? `llama.cpp (${t('settings.ai.local')})`
+                        : provider.name}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -434,13 +455,13 @@ export default function SettingsPage() {
 
           {/* Model Selection */}
           <div>
-            <label className="text-sm font-medium">Model</label>
+            <label className="text-sm font-medium">{t('settings.ai.model')}</label>
             {llmProvider === 'ollama' ? (
               <div className="mt-1 space-y-2">
                 <Input
                   value={llmModel}
                   onChange={(e) => setLlmModel(e.target.value)}
-                  placeholder="Type any model name (e.g. llama3.3)"
+                  placeholder={t('settings.ai.ollamaModelPlaceholder')}
                 />
                 {(() => {
                   const hardcoded =
@@ -448,7 +469,7 @@ export default function SettingsPage() {
                   const suggestions = [...new Set([...hardcoded, ...ollamaDiscoveredModels])];
                   return suggestions.length > 0 ? (
                     <div>
-                      <p className="text-xs text-muted-foreground mb-1.5">Suggestions:</p>
+                      <p className="text-xs text-muted-foreground mb-1.5">{t('settings.ai.suggestions')}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {suggestions.map((name) => (
                           <button
@@ -470,7 +491,7 @@ export default function SettingsPage() {
                 <Input
                   value={llmModel}
                   onChange={(e) => setLlmModel(e.target.value)}
-                  placeholder="Type any model name (e.g. gemma-4-12b)"
+                  placeholder={t('settings.ai.llamacppModelPlaceholder')}
                 />
                 {(() => {
                   const hardcoded =
@@ -478,7 +499,7 @@ export default function SettingsPage() {
                   const suggestions = [...new Set([...hardcoded, ...llamacppDiscoveredModels])];
                   return suggestions.length > 0 ? (
                     <div>
-                      <p className="text-xs text-muted-foreground mb-1.5">Suggestions:</p>
+                      <p className="text-xs text-muted-foreground mb-1.5">{t('settings.ai.suggestions')}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {suggestions.map((name) => (
                           <button
@@ -499,16 +520,27 @@ export default function SettingsPage() {
               <div className="mt-1 space-y-2">
                 <Select value={llmModel} onValueChange={setLlmModel}>
                   <SelectTrigger>
-                    <SelectValue placeholder="Select model" />
+                    <SelectValue placeholder={t('settings.ai.selectModel')} />
                   </SelectTrigger>
                   <SelectContent>
                     {PROVIDERS.find((p) => p.id === llmProvider)?.models.map((model) => (
                       <SelectItem key={model.id} value={model.id}>
                         <div className="flex items-center justify-between gap-2">
-                          <span>{model.name}</span>
+                          <span>{model.id === 'custom' ? t('settings.model.custom') : model.name}</span>
                           {model.description && (
                             <span className="text-xs text-muted-foreground">
-                              {model.description}
+                              {model.description === 'Best' ? t('settings.model.best')
+                                : model.description === 'Fast & cheap' ? t('settings.model.fastCheap')
+                                  : model.description === 'Fallback' ? t('settings.model.fallback')
+                                    : model.description === 'Most capable' ? t('settings.model.mostCapable')
+                                      : model.description === 'Best balance' ? t('settings.model.bestBalance')
+                                        : model.description === 'Fast' ? t('settings.model.fast')
+                                          : model.description === 'Capable' ? t('settings.model.capable')
+                                            : model.description === 'Free via Gemini API' ? t('settings.model.freeGemini')
+                                              : model.description === 'Flagship local model' ? t('settings.model.flagshipLocal')
+                                                : model.description === 'Large local model' ? t('settings.model.largeLocal')
+                                                  : model.description === 'Any GGUF loaded in llama-server' ? t('settings.model.anyGguf')
+                                                    : model.description}
                             </span>
                           )}
                         </div>
@@ -517,16 +549,16 @@ export default function SettingsPage() {
                   </SelectContent>
                 </Select>
                 <div>
-                  <label className="text-xs text-muted-foreground">Or enter a custom model ID</label>
+                  <label className="text-xs text-muted-foreground">{t('settings.ai.customModel')}</label>
                   <Input
                     value={customModel}
                     onChange={(e) => setCustomModel(e.target.value)}
-                    placeholder="e.g. gpt-4.1-nano, claude-opus-4-6"
+                    placeholder={t('settings.ai.customModelPlaceholder')}
                     className="mt-1"
                   />
                   {customModel.trim() && (
                     <p className="text-xs text-muted-foreground mt-1">
-                      Custom model <span className="font-mono">{customModel.trim()}</span> will be used instead of the dropdown selection.
+                      {t('settings.ai.customModelUsed', { model: customModel.trim() })}
                     </p>
                   )}
                 </div>
@@ -537,7 +569,7 @@ export default function SettingsPage() {
           {/* API Key (if required) */}
           {PROVIDERS.find((p) => p.id === llmProvider)?.requiresApiKey && (
             <div>
-              <label className="text-sm font-medium">API Key</label>
+              <label className="text-sm font-medium">{t('settings.ai.apiKey')}</label>
               <Input
                 type="password"
                 value={llmApiKey}
@@ -547,7 +579,7 @@ export default function SettingsPage() {
                 }}
                 placeholder={
                   llmConfigured
-                    ? 'Leave blank to keep existing key'
+                    ? t('settings.ai.keepExistingKey')
                     : llmProvider === 'openai'
                       ? 'sk-...'
                       : llmProvider === 'anthropic'
@@ -557,7 +589,7 @@ export default function SettingsPage() {
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Get your API key from{' '}
+                {t('settings.ai.getApiKey')}{' '}
                 <a
                   href={PROVIDERS.find((p) => p.id === llmProvider)?.apiKeyLink}
                   target="_blank"
@@ -574,15 +606,17 @@ export default function SettingsPage() {
             && llmProvider !== 'ollama'
             && llmProvider !== 'llamacpp' && (
             <div>
-              <label className="text-sm font-medium">Base URL (optional)</label>
+              <label className="text-sm font-medium">{t('settings.ai.baseUrlOptional')}</label>
               <Input
                 value={llmBaseUrl}
                 onChange={(e) => setLlmBaseUrl(e.target.value)}
-                placeholder={`Official ${PROVIDERS.find((p) => p.id === llmProvider)?.name} API`}
+                placeholder={t('settings.ai.officialApi', {
+                  provider: PROVIDERS.find((p) => p.id === llmProvider)?.name ?? '',
+                })}
                 className="mt-1"
               />
               <p className="text-xs text-muted-foreground mt-1">
-                Leave empty to use the official provider API.
+                {t('settings.ai.officialApiHelp')}
               </p>
             </div>
           )}
@@ -591,7 +625,7 @@ export default function SettingsPage() {
           {supportsCustomBaseUrl && llmProvider === 'llamacpp' && (
             <div className="space-y-3">
               <div>
-                <label className="text-sm font-medium">Base URL (optional)</label>
+                <label className="text-sm font-medium">{t('settings.ai.baseUrlOptional')}</label>
                 <Input
                   value={llmBaseUrl}
                   onChange={(e) => setLlmBaseUrl(e.target.value)}
@@ -599,7 +633,7 @@ export default function SettingsPage() {
                   className="mt-1"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Leave empty for default (localhost:8080). Start llama-server with:{' '}
+                  {t('settings.ai.llamacppDefaultHelp')}{' '}
                   <code className="bg-muted px-0.5 rounded">llama-server -m &lt;model.gguf&gt;</code>
                 </p>
               </div>
@@ -614,14 +648,14 @@ export default function SettingsPage() {
                   {llamacppDiscovering ? (
                     <>
                       <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />
-                      Discovering...
+                      {t('settings.ai.discovering')}
                     </>
                   ) : (
-                    'Discover Loaded Model'
+                    t('settings.ai.discoverLoadedModel')
                   )}
                 </Button>
                 <p className="text-xs text-muted-foreground mt-1">
-                  Queries the running llama-server instance to detect the currently loaded model.
+                  {t('settings.ai.discoverHelp')}
                 </p>
               </div>
             </div>
@@ -631,7 +665,7 @@ export default function SettingsPage() {
           {supportsCustomBaseUrl && llmProvider === 'ollama' && (
             <>
               <div>
-                <label className="text-sm font-medium">Base URL (optional)</label>
+                <label className="text-sm font-medium">{t('settings.ai.baseUrlOptional')}</label>
                 <Input
                   value={llmBaseUrl}
                   onChange={(e) => setLlmBaseUrl(e.target.value)}
@@ -639,7 +673,7 @@ export default function SettingsPage() {
                   className="mt-1"
                 />
                 <p className="text-xs text-muted-foreground mt-1">
-                  Leave empty for default (localhost:11434)
+                  {t('settings.ai.ollamaDefaultHelp')}
                 </p>
               </div>
 
@@ -655,17 +689,16 @@ export default function SettingsPage() {
                     ) : (
                       <ChevronRight className="h-3.5 w-3.5" />
                     )}
-                    Ollama connection notes
+                    {t('settings.ai.ollamaNotes')}
                   </button>
                 </CollapsibleTrigger>
                 <CollapsibleContent>
                   <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30 p-3 space-y-2">
                     <p className="text-xs text-amber-700 dark:text-amber-300">
-                      Ollama runs locally on your machine. The dashboard connects to it via the
-                      Hono server at localhost:7890, so no CORS configuration is required.
+                      {t('settings.ai.ollamaConnectionHelp')}
                     </p>
                     <p className="text-xs text-amber-700 dark:text-amber-300">
-                      Ensure Ollama is running before testing:{' '}
+                      {t('settings.ai.ollamaEnsureRunning')}{' '}
                       <code className="bg-amber-100 dark:bg-amber-950/50 px-0.5 rounded">
                         ollama serve
                       </code>
@@ -685,12 +718,12 @@ export default function SettingsPage() {
               {llmTesting ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  Testing...
+                  {t('settings.ai.testing')}
                 </>
               ) : llmConfigured ? (
-                'Update Configuration'
+                t('settings.ai.update')
               ) : (
-                'Save & Test'
+                t('settings.ai.saveAndTest')
               )}
             </Button>
             {llmConfigured && (
@@ -699,35 +732,59 @@ export default function SettingsPage() {
                 onClick={handleClearLLMConfig}
                 disabled={saveMutation.isPending}
               >
-                Clear
+                {t('settings.ai.clear')}
               </Button>
             )}
           </div>
         </CardContent>
       </Card>
 
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">{t('settings.analysisLanguage.title')}</CardTitle>
+          <CardDescription>{t('settings.analysisLanguage.description')}</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-2">
+          <Select
+            value={analysisLanguage}
+            onValueChange={(value) => void handleAnalysisLanguageChange(value as AnalysisLanguage)}
+          >
+            <SelectTrigger aria-label={t('settings.analysisLanguage.label')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="auto">{t('settings.analysisLanguage.auto')}</SelectItem>
+              <SelectItem value="zh-CN">{t('settings.analysisLanguage.zhCN')}</SelectItem>
+              <SelectItem value="en-US">{t('settings.analysisLanguage.enUS')}</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground">
+            {t('settings.analysisLanguage.help')}
+          </p>
+        </CardContent>
+      </Card>
+
       {/* CLI Setup */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">CLI Setup</CardTitle>
+          <CardTitle className="text-base">{t('settings.cli.title')}</CardTitle>
           <CardDescription>
-            Install and configure the CLI to sync your AI coding sessions
+            {t('settings.cli.description')}
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="rounded-lg bg-muted p-4 font-mono text-sm">
-            <p className="text-muted-foreground"># Install the CLI</p>
+            <p className="text-muted-foreground">{t('settings.cli.install')}</p>
             <p>npm install -g @code-insights/cli</p>
-            <p className="mt-2 text-muted-foreground"># Initialize</p>
+            <p className="mt-2 text-muted-foreground">{t('settings.cli.initialize')}</p>
             <p>code-insights init</p>
-            <p className="mt-2 text-muted-foreground"># Sync your sessions</p>
+            <p className="mt-2 text-muted-foreground">{t('settings.cli.sync')}</p>
             <p>code-insights sync</p>
-            <p className="mt-2 text-muted-foreground"># Open this dashboard</p>
+            <p className="mt-2 text-muted-foreground">{t('settings.cli.openDashboard')}</p>
             <p>code-insights dashboard</p>
           </div>
           <p className="text-sm text-muted-foreground">
-            The CLI parses sessions from Claude Code, Cursor, Codex CLI, and Copilot CLI into a
-            local SQLite database. All data stays on your machine.
+            {t('settings.cli.privacy')}
           </p>
         </CardContent>
       </Card>
@@ -741,7 +798,7 @@ export default function SettingsPage() {
           rel="noopener noreferrer"
           className="underline hover:text-foreground transition-colors"
         >
-          View on GitHub
+          {t('settings.viewOnGithub')}
         </a>
       </div>
     </div>

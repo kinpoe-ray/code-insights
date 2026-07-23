@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { fetchLlmConfig, saveLlmConfig } from '@/lib/api';
+import type { AnalysisLanguage } from '@/lib/types';
 
 export function useLlmConfig() {
   return useQuery({
@@ -17,6 +18,7 @@ export function useSaveLlmConfig() {
       model?: string;
       apiKey?: string;
       baseUrl?: string;
+      analysisLanguage?: AnalysisLanguage;
     }) => saveLlmConfig(body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['config', 'llm'] });

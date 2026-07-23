@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import type { DailyStats } from '@/lib/types';
 import { useThemeColors } from '@/lib/hooks/useThemeColors';
 import { CHART_COLORS } from '@/lib/constants/colors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ActivityChartProps {
   data: DailyStats[];
@@ -19,26 +20,28 @@ interface ActivityChartProps {
 
 export function ActivityChart({ data }: ActivityChartProps) {
   const { tooltipBg, tooltipBorder } = useThemeColors();
+  const { t, formatDate } = useLocale();
 
   const chartData = useMemo(
     () =>
       data.map((d) => ({
         ...d,
-        date: new Date(d.date).toLocaleDateString('en-US', {
+        date: formatDate(d.date, {
           month: 'short',
           day: 'numeric',
+          timeZone: 'UTC',
         }),
         // Normalize snake_case fields for recharts dataKey
         sessionCount: d.session_count,
         insightCount: d.insight_count,
       })),
-    [data]
+    [data, formatDate]
   );
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Activity Over Time</CardTitle>
+        <CardTitle className="text-base">{t('analytics.activityOverTime')}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="h-[300px]">
@@ -79,7 +82,7 @@ export function ActivityChart({ data }: ActivityChartProps) {
               <Area
                 type="monotone"
                 dataKey="sessionCount"
-                name="Sessions"
+                name={t('analytics.sessions')}
                 stroke={CHART_COLORS.activity.sessions}
                 fillOpacity={1}
                 fill="url(#colorSessions)"
@@ -87,7 +90,7 @@ export function ActivityChart({ data }: ActivityChartProps) {
               <Area
                 type="monotone"
                 dataKey="insightCount"
-                name="Insights"
+                name={t('analytics.insights')}
                 stroke={CHART_COLORS.activity.insights}
                 fillOpacity={1}
                 fill="url(#colorInsights)"

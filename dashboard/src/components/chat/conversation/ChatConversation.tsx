@@ -9,6 +9,7 @@ import { parseJsonField } from '@/lib/types';
 import { DateSeparator } from './DateSeparator';
 import { LoadMoreSentinel } from './LoadMoreSentinel';
 import { isAgentMessage } from '../message/preprocess';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ChatConversationProps {
   messages: Message[];
@@ -40,6 +41,7 @@ function shouldShowDateSeparator(messages: Message[], index: number): boolean {
 export function ChatConversation({
   messages, loading, loadingMore, hasMore, onLoadMore, error, sourceTool, highlightMessageId, searchQuery,
 }: ChatConversationProps) {
+  const { t } = useLocale();
   const highlightRef = useRef<HTMLDivElement>(null);
 
   // showRawMessages: when true, hidden protocol messages (skill-load, command-frame, exit-command)
@@ -92,7 +94,7 @@ export function ChatConversation({
   if (messages.length === 0) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground">
-        No messages in this session
+        {t('chat.empty')}
       </div>
     );
   }
@@ -116,11 +118,11 @@ export function ChatConversation({
       {/* Raw messages toggle — reveals hidden protocol messages (skill-load, command-frame, exit-command) */}
       <div className="flex items-center justify-end gap-2 px-4 py-2 border-b border-border">
         <Eye className="h-3.5 w-3.5 text-muted-foreground" />
-        <span className="text-xs text-muted-foreground">Show raw messages</span>
+        <span className="text-xs text-muted-foreground">{t('chat.raw.show')}</span>
         <Switch
           checked={showRawMessages}
           onCheckedChange={setShowRawMessages}
-          aria-label="Show raw protocol messages"
+          aria-label={t('chat.raw.showAria')}
         />
       </div>
 

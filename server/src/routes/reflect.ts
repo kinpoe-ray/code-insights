@@ -16,6 +16,7 @@ import {
 } from '../llm/reflect-prompts.js';
 import { buildWhereClause, buildPeriodFilter, parseIsoWeek, formatIsoWeek, getAggregatedData } from './shared-aggregation.js';
 import type { ReflectSection } from '@code-insights/cli/types';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 
 const app = new Hono();
 
@@ -120,6 +121,17 @@ app.post('/generate', requireLLM(), async (c) => {
       const client = createLLMClient();
       const results: Record<string, unknown> = {};
       const targetTool = detectTargetTool(db, where, params, body.source);
+      const languageContext = {
+        preference: loadConfiguredAnalysisLanguage(),
+        messages: db.prepare(`
+          SELECT m.type, m.content
+          FROM sessions s
+          JOIN messages m ON m.session_id = s.id
+          ${where} AND m.type = 'user'
+          ORDER BY s.started_at DESC, m.timestamp ASC, m.id ASC
+          LIMIT 500
+        `).all(...params) as Array<{ type: string; content: string }>,
+      };
 
       for (const section of sections) {
         if (abortSignal.aborted) break;
@@ -138,7 +150,7 @@ app.post('/generate', requireLLM(), async (c) => {
             pqSignals: (aggregated.pqDeficits.length || aggregated.pqStrengths.length)
               ? { deficits: aggregated.pqDeficits, strengths: aggregated.pqStrengths }
               : undefined,
-          });
+          }, languageContext);
           const response = await client.chat([
             { role: 'system', content: FRICTION_WINS_SYSTEM_PROMPT },
             { role: 'user', content: prompt },
@@ -161,7 +173,7 @@ app.post('/generate', requireLLM(), async (c) => {
             recurringFriction,
             effectivePatterns: recurringPatterns,
             targetTool,
-          });
+          }, languageContext);
           const response = await client.chat([
             { role: 'system', content: RULES_SKILLS_SYSTEM_PROMPT },
             { role: 'user', content: prompt },
@@ -181,7 +193,7 @@ app.post('/generate', requireLLM(), async (c) => {
             totalSessions: aggregated.totalSessions,
             period,
             frictionFrequency: aggregated.frictionTotal,
-          });
+          }, languageContext);
           const response = await client.chat([
             { role: 'system', content: WORKING_STYLE_SYSTEM_PROMPT },
             { role: 'user', content: prompt },

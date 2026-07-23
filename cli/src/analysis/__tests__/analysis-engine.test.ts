@@ -69,6 +69,27 @@ function client(overrides: Partial<LLMClient> = {}): LLMClient {
 }
 
 describe('AnalysisEngine contract', () => {
+  it('includes the selected output language in the model request', async () => {
+    let request: LLMMessage[] = [];
+    const engine = createAnalysisEngine({
+      client: client({
+        chat: async (messages) => {
+          request = messages;
+          return { content: validResponse };
+        },
+      }),
+      analysisLanguage: 'zh-CN',
+    });
+
+    await engine.analyzeSession({
+      session,
+      messages: [message('message-1', 'Please analyze this session.')],
+    });
+
+    const userRequest = request.find(item => item.role === 'user');
+    expect(JSON.stringify(userRequest?.content)).toContain('Simplified Chinese (zh-CN)');
+  });
+
   it('returns a complete single-chunk result with provider usage and cost', async () => {
     const engine = createAnalysisEngine({ client: client(), now: () => 25 });
 
@@ -191,6 +212,7 @@ describe('AnalysisEngine contract', () => {
       expect(Array.isArray(user?.content)).toBe(true);
       if (Array.isArray(user?.content)) {
         expect(user.content[0].cache_control).toEqual({ type: 'ephemeral' });
+        expect(user.content.at(-1)?.text).toContain('English (en-US)');
       }
     }
   });

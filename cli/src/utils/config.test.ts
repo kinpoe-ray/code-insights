@@ -144,6 +144,21 @@ describe('config utilities', () => {
       expect(parsed.dashboard).toEqual({ port: 7890 });
     });
 
+    it('preserves the configured analysis language', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+
+      const config = {
+        sync: { claudeDir: '/test/.claude/projects', excludeProjects: [] },
+        dashboard: { analysisLanguage: 'zh-CN' as const },
+      };
+
+      saveConfig(config);
+
+      const [, writtenContent] = vi.mocked(fs.writeFileSync).mock.calls[0];
+      const parsed = JSON.parse(writtenContent as string);
+      expect(parsed.dashboard).toEqual({ analysisLanguage: 'zh-CN' });
+    });
+
     it('includes optional telemetry field when present', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
 

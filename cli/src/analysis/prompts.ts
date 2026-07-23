@@ -13,6 +13,10 @@ import {
   EFFECTIVE_PATTERN_CLASSIFICATION_GUIDANCE,
 } from './prompt-constants.js';
 import { formatSessionMetaLine } from './message-format.js';
+import {
+  appendAnalysisLanguageInstruction,
+  type AnalysisLanguageContext,
+} from './analysis-language.js';
 
 // =============================================================================
 // SHARED SYSTEM PROMPT
@@ -69,9 +73,10 @@ export function buildCacheableConversationBlock(formattedMessages: string): Cont
 export function buildSessionAnalysisInstructions(
   projectName: string,
   sessionSummary: string | null,
-  meta?: SessionMetadata
+  meta?: SessionMetadata,
+  languageContext?: AnalysisLanguageContext,
 ): string {
-  return `You are a senior staff engineer writing entries for a team's engineering knowledge base. You've just observed an AI-assisted coding session and your job is to extract the insights that would save another engineer time if they encountered a similar situation 6 months from now.
+  const instructions = `You are a senior staff engineer writing entries for a team's engineering knowledge base. You've just observed an AI-assisted coding session and your job is to extract the insights that would save another engineer time if they encountered a similar situation 6 months from now.
 
 Your audience is a developer who has never seen this session but works on the same codebase. They need enough context to understand WHY a decision was made, WHAT specific gotcha was discovered, and WHEN this knowledge applies.
 
@@ -231,6 +236,7 @@ Only include insights rated 70+ confidence. If you cannot cite evidence, drop th
 Evidence should reference the labeled turns in the conversation (e.g., "User#2", "Assistant#5").
 
 Respond with valid JSON only, wrapped in <json>...</json> tags. Do not include any other text.`;
+  return appendAnalysisLanguageInstruction(instructions, languageContext);
 }
 
 // =============================================================================
@@ -249,9 +255,10 @@ export function buildPromptQualityInstructions(
     assistantMessageCount: number;
     toolExchangeCount: number;
   },
-  meta?: SessionMetadata
+  meta?: SessionMetadata,
+  languageContext?: AnalysisLanguageContext,
 ): string {
-  return `You are a prompt engineering coach helping developers communicate more effectively with AI coding assistants. You review conversations and identify specific moments where better prompting would have saved time — AND moments where the user prompted particularly well.
+  const instructions = `You are a prompt engineering coach helping developers communicate more effectively with AI coding assistants. You review conversations and identify specific moments where better prompting would have saved time — AND moments where the user prompted particularly well.
 
 You will produce:
 1. **Takeaways**: Concrete before/after examples the user can learn from (max 4)
@@ -357,6 +364,7 @@ Rules:
 - dimension_scores: each 0-100. Score correction_quality as 75 if no corrections were needed.
 
 Respond with valid JSON only, wrapped in <json>...</json> tags. Do not include any other text.`;
+  return appendAnalysisLanguageInstruction(instructions, languageContext);
 }
 
 // =============================================================================
@@ -371,9 +379,10 @@ Respond with valid JSON only, wrapped in <json>...</json> tags. Do not include a
 export function buildFacetOnlyInstructions(
   projectName: string,
   sessionSummary: string | null,
-  meta?: SessionMetadata
+  meta?: SessionMetadata,
+  languageContext?: AnalysisLanguageContext,
 ): string {
-  return `You are assessing an AI coding session to extract structured metadata for cross-session pattern analysis.
+  const instructions = `You are assessing an AI coding session to extract structured metadata for cross-session pattern analysis.
 
 Project: ${projectName}
 ${sessionSummary ? `Session Summary: ${sessionSummary}\n` : ''}${formatSessionMetaLine(meta)}
@@ -420,4 +429,5 @@ Extract facets in this JSON format:
 }
 
 Respond with valid JSON only, wrapped in <json>...</json> tags.`;
+  return appendAnalysisLanguageInstruction(instructions, languageContext);
 }

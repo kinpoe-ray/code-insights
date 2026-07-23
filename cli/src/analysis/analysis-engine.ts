@@ -1,4 +1,5 @@
 import { jsonrepair } from 'jsonrepair';
+import type { AnalysisLanguage } from '../types.js';
 import type { SessionData } from './analysis-db.js';
 import { calculateAnalysisCost } from './analysis-pricing.js';
 import { formatMessagesForAnalysis } from './message-format.js';
@@ -95,6 +96,7 @@ export interface AnalysisEngine {
 
 export interface AnalysisEngineDependencies {
   client: LLMClient;
+  analysisLanguage?: AnalysisLanguage;
   now?: () => number;
 }
 
@@ -302,6 +304,7 @@ function truncateConversationToBudget(
 
 export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): AnalysisEngine {
   const { client } = dependencies;
+  const analysisLanguage = dependencies.analysisLanguage ?? 'auto';
   const now = dependencies.now ?? Date.now;
 
   return {
@@ -345,6 +348,7 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
         input.session.project_name,
         input.session.summary,
         buildSessionMeta(input.session),
+        { preference: analysisLanguage, messages: input.messages },
       );
       const budget = getRequestTokenBudget(client);
       const formattedMessages = formatMessagesForAnalysis(input.messages);
@@ -470,6 +474,7 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
           input.session.project_name,
           input.session.summary,
           buildSessionMeta(input.session),
+          { preference: analysisLanguage, messages: input.messages },
         );
         const facetPrompt = prepareAnalysisPrompt(
           client,

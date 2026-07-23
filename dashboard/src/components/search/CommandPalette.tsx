@@ -13,13 +13,15 @@ import {
   Clock,
   Zap,
 } from 'lucide-react';
-import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useSearch } from '@/hooks/useSearch';
 import { SessionSearchResult, InsightSearchResult } from './SearchResult';
 import type { SearchSessionResult, SearchInsightResult } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
 const RECENT_KEY = 'code-insights:recent-searches';
 const MAX_RECENT = 5;
@@ -48,14 +50,14 @@ function pushRecent(item: Omit<RecentItem, 'timestamp'>): void {
 }
 
 const NAV_ITEMS = [
-  { label: 'Go to Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { label: 'Go to Sessions', href: '/sessions', icon: MessageSquare },
-  { label: 'Go to Insights', href: '/insights', icon: Lightbulb },
-  { label: 'Go to Analytics', href: '/analytics', icon: BarChart3 },
-  { label: 'Go to Patterns', href: '/patterns', icon: Sparkles },
-  { label: 'Go to Export', href: '/export', icon: Download },
-  { label: 'Go to Settings', href: '/settings', icon: Settings },
-];
+  { labelKey: 'search.goDashboard', href: '/dashboard', icon: LayoutDashboard },
+  { labelKey: 'search.goSessions', href: '/sessions', icon: MessageSquare },
+  { labelKey: 'search.goInsights', href: '/insights', icon: Lightbulb },
+  { labelKey: 'search.goAnalytics', href: '/analytics', icon: BarChart3 },
+  { labelKey: 'search.goPatterns', href: '/patterns', icon: Sparkles },
+  { labelKey: 'search.goExport', href: '/export', icon: Download },
+  { labelKey: 'search.goSettings', href: '/settings', icon: Settings },
+] satisfies Array<{ labelKey: MessageKey; href: string; icon: typeof LayoutDashboard }>;
 
 interface CommandPaletteProps {
   isOpen: boolean;
@@ -70,6 +72,7 @@ type ResultItem =
 
 export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const navigate = useNavigate();
+  const { t } = useLocale();
   const [query, setQuery] = useState('');
   const deferredQuery = useDeferredValue(query);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -101,9 +104,10 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
   const visibleInsights = showAllInsights ? insights : insights.slice(0, INITIAL_SHOW);
 
   // Filter nav items when query is present (partial match)
+  const localizedNav = NAV_ITEMS.map((item) => ({ ...item, label: t(item.labelKey) }));
   const filteredNav = query
-    ? NAV_ITEMS.filter((n) => n.label.toLowerCase().includes(query.toLowerCase()))
-    : NAV_ITEMS;
+    ? localizedNav.filter((n) => n.label.toLowerCase().includes(query.toLowerCase()))
+    : localizedNav;
 
   const flatItems: ResultItem[] = [];
   if (!query) {
@@ -198,9 +202,12 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
       <DialogContent
         className="p-0 gap-0 max-w-[540px] w-[calc(100vw-2rem)] overflow-hidden"
         onKeyDown={handleKeyDown}
-        aria-label="Command palette"
+        aria-label={t('search.commandPalette')}
       >
-        <DialogTitle className="sr-only">Command palette</DialogTitle>
+        <DialogTitle className="sr-only">{t('search.commandPalette')}</DialogTitle>
+        <DialogDescription className="sr-only">
+          {t('search.commandPaletteDescription')}
+        </DialogDescription>
         {/* Search input */}
         <div className="flex items-center gap-2 px-4 border-b h-12">
           <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
@@ -208,14 +215,14 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search sessions, insights, projects..."
+            placeholder={t('search.placeholder')}
             className="border-0 shadow-none focus-visible:ring-0 h-10 text-base px-0"
           />
           {query && (
             <button
               onClick={() => { setQuery(''); setActiveIndex(0); }}
               className="text-xs text-muted-foreground hover:text-foreground transition-colors shrink-0"
-              aria-label="Clear search"
+              aria-label={t('search.clear')}
             >
               ✕
             </button>
@@ -239,8 +246,8 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
           ) : showNoResults ? (
             <div className="flex flex-col items-center justify-center py-10 text-center px-6 space-y-2">
               <SearchX className="h-7 w-7 text-muted-foreground" />
-              <p className="text-sm font-medium">No results for &ldquo;{query}&rdquo;</p>
-              <p className="text-xs text-muted-foreground">Try different keywords or check spelling.</p>
+              <p className="text-sm font-medium">{t('search.noResults', { query })}</p>
+              <p className="text-xs text-muted-foreground">{t('search.tryDifferent')}</p>
             </div>
           ) : (
             <div>
@@ -250,7 +257,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                   <div className="flex items-center gap-2 px-4 py-1.5">
                     <Clock className="h-3.5 w-3.5 text-muted-foreground" />
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      Recent
+                      {t('search.recent')}
                     </span>
                   </div>
                   {recent.map((item, i) => {
@@ -270,7 +277,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                         )}
                         <div className="flex-1 min-w-0">
                           <div className="text-sm text-muted-foreground truncate">{item.title}</div>
-                          <div className="text-xs text-muted-foreground/50 capitalize">{item.type}</div>
+                          <div className="text-xs text-muted-foreground/50">
+                            {t(item.type === 'session' ? 'search.typeSession' : 'search.typeInsight')}
+                          </div>
                         </div>
                       </div>
                     );
@@ -282,7 +291,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
               {query && sessions.length > 0 && (
                 <div>
                   <div className="px-4 py-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Sessions ({sessions.length})
+                    {t('search.sessionsCount', { count: sessions.length })}
                   </div>
                   {visibleSessions.map((s) => {
                     const flatIdx = flatItems.findIndex((f) => f.kind === 'session' && f.data.id === s.id);
@@ -307,7 +316,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                       onClick={() => setShowAllSessions(true)}
                       className="w-full text-xs text-muted-foreground hover:text-foreground py-1.5 px-4 text-left transition-colors"
                     >
-                      +{sessions.length - INITIAL_SHOW} more sessions...
+                      {t('search.moreSessions', { count: sessions.length - INITIAL_SHOW })}
                     </button>
                   )}
                 </div>
@@ -317,7 +326,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
               {query && insights.length > 0 && (
                 <div>
                   <div className="px-4 py-1.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                    Insights ({insights.length})
+                    {t('search.insightsCount', { count: insights.length })}
                   </div>
                   {visibleInsights.map((ins) => {
                     const flatIdx = flatItems.findIndex((f) => f.kind === 'insight' && f.data.id === ins.id);
@@ -342,7 +351,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                       onClick={() => setShowAllInsights(true)}
                       className="w-full text-xs text-muted-foreground hover:text-foreground py-1.5 px-4 text-left transition-colors"
                     >
-                      +{insights.length - INITIAL_SHOW} more insights...
+                      {t('search.moreInsights', { count: insights.length - INITIAL_SHOW })}
                     </button>
                   )}
                 </div>
@@ -354,7 +363,7 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
                   <div className="flex items-center gap-2 px-4 py-1.5">
                     <Zap className="h-3.5 w-3.5 text-muted-foreground" />
                     <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                      Quick Actions
+                      {t('search.quickActions')}
                     </span>
                   </div>
                   {filteredNav.map((n) => {
@@ -383,9 +392,9 @@ export function CommandPalette({ isOpen, onClose }: CommandPaletteProps) {
 
         {/* Footer hint */}
         <div className="border-t px-4 py-2 text-xs text-muted-foreground flex items-center gap-3">
-          <span>↑↓ navigate</span>
-          <span>↵ open</span>
-          <span>esc close</span>
+          <span>↑↓ {t('search.navigate')}</span>
+          <span>↵ {t('search.open')}</span>
+          <span>esc {t('search.close')}</span>
         </div>
       </DialogContent>
     </Dialog>

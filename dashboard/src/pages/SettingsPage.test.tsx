@@ -2,6 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LLMConfig } from '@/lib/types';
+import { LocaleProvider } from '@/i18n/LocaleProvider';
 import SettingsPage from './SettingsPage';
 
 Object.defineProperties(Element.prototype, {
@@ -36,12 +37,21 @@ vi.mock('@/lib/api', () => ({
   testLlmConfig: settingsMocks.testLlmConfig,
 }));
 
+function renderSettings() {
+  return render(
+    <LocaleProvider>
+      <SettingsPage />
+    </LocaleProvider>,
+  );
+}
+
 describe('SettingsPage provider capabilities', () => {
   beforeEach(() => {
     settingsMocks.config = {
       dashboardPort: 7890,
       provider: 'anthropic',
       model: 'claude-sonnet-4-6',
+      analysisLanguage: 'auto',
       baseUrl: 'https://anthropic-compatible.example.test',
       providers: [
         { id: 'openai', supportsCustomBaseUrl: false },
@@ -54,10 +64,12 @@ describe('SettingsPage provider capabilities', () => {
     settingsMocks.mutateAsync.mockReset();
     settingsMocks.testLlmConfig.mockReset();
     settingsMocks.testLlmConfig.mockResolvedValue({ success: true });
+    localStorage.clear();
+    localStorage.setItem('code-insights.locale', 'en-US');
   });
 
   it('shows the base URL field when the backend declares support', () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByText('Base URL (optional)')).toBeInTheDocument();
   });
@@ -75,14 +87,14 @@ describe('SettingsPage provider capabilities', () => {
       )),
     };
 
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.queryByText('Base URL (optional)')).not.toBeInTheDocument();
   });
 
   it('does not submit the previous provider base URL after switching providers', async () => {
     const user = userEvent.setup();
-    render(<SettingsPage />);
+    renderSettings();
 
     await user.click(screen.getAllByRole('combobox')[0]);
     await user.click(screen.getByRole('option', { name: 'OpenAI' }));
@@ -95,5 +107,18 @@ describe('SettingsPage provider capabilities', () => {
       model: 'gpt-4.1',
       apiKey: 'sk-new-openai-key',
     });
+  });
+
+  it('saves the language used by new analyses without retesting the provider', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    await user.click(screen.getByRole('combobox', { name: 'Analysis language' }));
+    await user.click(screen.getByRole('option', { name: 'Chinese (Simplified)' }));
+
+    await waitFor(() => {
+      expect(settingsMocks.mutateAsync).toHaveBeenCalledWith({ analysisLanguage: 'zh-CN' });
+    });
+    expect(settingsMocks.testLlmConfig).not.toHaveBeenCalled();
   });
 });

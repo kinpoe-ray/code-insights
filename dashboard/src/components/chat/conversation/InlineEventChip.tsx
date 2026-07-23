@@ -1,5 +1,5 @@
-import { format } from 'date-fns';
 import { Terminal } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface InlineEventChipProps {
   command: string; // e.g., "/compact", "/plan", "/review"
@@ -12,11 +12,12 @@ interface InlineEventChipProps {
  * Used for /compact (user-initiated) and all other slash commands.
  */
 export function InlineEventChip({ command, timestamp }: InlineEventChipProps) {
-  const formattedTime = format(new Date(timestamp), 'h:mm a');
+  const { t, formatDate } = useLocale();
+  const formattedTime = formatDate(timestamp, { hour: 'numeric', minute: '2-digit' });
 
   return (
     <div
-      aria-label={`Slash command ${command} at ${formattedTime}`}
+      aria-label={t('chat.slashCommand.aria', { command, time: formattedTime })}
       className="flex justify-center items-center gap-1.5 py-1.5 px-4"
     >
       <Terminal className="h-3 w-3 text-muted-foreground" />

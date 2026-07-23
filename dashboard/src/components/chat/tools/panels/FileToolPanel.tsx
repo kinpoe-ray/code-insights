@@ -4,6 +4,7 @@ import { parseToolInput } from '../utils';
 import { usePreviewText } from '../usePreview';
 import { CollapsibleToolPanel } from '../CollapsibleToolPanel';
 import { Badge } from '@/components/ui/badge';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface FileToolPanelProps {
   toolCall: ToolCall;
@@ -26,6 +27,7 @@ function detectLanguage(filePath: string): string | null {
 }
 
 export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
+  const { t } = useLocale();
   const input = parseToolInput(toolCall.input);
   const filePath = (input.file_path as string) || '';
   const fileName = getFileName(filePath);
@@ -36,7 +38,7 @@ export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
   const isWrite = toolCall.name === 'Write';
 
   const Icon = isRead ? FileText : isEdit ? FilePen : FilePlus2;
-  const label = isRead ? 'Read' : isEdit ? 'Edited' : 'Wrote';
+  const label = isRead ? t('chat.tool.read') : isEdit ? t('chat.tool.edited') : t('chat.tool.wrote');
 
   const oldString = isEdit ? (input.old_string as string) || '' : '';
   const newString = isEdit ? (input.new_string as string) || '' : '';
@@ -48,7 +50,7 @@ export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
   const summary = (
     <>
       <code className="text-xs text-muted-foreground font-mono truncate" title={filePath}>
-        {fileName || 'file'}
+        {fileName || t('chat.tool.fileFallback')}
       </code>
       <Badge variant="outline" className="text-[10px] py-0 shrink-0">{label}</Badge>
       {lang && <span className="text-[10px] text-muted-foreground/60 shrink-0">{lang}</span>}
@@ -58,7 +60,7 @@ export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
   return (
     <CollapsibleToolPanel
       icon={<Icon className="h-3.5 w-3.5 text-blue-500 shrink-0" />}
-      label="File"
+      label={t('chat.tool.file')}
       summary={summary}
     >
       {isEdit && (oldString || newString) && (
@@ -88,7 +90,7 @@ export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
               onClick={toggle}
               className="text-xs text-blue-500 hover:text-blue-600 mt-1"
             >
-              {showFull ? 'Show less' : `Show full output (${resultLines.length} lines)`}
+              {showFull ? t('chat.showLess') : t('chat.output.showFull', { count: resultLines.length })}
             </button>
           )}
         </div>
@@ -96,7 +98,7 @@ export function FileToolPanel({ toolCall, result }: FileToolPanelProps) {
 
       {isWrite && (
         <div className="px-3 py-1.5 text-xs text-muted-foreground">
-          Created {fileName ? <code className="font-mono">{fileName}</code> : 'file'}
+          {t('chat.tool.created', { file: fileName || t('chat.tool.fileFallback') })}
         </div>
       )}
     </CollapsibleToolPanel>

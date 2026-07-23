@@ -1,5 +1,6 @@
 import { createHash } from 'crypto';
 import type Database from 'better-sqlite3';
+import type { AnalysisLanguage } from '../types.js';
 import { getDb } from '../db/client.js';
 import { createAnalysisEngine } from './analysis-engine.js';
 import {
@@ -31,7 +32,16 @@ import type { AnalysisRunner, RunAnalysisResult } from './runner-types.js';
  * Bump whenever pass orchestration, prompts, parsing, or publication semantics
  * change in a way that must not be mixed inside one durable campaign.
  */
-export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v1`;
+export const LEGACY_TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v1`;
+export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v2`;
+
+export function pipelineRevisionForAnalysisLanguage(
+  analysisLanguage: AnalysisLanguage,
+): string {
+  return analysisLanguage === 'auto'
+    ? TWO_PASS_PIPELINE_REVISION
+    : `${TWO_PASS_PIPELINE_REVISION}/lang-${analysisLanguage}`;
+}
 
 export interface SessionAnalysisRow extends SessionData {
   message_count: number;
@@ -61,6 +71,10 @@ interface PreparedPassBase {
   sessionMessageCount: number;
   provider: string;
   model: string;
+  /** Optional in the wire type so legacy JSON can be decoded and rejected safely. */
+  analysisLanguage?: AnalysisLanguage;
+  /** Optional in the wire type so legacy JSON can be decoded and rejected safely. */
+  pipelineRevision?: string;
   usage: PreparedPassUsage;
 }
 
@@ -75,6 +89,11 @@ export interface PreparedPromptQualityPass extends PreparedPassBase {
   kind: 'prompt_quality';
   response: PromptQualityResponse;
 }
+
+type CurrentPreparedPass = (PreparedSessionPass | PreparedPromptQualityPass) & {
+  analysisLanguage: AnalysisLanguage;
+  pipelineRevision: string;
+};
 
 export interface PublishedTwoPassResult {
   insightCount: number;
@@ -201,6 +220,7 @@ function commonStageFields(
   provider: string,
   model: string,
   usage: PreparedPassUsage,
+  analysisLanguage: AnalysisLanguage,
 ): PreparedPassBase {
   return {
     schemaVersion: 1,
@@ -209,6 +229,8 @@ function commonStageFields(
     sessionMessageCount: input.session.message_count,
     provider,
     model,
+    analysisLanguage,
+    pipelineRevision: pipelineRevisionForAnalysisLanguage(analysisLanguage),
     usage,
   };
 }
@@ -229,10 +251,22 @@ function assertStageMatchesInput(
   }
 }
 
+function assertStageUsesCurrentLanguagePolicy(
+  stage: PreparedSessionPass | PreparedPromptQualityPass,
+): asserts stage is CurrentPreparedPass {
+  if (stage.analysisLanguage === undefined || stage.pipelineRevision === undefined) {
+    throw new Error('Prepared analysis pass predates the current language policy pipeline.');
+  }
+  if (stage.pipelineRevision !== pipelineRevisionForAnalysisLanguage(stage.analysisLanguage)) {
+    throw new Error('Prepared analysis pass does not match the current language policy pipeline.');
+  }
+}
+
 /** Execute pass 1 without writing analysis artifacts to SQLite. */
 export async function prepareSessionAnalysisPass(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
+  analysisLanguage: AnalysisLanguage = 'auto',
 ): Promise<PreparedSessionPass> {
   let response: AnalysisResponse;
   let provider: string;
@@ -240,7 +274,10 @@ export async function prepareSessionAnalysisPass(
   let usage: PreparedPassUsage;
 
   if (isAnalysisLLMClient(runner)) {
-    const outcome = await createAnalysisEngine({ client: runner }).analyzeSession({
+    const outcome = await createAnalysisEngine({
+      client: runner,
+      analysisLanguage,
+    }).analyzeSession({
       session: input.session,
       messages: input.messages,
     });
@@ -257,6 +294,7 @@ export async function prepareSessionAnalysisPass(
       input.session.project_name,
       input.session.summary,
       sessionMetadata(input),
+      { preference: analysisLanguage, messages: input.messages },
     );
     const formattedMessages = formatMessagesForAnalysis(input.messages);
     const result = await runner.runAnalysis({
@@ -272,7 +310,7 @@ export async function prepareSessionAnalysisPass(
   }
 
   return {
-    ...commonStageFields(input, provider, model, usage),
+    ...commonStageFields(input, provider, model, usage, analysisLanguage),
     kind: 'session',
     response,
   };
@@ -284,6 +322,7 @@ export const prepareSessionPass = prepareSessionAnalysisPass;
 async function runPromptQualityPass(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
+  analysisLanguage: AnalysisLanguage,
 ): Promise<RunAnalysisResult> {
   const formattedMessages = formatMessagesForAnalysis(input.messages);
   const humanMessageCount = input.messages.filter(message => message.type === 'user').length;
@@ -293,6 +332,7 @@ async function runPromptQualityPass(
     input.session.project_name,
     { humanMessageCount, assistantMessageCount, toolExchangeCount },
     sessionMetadata(input),
+    { preference: analysisLanguage, messages: input.messages },
   );
   const conversationBlock = buildCacheableConversationBlock(formattedMessages);
 
@@ -332,15 +372,20 @@ export async function preparePromptQualityPass(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
   sessionStage?: PreparedSessionPass,
+  analysisLanguage: AnalysisLanguage = 'auto',
 ): Promise<PreparedPromptQualityPass> {
   if (sessionStage) {
     assertStageMatchesInput(sessionStage, input);
     if (sessionStage.kind !== 'session') {
       throw new Error('Prompt quality analysis requires a prepared session pass.');
     }
+    assertStageUsesCurrentLanguagePolicy(sessionStage);
+    if (sessionStage.analysisLanguage !== analysisLanguage) {
+      throw new Error('Prompt quality analysis must use the same analysis language as session analysis.');
+    }
   }
 
-  const result = await runPromptQualityPass(input, runner);
+  const result = await runPromptQualityPass(input, runner, analysisLanguage);
   const parsed = parsePromptQualityResponse(result.rawJson);
   if (!parsed.success) {
     throw new Error(`Prompt quality analysis failed: ${parsed.error.error_message}`);
@@ -359,13 +404,14 @@ export async function preparePromptQualityPass(
       result.provider,
       result.model,
       normalizeUsage({ ...result, estimatedCostUsd, chunkCount: 1 }),
+      analysisLanguage,
     ),
     kind: 'prompt_quality',
     response: parsed.data,
   };
 }
 
-function usageWrite(stage: PreparedSessionPass | PreparedPromptQualityPass): SaveAnalysisUsageData {
+function usageWrite(stage: CurrentPreparedPass): SaveAnalysisUsageData {
   return {
     session_id: stage.sessionId,
     analysis_type: stage.kind,
@@ -380,7 +426,7 @@ function usageWrite(stage: PreparedSessionPass | PreparedPromptQualityPass): Sav
     chunk_count: stage.usage.chunkCount,
     session_message_count: stage.sessionMessageCount,
     input_revision: stage.inputRevision,
-    pipeline_revision: TWO_PASS_PIPELINE_REVISION,
+    pipeline_revision: stage.pipelineRevision,
   };
 }
 
@@ -394,6 +440,11 @@ export function publishPreparedTwoPass(
 ): PublishedTwoPassResult {
   assertStageMatchesInput(sessionStage, input);
   assertStageMatchesInput(promptQualityStage, input);
+  assertStageUsesCurrentLanguagePolicy(sessionStage);
+  assertStageUsesCurrentLanguagePolicy(promptQualityStage);
+  if (sessionStage.analysisLanguage !== promptQualityStage.analysisLanguage) {
+    throw new Error('Prepared analysis passes use different analysis languages.');
+  }
   if (
     sessionStage.kind !== 'session'
     || promptQualityStage.kind !== 'prompt_quality'

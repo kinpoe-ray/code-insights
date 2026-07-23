@@ -34,13 +34,15 @@ import {
   preparePromptQualityPass,
   prepareSessionAnalysisPass,
   publishPreparedTwoPass,
-  TWO_PASS_PIPELINE_REVISION,
+  pipelineRevisionForAnalysisLanguage,
   type FrozenSessionAnalysisInput,
   type PreparedPromptQualityPass,
   type PreparedSessionPass,
 } from '../analysis/two-pass-analysis.js';
 import type { AnalysisRunner } from '../analysis/runner-types.js';
 import type { ClaudeInsightConfig } from '../types.js';
+import type { AnalysisLanguage } from '../types.js';
+import { configuredAnalysisLanguage } from '../analysis/analysis-language.js';
 
 type CampaignStopReason =
   | 'no_active_campaign'
@@ -104,6 +106,7 @@ interface CampaignTarget {
   model: string;
   analysisVersion: string;
   pipelineRevision: string;
+  analysisLanguage: AnalysisLanguage;
   baseUrlFingerprint: string;
 }
 
@@ -142,11 +145,13 @@ export interface ReanalyzeDependencies {
   prepareSessionPass: (
     input: FrozenSessionAnalysisInput,
     runner: AnalysisRunner,
+    analysisLanguage?: AnalysisLanguage,
   ) => Promise<PreparedSessionPass>;
   preparePromptQualityPass: (
     input: FrozenSessionAnalysisInput,
     runner: AnalysisRunner,
     sessionStage?: PreparedSessionPass,
+    analysisLanguage?: AnalysisLanguage,
   ) => Promise<PreparedPromptQualityPass>;
   publishTwoPass: typeof publishPreparedTwoPass;
   createRunner: () => AnalysisRunner;
@@ -245,7 +250,8 @@ function resolveTarget(
   deps: ReanalyzeDependencies,
   modelOverride?: string,
 ): CampaignTarget {
-  const llm = deps.loadConfig()?.dashboard?.llm;
+  const config = deps.loadConfig();
+  const llm = config?.dashboard?.llm;
   if (!llm) {
     throw new Error('LLM is not configured. Run `code-insights config llm` first.');
   }
@@ -259,11 +265,13 @@ function resolveTarget(
   }
   const model = requestedModel || configuredModel;
   if (!model) throw new Error('A model is required for reanalysis.');
+  const analysisLanguage = configuredAnalysisLanguage(config);
   return {
     provider: llm.provider,
     model,
     analysisVersion: ANALYSIS_VERSION,
-    pipelineRevision: TWO_PASS_PIPELINE_REVISION,
+    pipelineRevision: pipelineRevisionForAnalysisLanguage(analysisLanguage),
+    analysisLanguage,
     baseUrlFingerprint: deps.fingerprintBaseUrl(llm.baseUrl),
   };
 }
@@ -590,7 +598,11 @@ async function runCommand(
 
         let sessionStage: PreparedSessionPass;
         if (claimed.sessionStage === null) {
-          sessionStage = await deps.prepareSessionPass(input, runner);
+          sessionStage = await deps.prepareSessionPass(
+            input,
+            runner,
+            target.analysisLanguage,
+          );
 
           // Cancellation is terminal and wins over an in-flight response.
           // Pause/deadline may still preserve this completed pass-one stage.
@@ -652,6 +664,7 @@ async function runCommand(
           input,
           runner,
           sessionStage,
+          target.analysisLanguage,
         );
 
         // Do not publish a response that returned after terminal cancellation

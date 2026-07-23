@@ -3,6 +3,10 @@
 // Extracted from analysis.ts to keep each analysis responsibility in its own module.
 
 import { getDb } from '@code-insights/cli/db/client';
+import {
+  appendAnalysisLanguageInstruction,
+  loadConfiguredAnalysisLanguage,
+} from '@code-insights/cli/analysis/analysis-language';
 import { createLLMClient, isLLMConfigured } from './client.js';
 
 export interface RecurringInsightGroup {
@@ -53,6 +57,7 @@ export async function findRecurringInsights(
 
   try {
     const client = createLLMClient();
+    const db = getDb();
 
     const insightData = candidates.map(i => ({
       id: i.id,
@@ -62,8 +67,17 @@ export async function findRecurringInsights(
       projectName: i.project_name,
       sessionId: i.session_id,
     }));
+    const sessionIds = [...new Set(candidates.map(insight => insight.session_id))];
+    const sourceConversationMessages = db.prepare(`
+      SELECT type, content
+      FROM messages
+      WHERE type = 'user'
+        AND session_id IN (${sessionIds.map(() => '?').join(', ')})
+      ORDER BY timestamp DESC, id DESC
+      LIMIT 500
+    `).all(...sessionIds) as Array<{ type: string; content: string }>;
 
-    const prompt = `Analyze these insights from coding sessions and find groups of semantically similar or duplicate insights — ones that express the same learning or decision even if worded differently.
+    const basePrompt = `Analyze these insights from coding sessions and find groups of semantically similar or duplicate insights — ones that express the same learning or decision even if worded differently.
 
 RULES:
 - Only group insights that are genuinely about the same concept/topic
@@ -85,6 +99,10 @@ Respond with valid JSON only:
     }
   ]
 }`;
+    const prompt = appendAnalysisLanguageInstruction(basePrompt, {
+      preference: loadConfiguredAnalysisLanguage(),
+      messages: sourceConversationMessages,
+    });
 
     const response = await client.chat([
       {
@@ -132,7 +150,6 @@ Respond with valid JSON only:
     }
 
     // Write links to SQLite
-    const db = getDb();
     const updateLinks = db.prepare(
       `UPDATE insights SET linked_insight_ids = ? WHERE id = ?`
     );

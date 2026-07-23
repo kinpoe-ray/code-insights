@@ -2,7 +2,7 @@
 // Base URL is relative in production (SPA served by the same server).
 // In Vite dev mode, the proxy forwards /api -> localhost:7890.
 
-import type { Project, Session, Message, Insight, DashboardStats, LLMConfig, ExportTemplate, FacetRow } from '@/lib/types';
+import type { Project, Session, Message, Insight, DashboardStats, LLMConfig, ExportTemplate, FacetRow, AnalysisLanguage } from '@/lib/types';
 import { dashboardFetch } from '@/lib/dashboard-http';
 import { parseSSEStream } from '@/lib/sse';
 
@@ -164,6 +164,7 @@ export function saveLlmConfig(body: {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  analysisLanguage?: AnalysisLanguage;
 }) {
   return request<{ ok: boolean }>('/config/llm', {
     method: 'PUT',

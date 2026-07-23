@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { patchSession } from '@/lib/api';
 import { toast } from 'sonner';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RenameSessionDialogProps {
   open: boolean;
@@ -27,6 +28,7 @@ export function RenameSessionDialog({
   currentTitle,
   onRenamed,
 }: RenameSessionDialogProps) {
+  const { t } = useLocale();
   const [title, setTitle] = useState(currentTitle);
   const [saving, setSaving] = useState(false);
 
@@ -41,11 +43,11 @@ export function RenameSessionDialog({
     setSaving(true);
     try {
       await patchSession(sessionId, { customTitle: title });
-      toast.success('Session renamed');
+      toast.success(t('sessions.rename.success'));
       onRenamed?.();
       onOpenChange(false);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to rename session');
+      toast.error(err instanceof Error ? err.message : t('sessions.rename.failed'));
     } finally {
       setSaving(false);
     }
@@ -55,9 +57,9 @@ export function RenameSessionDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
-          <DialogTitle>Rename Session</DialogTitle>
+          <DialogTitle>{t('sessions.rename.title')}</DialogTitle>
           <DialogDescription>
-            Give this session a custom name. Clear the field to revert to the auto-generated title.
+            {t('sessions.rename.description')}
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit}>
@@ -65,16 +67,16 @@ export function RenameSessionDialog({
             <Input
               value={title}
               onChange={(e) => setTitle(e.target.value)}
-              placeholder="Enter a custom title..."
+              placeholder={t('sessions.rename.placeholder')}
               autoFocus
             />
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
+              {t('sessions.rename.cancel')}
             </Button>
             <Button type="submit" disabled={saving}>
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? t('sessions.rename.saving') : t('sessions.rename.save')}
             </Button>
           </DialogFooter>
         </form>

@@ -20,17 +20,22 @@ import {
   preparePromptQualityPass,
   prepareSessionAnalysisPass,
   publishPreparedTwoPass,
-  TWO_PASS_PIPELINE_REVISION,
+  LEGACY_TWO_PASS_PIPELINE_REVISION,
+  pipelineRevisionForAnalysisLanguage,
   type FrozenSessionAnalysisInput,
 } from '../analysis/two-pass-analysis.js';
 import type { AnalysisRunner } from '../analysis/runner-types.js';
+import type { AnalysisLanguage } from '../types.js';
 import { acquireLlmLock } from '../analysis/llm-lock.js';
+import { configuredAnalysisLanguage } from '../analysis/analysis-language.js';
+import { loadConfig } from '../utils/config.js';
 
 // ── Resume detection ──────────────────────────────────────────────────────────
 
 function isAlreadyAnalyzed(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
+  analysisLanguage: AnalysisLanguage,
   db: Database.Database,
 ): boolean {
   if (typeof runner.provider !== 'string' || typeof runner.model !== 'string') {
@@ -52,7 +57,48 @@ function isAlreadyAnalyzed(
     runner.provider,
     runner.model,
     input.inputRevision,
-    TWO_PASS_PIPELINE_REVISION,
+    pipelineRevisionForAnalysisLanguage(analysisLanguage),
+  ) as { completed_passes: number };
+
+  return row.completed_passes === 2;
+}
+
+function isAlreadyAnalyzedInAnyLanguage(
+  input: FrozenSessionAnalysisInput,
+  runner: AnalysisRunner,
+  db: Database.Database,
+): boolean {
+  if (typeof runner.provider !== 'string' || typeof runner.model !== 'string') {
+    return false;
+  }
+  const supportedRevisions = [
+    LEGACY_TWO_PASS_PIPELINE_REVISION,
+    `${LEGACY_TWO_PASS_PIPELINE_REVISION}/lang-zh-CN`,
+    `${LEGACY_TWO_PASS_PIPELINE_REVISION}/lang-en-US`,
+    ...(['auto', 'zh-CN', 'en-US'] as const).map(pipelineRevisionForAnalysisLanguage),
+  ];
+  const revisionPlaceholders = supportedRevisions.map(() => '?').join(', ');
+  const row = db.prepare(`
+    SELECT COALESCE(MAX(completed_passes), 0) AS completed_passes
+    FROM (
+      SELECT pipeline_revision, COUNT(DISTINCT analysis_type) AS completed_passes
+      FROM analysis_usage
+      WHERE session_id = ?
+        AND analysis_type IN ('session', 'prompt_quality')
+        AND session_message_count = ?
+        AND provider = ?
+        AND model = ?
+        AND input_revision = ?
+        AND pipeline_revision IN (${revisionPlaceholders})
+      GROUP BY pipeline_revision
+    )
+  `).get(
+    input.session.id,
+    input.session.message_count,
+    runner.provider,
+    runner.model,
+    input.inputRevision,
+    ...supportedRevisions,
   ) as { completed_passes: number };
 
   return row.completed_passes === 2;
@@ -98,17 +144,23 @@ export async function runInsightsCommand(options: InsightsCommandOptions): Promi
 
   // 2. Freeze one revision for both remote passes.
   const input = freezeSessionAnalysisInput(options.sessionId, db);
+  const analysisLanguage = configuredAnalysisLanguage(loadConfig());
 
   // 3. Resume detection (skipped when --force)
   if (!options.force) {
-    if (isAlreadyAnalyzed(input, runner, db)) {
+    if (isAlreadyAnalyzed(input, runner, analysisLanguage, db)) {
       return;
     }
   }
 
   // 4. Prepare both remote passes. Neither call can mutate visible results.
-  const sessionStage = await prepareSessionAnalysisPass(input, runner);
-  const promptQualityStage = await preparePromptQualityPass(input, runner, sessionStage);
+  const sessionStage = await prepareSessionAnalysisPass(input, runner, analysisLanguage);
+  const promptQualityStage = await preparePromptQualityPass(
+    input,
+    runner,
+    sessionStage,
+    analysisLanguage,
+  );
 
   // 5. Publish only after both passes succeeded, in one SQLite transaction.
   const published = publishPreparedTwoPass(input, sessionStage, promptQualityStage, undefined, db);
@@ -212,7 +264,7 @@ export async function insightsCheckCommand(opts: {
     const runner = ProviderRunner.fromConfig();
     const rows = recentRows.filter(row => {
       const input = freezeSessionAnalysisInput(row.id, db);
-      return !isAlreadyAnalyzed(input, runner, db);
+      return !isAlreadyAnalyzedInAnyLanguage(input, runner, db);
     });
 
     const count = rows.length;

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Code } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RawMessageBlockProps {
   label: string;    // e.g., "Skill Load", "Command Output", "Exit Command"
@@ -14,6 +15,7 @@ const CHAR_LIMIT = 500;
  * monospace block with a type label, truncated at 3 lines or 500 chars with expand.
  */
 export function RawMessageBlock({ label, content }: RawMessageBlockProps) {
+  const { t } = useLocale();
   const [expanded, setExpanded] = useState(false);
   const lines = content.split('\n');
   const needsTruncation = lines.length > 3 || content.length > CHAR_LIMIT;
@@ -26,7 +28,7 @@ export function RawMessageBlock({ label, content }: RawMessageBlockProps) {
   return (
     <div
       className="mx-4 my-1 rounded-lg border border-dashed border-border bg-muted/30 p-3"
-      aria-label={`Raw system message: ${label}`}
+      aria-label={t('chat.raw.messageAria', { label })}
     >
       <div className="flex items-center gap-1 mb-1">
         <Code className="h-3 w-3 text-muted-foreground/60" />
@@ -44,7 +46,7 @@ export function RawMessageBlock({ label, content }: RawMessageBlockProps) {
           onClick={() => setExpanded((v) => !v)}
           className="mt-1 text-xs text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
         >
-          {expanded ? 'Show less' : 'Show more'}
+          {expanded ? t('chat.showLess') : t('chat.showMore')}
         </button>
       )}
     </div>

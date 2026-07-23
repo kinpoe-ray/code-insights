@@ -16,6 +16,7 @@ import {
   type SessionData,
 } from './analysis-db.js';
 import { buildSessionMeta, type AnalysisOptions, type AnalysisResult } from './analysis-internal.js';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 
 /**
  * Analyze prompt quality for a session.
@@ -66,6 +67,7 @@ export async function analyzePromptQuality(
     const toolExchangeCount = messages.length - humanMessages.length - assistantMessages.length;
 
     const sessionMeta = buildSessionMeta(session);
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
     const sessionShape = {
       humanMessageCount: humanMessages.length,
       assistantMessageCount: assistantMessages.length,
@@ -76,7 +78,12 @@ export async function analyzePromptQuality(
       { role: 'system', content: SHARED_ANALYST_SYSTEM_PROMPT },
       { role: 'user', content: [
         buildCacheableConversationBlock(formattedMessages),
-        { type: 'text' as const, text: buildPromptQualityInstructions(session.project_name, sessionShape, sessionMeta) },
+        { type: 'text' as const, text: buildPromptQualityInstructions(
+          session.project_name,
+          sessionShape,
+          sessionMeta,
+          { preference: analysisLanguage, messages },
+        ) },
       ] },
     ]);
     if (!preparedRequest) {

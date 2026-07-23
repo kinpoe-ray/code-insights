@@ -20,6 +20,7 @@ import type { Session } from '@/lib/types';
 import { toast } from 'sonner';
 import { parseSSEStream } from '@/lib/sse';
 import { dashboardFetch } from '@/lib/dashboard-http';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export interface AnalysisState {
   status: 'idle' | 'analyzing' | 'complete' | 'error';
@@ -73,29 +74,34 @@ export function useAnalysis() {
   return useContext(AnalysisContext);
 }
 
-function buildToastMessage(
-  sessionTitle: string,
-  phase: string,
-  currentChunk?: number,
-  totalChunks?: number
-): string {
-  if (phase === 'loading_messages') {
-    return `Loading messages for "${sessionTitle}"...`;
-  }
-  if (phase === 'saving') {
-    return `Saving insights for "${sessionTitle}"...`;
-  }
-  if (currentChunk !== undefined && totalChunks !== undefined) {
-    return `Analyzing "${sessionTitle}"... (${currentChunk} of ${totalChunks})`;
-  }
-  return `Analyzing "${sessionTitle}"...`;
-}
-
 export function AnalysisProvider({ children }: { children: ReactNode }) {
+  const { t } = useLocale();
   const [analyses, setAnalyses] = useState<Map<string, AnalysisState>>(new Map());
   const queryClient = useQueryClient();
   // Map of analysisKey → AbortController for concurrent cancellation
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+
+  const buildToastMessage = useCallback((
+    sessionTitle: string,
+    phase: string,
+    currentChunk?: number,
+    totalChunks?: number,
+  ): string => {
+    if (phase === 'loading_messages') {
+      return t('analysis.toast.loadingMessages', { title: sessionTitle });
+    }
+    if (phase === 'saving') {
+      return t('analysis.toast.saving', { title: sessionTitle });
+    }
+    if (currentChunk !== undefined && totalChunks !== undefined) {
+      return t('analysis.toast.analyzingChunks', {
+        title: sessionTitle,
+        current: currentChunk,
+        total: totalChunks,
+      });
+    }
+    return t('analysis.analyzingNamed', { title: sessionTitle });
+  }, [t]);
 
   const getAnalysisState = useCallback(
     (sessionId: string, type: AnalysisType): AnalysisState | undefined => {
@@ -113,8 +119,8 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
       next.delete(key);
       return next;
     });
-    toast.info('Analysis cancelled', { id: makeToastId(sessionId, type), duration: 2000 });
-  }, []);
+    toast.info(t('analysis.toast.cancelled'), { id: makeToastId(sessionId, type), duration: 2000 });
+  }, [t]);
 
   const clearResult = useCallback((sessionId: string, type: AnalysisType) => {
     const key = makeKey(sessionId, type);
@@ -143,14 +149,14 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           type,
           progress: {
             phase: 'loading_messages',
-            message: 'Loading messages...',
+            message: t('analysis.loadingMessages'),
           },
           result: null,
         });
         return next;
       });
 
-      toast.loading(`Loading messages for "${sessionTitle}"...`, { id: toastId });
+      toast.loading(t('analysis.toast.loadingMessages', { title: sessionTitle }), { id: toastId });
 
       const endpoint =
         type === 'session'
@@ -168,7 +174,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         }
 
         if (!response.body) {
-          throw new Error('No response body for SSE stream');
+          throw new Error(t('analysis.noResponseBody'));
         }
 
         for await (const sseEvent of parseSSEStream(
@@ -194,7 +200,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
               setAnalyses((prev) => {
                 const next = new Map(prev);
                 const entry = next.get(key);
-                if (entry) next.set(key, { ...entry, progress });
+                if (entry) next.set(key, {
+                  ...entry,
+                  progress: { ...progress, message: toastMsg },
+                });
                 return next;
               });
               toast.loading(toastMsg, { id: toastId });
@@ -213,7 +222,10 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
               queryClient.invalidateQueries({ queryKey: ['sessions'] });
               queryClient.invalidateQueries({ queryKey: ['analysis-cost', session.id] });
 
-              const successMsg = `${result.insightCount} insight${result.insightCount !== 1 ? 's' : ''} saved for "${sessionTitle}"`;
+              const successMsg = t('analysis.toast.saved', {
+                count: result.insightCount,
+                title: sessionTitle,
+              });
 
               setAnalyses((prev) => {
                 const next = new Map(prev);
@@ -249,7 +261,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
                 });
                 return next;
               });
-              toast.error(`Analysis failed: ${errorData.error}`, { id: toastId });
+              toast.error(t('analysis.toast.failed', { error: errorData.error }), { id: toastId });
             }
           } catch {
             // Malformed SSE event data — skip and continue
@@ -262,13 +274,13 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           setAnalyses((prev) => {
             const entry = prev.get(key);
             if (entry?.status === 'analyzing') {
-              toast.error('Analysis connection closed unexpectedly', { id: toastId });
+              toast.error(t('analysis.toast.closed'), { id: toastId });
               const next = new Map(prev);
               next.set(key, {
                 ...entry,
                 status: 'error',
                 progress: null,
-                result: { success: false, error: 'Connection closed unexpectedly' },
+                result: { success: false, error: t('analysis.connectionClosed') },
               });
               return next;
             }
@@ -279,7 +291,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         if (controller.signal.aborted) {
           return;
         }
-        const errorMsg = error instanceof Error ? error.message : 'Analysis failed';
+        const errorMsg = error instanceof Error ? error.message : t('analysis.failed');
         setAnalyses((prev) => {
           const next = new Map(prev);
           next.set(key, {
@@ -292,12 +304,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           });
           return next;
         });
-        toast.error(`Analysis failed: ${errorMsg}`, { id: toastId });
+        toast.error(t('analysis.toast.failed', { error: errorMsg }), { id: toastId });
       } finally {
         abortControllersRef.current.delete(key);
       }
     },
-    [queryClient]
+    [buildToastMessage, queryClient, t]
   );
 
   return (

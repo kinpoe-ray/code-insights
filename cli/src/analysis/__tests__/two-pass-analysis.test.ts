@@ -109,9 +109,17 @@ function databaseSnapshot(db: Database.Database = mockDb): unknown {
 
 describe('two-pass preparation and publication', () => {
   it('binds the pipeline revision to the visible analysis artifact version', async () => {
-    const { TWO_PASS_PIPELINE_REVISION } = await import('../two-pass-analysis.js');
+    const {
+      TWO_PASS_PIPELINE_REVISION,
+      pipelineRevisionForAnalysisLanguage,
+    } = await import('../two-pass-analysis.js');
     const { ANALYSIS_VERSION } = await import('../analysis-db.js');
-    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v1`);
+    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v2`);
+    expect(pipelineRevisionForAnalysisLanguage('auto')).toBe(TWO_PASS_PIPELINE_REVISION);
+    expect(pipelineRevisionForAnalysisLanguage('zh-CN'))
+      .toBe(`${TWO_PASS_PIPELINE_REVISION}/lang-zh-CN`);
+    expect(pipelineRevisionForAnalysisLanguage('en-US'))
+      .toBe(`${TWO_PASS_PIPELINE_REVISION}/lang-en-US`);
   });
 
   it('produces JSON-round-trippable pass stages without retaining a runner or transcript', async () => {
@@ -134,25 +142,134 @@ describe('two-pass preparation and publication', () => {
         }),
     };
 
-    const sessionStage = await prepareSessionPass(frozen, runner);
+    const sessionStage = await prepareSessionPass(frozen, runner, 'zh-CN');
     // Simulate a later process: reload input and deserialize the durable stage.
     const reloadedInput = loadFrozenSessionInput('sess1');
     const reloadedSessionStage = JSON.parse(JSON.stringify(sessionStage));
-    const pqStage = await preparePromptQualityPass(reloadedInput, runner, reloadedSessionStage);
+    const pqStage = await preparePromptQualityPass(
+      reloadedInput,
+      runner,
+      reloadedSessionStage,
+      'zh-CN',
+    );
 
     expect(JSON.parse(JSON.stringify(sessionStage))).toEqual(sessionStage);
     expect(JSON.parse(JSON.stringify(pqStage))).toEqual(pqStage);
     expect(sessionStage).toMatchObject({
       kind: 'session', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: sessionResponse,
+      analysisLanguage: 'zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
     });
     expect(pqStage).toMatchObject({
       kind: 'prompt_quality', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: pqResponse,
+      analysisLanguage: 'zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
     });
     expect(sessionStage.inputRevision).toBe(pqStage.inputRevision);
+    expect(runner.runAnalysis).toHaveBeenCalledTimes(2);
+    for (const [request] of runner.runAnalysis.mock.calls) {
+      expect(request.userPrompt).toContain('Simplified Chinese (zh-CN)');
+    }
     expect(JSON.stringify(sessionStage)).not.toContain('Original prompt');
     expect(sessionStage).not.toHaveProperty('runner');
+  });
+
+  it('does not mix languages between the two prepared passes', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionPass,
+      preparePromptQualityPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runner = {
+      name: 'native-test',
+      runAnalysis: vi.fn()
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(sessionResponse), durationMs: 10,
+          inputTokens: 11, outputTokens: 12, provider: 'native', model: 'model-a',
+        })
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(pqResponse), durationMs: 13,
+          inputTokens: 14, outputTokens: 15, provider: 'native', model: 'model-a',
+        }),
+    };
+    const sessionStage = await prepareSessionPass(frozen, runner, 'zh-CN');
+
+    await expect(preparePromptQualityPass(
+      frozen,
+      runner,
+      sessionStage,
+      'en-US',
+    )).rejects.toThrow(/analysis language/i);
+    expect(runner.runAnalysis).toHaveBeenCalledOnce();
+  });
+
+  it('rejects a pre-language-policy staged session before starting pass two', async () => {
+    const {
+      loadFrozenSessionInput,
+      preparePromptQualityPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runner = {
+      name: 'native-test',
+      runAnalysis: vi.fn().mockResolvedValue({
+        rawJson: JSON.stringify(pqResponse), durationMs: 13,
+        inputTokens: 14, outputTokens: 15, provider: 'native', model: 'model-a',
+      }),
+    };
+    const legacyStage = {
+      schemaVersion: 1 as const,
+      kind: 'session' as const,
+      sessionId: 'sess1',
+      inputRevision: frozen.inputRevision,
+      sessionMessageCount: frozen.session.message_count,
+      provider: 'native',
+      model: 'model-a',
+      usage: {
+        inputTokens: 11, outputTokens: 12, cacheCreationTokens: 0,
+        cacheReadTokens: 0, estimatedCostUsd: 0, durationMs: 10, chunkCount: 1,
+      },
+      response: sessionResponse,
+    };
+
+    await expect(preparePromptQualityPass(
+      frozen,
+      runner,
+      legacyStage,
+      'auto',
+    )).rejects.toThrow(/language policy pipeline/i);
+    expect(runner.runAnalysis).not.toHaveBeenCalled();
+  });
+
+  it('rejects a v1 language-aware staged session before starting pass two', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionPass,
+      preparePromptQualityPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runner = {
+      name: 'native-test',
+      runAnalysis: vi.fn().mockResolvedValue({
+        rawJson: JSON.stringify(sessionResponse), durationMs: 10,
+        inputTokens: 11, outputTokens: 12, provider: 'native', model: 'model-a',
+      }),
+    };
+    const currentStage = await prepareSessionPass(frozen, runner, 'zh-CN');
+    const legacyStage = {
+      ...currentStage,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v1/lang-zh-CN',
+    };
+
+    await expect(preparePromptQualityPass(
+      frozen,
+      runner,
+      legacyStage,
+      'zh-CN',
+    )).rejects.toThrow(/current language policy pipeline/i);
+    expect(runner.runAnalysis).toHaveBeenCalledOnce();
   });
 
   it('publishes both pass results together and refreshes usage analyzed_at', async () => {
@@ -175,6 +292,8 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider',
       model: 'new-model',
+      analysisLanguage: 'zh-CN' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
       usage,
       response: sessionResponse,
     };
@@ -203,16 +322,70 @@ describe('two-pass preparation and publication', () => {
       {
         analysis_type: 'prompt_quality', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v1',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
       {
         analysis_type: 'session', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v1',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
     ]);
+  });
+
+  it('rejects publication when prepared passes use different languages', async () => {
+    const { loadFrozenSessionInput, publishPreparedTwoPass } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const usage = {
+      inputTokens: 10, outputTokens: 5, cacheCreationTokens: 0,
+      cacheReadTokens: 0, estimatedCostUsd: 0.03, durationMs: 20, chunkCount: 1,
+    };
+    const sessionStage = {
+      schemaVersion: 1 as const, kind: 'session' as const, sessionId: 'sess1',
+      inputRevision: frozen.inputRevision,
+      sessionMessageCount: frozen.session.message_count,
+      provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
+      analysisLanguage: 'zh-CN' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+    };
+    const pqStage = {
+      ...sessionStage,
+      kind: 'prompt_quality' as const,
+      response: pqResponse,
+      analysisLanguage: 'en-US' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-en-US',
+    };
+
+    expect(() => publishPreparedTwoPass(frozen, sessionStage, pqStage))
+      .toThrow(/analysis language/i);
+  });
+
+  it('rejects publication of passes prepared under the legacy v1 language policy', async () => {
+    const { loadFrozenSessionInput, publishPreparedTwoPass } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const before = databaseSnapshot();
+    const usage = {
+      inputTokens: 10, outputTokens: 5, cacheCreationTokens: 0,
+      cacheReadTokens: 0, estimatedCostUsd: 0.03, durationMs: 20, chunkCount: 1,
+    };
+    const sessionStage = {
+      schemaVersion: 1 as const, kind: 'session' as const, sessionId: 'sess1',
+      inputRevision: frozen.inputRevision,
+      sessionMessageCount: frozen.session.message_count,
+      provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
+      analysisLanguage: 'zh-CN' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v1/lang-zh-CN',
+    };
+    const pqStage = {
+      ...sessionStage,
+      kind: 'prompt_quality' as const,
+      response: pqResponse,
+    };
+
+    expect(() => publishPreparedTwoPass(frozen, sessionStage, pqStage))
+      .toThrow(/current language policy pipeline/i);
+    expect(databaseSnapshot()).toEqual(before);
   });
 
   it('rolls the whole publication back when any write fails', async () => {
@@ -228,6 +401,8 @@ describe('two-pass preparation and publication', () => {
       inputRevision: frozen.inputRevision,
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
+      analysisLanguage: 'auto' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -265,6 +440,8 @@ describe('two-pass preparation and publication', () => {
         inputRevision: frozen.inputRevision,
         sessionMessageCount: frozen.session.message_count,
         provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
+        analysisLanguage: 'auto' as const,
+        pipelineRevision: 'analysis-3.0.0/two-pass-v2',
       };
       const pqStage = {
         ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -296,6 +473,8 @@ describe('two-pass preparation and publication', () => {
       inputRevision: frozen.inputRevision,
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
+      analysisLanguage: 'auto' as const,
+      pipelineRevision: 'analysis-3.0.0/two-pass-v2',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,

@@ -25,15 +25,9 @@ import {
   StickyNote,
 } from 'lucide-react';
 import type { ExportGenerateFormat, ExportGenerateScope, ExportGenerateDepth } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 type WizardStep = 1 | 2 | 3 | 4;
-
-const STEPS = [
-  { n: 1 as WizardStep, label: 'Scope' },
-  { n: 2 as WizardStep, label: 'Configure' },
-  { n: 3 as WizardStep, label: 'Generate' },
-  { n: 4 as WizardStep, label: 'Review' },
-];
 
 const DEPTH_CAPS: Record<ExportGenerateDepth, number> = {
   essential: 25,
@@ -42,6 +36,7 @@ const DEPTH_CAPS: Record<ExportGenerateDepth, number> = {
 };
 
 export default function ExportPage() {
+  const { t } = useLocale();
   const { data: projects = [] } = useProjects();
   const { data: allInsights = [] } = useInsights();
   const { state: exportState, generate, cancel, reset: resetExport } = useExportGenerate();
@@ -52,6 +47,12 @@ export default function ExportPage() {
   const [format_, setFormat] = useState<ExportGenerateFormat>('agent-rules');
   const [depth, setDepth] = useState<ExportGenerateDepth>('standard');
   const [copied, setCopied] = useState(false);
+  const steps = [
+    { n: 1 as WizardStep, label: t('export.step.scope') },
+    { n: 2 as WizardStep, label: t('export.step.configure') },
+    { n: 3 as WizardStep, label: t('export.step.generate') },
+    { n: 4 as WizardStep, label: t('export.step.review') },
+  ];
 
   // Compute insight counts for the stat bar in Step 2
   const { scopedInsights, depthCappedCount } = useMemo(() => {
@@ -82,7 +83,7 @@ export default function ExportPage() {
 
   const handleGoToStep2 = () => {
     if (scope === 'project' && !projectId) {
-      toast.error('Please select a project before continuing.');
+      toast.error(t('export.selectProjectError'));
       return;
     }
     setStep(2);
@@ -119,7 +120,7 @@ export default function ExportPage() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success('Export downloaded.');
+    toast.success(t('export.downloaded'));
   };
 
   const handleCopy = async () => {
@@ -127,10 +128,10 @@ export default function ExportPage() {
     try {
       await navigator.clipboard.writeText(exportState.content);
       setCopied(true);
-      toast.success('Copied to clipboard.');
+      toast.success(t('export.copiedToast'));
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error('Failed to copy to clipboard.');
+      toast.error(t('export.copyFailed'));
     }
   };
 
@@ -153,13 +154,13 @@ export default function ExportPage() {
   return (
     <div className="p-6 space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Export</h1>
-        <p className="text-muted-foreground">Synthesize insights across sessions using AI</p>
+        <h1 className="text-2xl font-bold">{t('export.title')}</h1>
+        <p className="text-muted-foreground">{t('export.subtitle')}</p>
       </div>
 
       {/* Step indicator */}
       <div className="flex items-center gap-1 flex-wrap">
-        {STEPS.map((s, i) => (
+        {steps.map((s, i) => (
           <div key={s.n} className="flex items-center gap-1">
             <div
               className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full transition-colors ${
@@ -173,7 +174,7 @@ export default function ExportPage() {
               <span>{s.n}</span>
               <span>{s.label}</span>
             </div>
-            {i < STEPS.length - 1 && (
+            {i < steps.length - 1 && (
               <ChevronRight className="h-3 w-3 text-muted-foreground" />
             )}
           </div>
@@ -184,21 +185,21 @@ export default function ExportPage() {
       {step === 1 && (
         <div className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            Choose what to synthesize. The AI will read across sessions and produce curated, deduplicated knowledge.
+            {t('export.scope.intro')}
           </p>
 
           <div className="grid gap-4 md:grid-cols-2">
             <ExportTypeCard
               icon={Globe}
-              title="All Projects"
-              description="Synthesize insights from all your sessions. Rules are labeled by scope (universal vs. project-specific)."
+              title={t('export.scope.allProjects')}
+              description={t('export.scope.allProjectsDescription')}
               selected={scope === 'all'}
               onSelect={() => { setScope('all'); setProjectId(''); }}
             />
             <ExportTypeCard
               icon={Folder}
-              title="Single Project"
-              description="Focus on one project's insights. All rules are implicitly scoped to that project."
+              title={t('export.scope.singleProject')}
+              description={t('export.scope.singleProjectDescription')}
               selected={scope === 'project'}
               onSelect={() => setScope('project')}
             />
@@ -206,10 +207,10 @@ export default function ExportPage() {
 
           {scope === 'project' && (
             <div className="max-w-sm">
-              <label className="text-sm font-medium mb-1.5 block">Project</label>
+              <label className="text-sm font-medium mb-1.5 block">{t('export.scope.project')}</label>
               <Select value={projectId} onValueChange={setProjectId}>
                 <SelectTrigger>
-                  <SelectValue placeholder="Select a project" />
+                  <SelectValue placeholder={t('export.scope.selectProject')} />
                 </SelectTrigger>
                 <SelectContent>
                   {projects.map((project) => (
@@ -227,7 +228,7 @@ export default function ExportPage() {
               onClick={handleGoToStep2}
               disabled={!scope || (scope === 'project' && !projectId)}
             >
-              Next: Configure
+              {t('export.nextConfigure')}
               <ChevronRight className="ml-1 h-4 w-4" />
             </Button>
           </div>
@@ -239,33 +240,33 @@ export default function ExportPage() {
         <div className="space-y-4">
           {/* Format */}
           <div>
-            <p className="text-sm font-medium mb-3">Output Format</p>
+            <p className="text-sm font-medium mb-3">{t('export.outputFormat')}</p>
             <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-4">
               <ExportTypeCard
                 icon={Bot}
-                title="Agent Rules"
-                description="Imperative instructions for CLAUDE.md or .cursorrules"
+                title={t('export.format.agentRules')}
+                description={t('export.format.agentRulesDescription')}
                 selected={format_ === 'agent-rules'}
                 onSelect={() => setFormat('agent-rules')}
               />
               <ExportTypeCard
                 icon={BookOpen}
-                title="Knowledge Brief"
-                description="Readable markdown — decisions, learnings, and techniques"
+                title={t('export.format.knowledgeBrief')}
+                description={t('export.format.knowledgeBriefDescription')}
                 selected={format_ === 'knowledge-brief'}
                 onSelect={() => setFormat('knowledge-brief')}
               />
               <ExportTypeCard
                 icon={NotebookPen}
-                title="Obsidian"
-                description="Markdown with YAML frontmatter and wikilinks"
+                title={t('export.format.obsidian')}
+                description={t('export.format.obsidianDescription')}
                 selected={format_ === 'obsidian'}
                 onSelect={() => setFormat('obsidian')}
               />
               <ExportTypeCard
                 icon={StickyNote}
-                title="Notion"
-                description="Notion-compatible markdown with toggle blocks and callouts"
+                title={t('export.format.notion')}
+                description={t('export.format.notionDescription')}
                 selected={format_ === 'notion'}
                 onSelect={() => setFormat('notion')}
               />
@@ -274,26 +275,26 @@ export default function ExportPage() {
 
           {/* Depth */}
           <div>
-            <p className="text-sm font-medium mb-3">Depth</p>
+            <p className="text-sm font-medium mb-3">{t('export.depth.title')}</p>
             <div className="grid gap-3 md:grid-cols-3">
               <ExportTypeCard
                 icon={Zap}
-                title="Essential"
-                description="Top rules only. Fast and focused."
+                title={t('export.depth.essential')}
+                description={t('export.depth.essentialDescription')}
                 selected={depth === 'essential'}
                 onSelect={() => setDepth('essential')}
               />
               <ExportTypeCard
                 icon={Layers}
-                title="Standard"
-                description="Key decisions, learnings, and techniques."
+                title={t('export.depth.standard')}
+                description={t('export.depth.standardDescription')}
                 selected={depth === 'standard'}
                 onSelect={() => setDepth('standard')}
               />
               <ExportTypeCard
                 icon={Library}
-                title="Comprehensive"
-                description="Everything available. Most thorough."
+                title={t('export.depth.comprehensive')}
+                description={t('export.depth.comprehensiveDescription')}
                 selected={depth === 'comprehensive'}
                 onSelect={() => setDepth('comprehensive')}
               />
@@ -304,42 +305,42 @@ export default function ExportPage() {
           <div className="rounded-lg bg-muted px-4 py-3 grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
             <div>
               <p className="text-lg font-bold">{scopedInsights.length}</p>
-              <p className="text-xs text-muted-foreground">Total insights</p>
+              <p className="text-xs text-muted-foreground">{t('export.totalInsights')}</p>
             </div>
             <div>
               <p className="text-lg font-bold">
                 {depthCappedCount < scopedInsights.length
-                  ? `~${depthCappedCount} of ${scopedInsights.length}`
+                  ? t('export.countOf', { count: depthCappedCount, total: scopedInsights.length })
                   : scopedInsights.length}
               </p>
-              <p className="text-xs text-muted-foreground">Insights to synthesize</p>
+              <p className="text-xs text-muted-foreground">{t('export.insightsToSynthesize')}</p>
             </div>
             <div>
               <p className="text-lg font-bold">
                 {scopedInsights.filter((i) => i.type === 'decision').length}
               </p>
-              <p className="text-xs text-muted-foreground">Decisions</p>
+              <p className="text-xs text-muted-foreground">{t('export.decisions')}</p>
             </div>
             <div>
               <p className="text-lg font-bold">
                 {scopedInsights.filter((i) => i.type === 'learning').length}
               </p>
-              <p className="text-xs text-muted-foreground">Learnings</p>
+              <p className="text-xs text-muted-foreground">{t('export.learnings')}</p>
             </div>
           </div>
 
           {!hasInsights && (
             <p className="text-sm text-muted-foreground text-center py-2">
-              No insights found for this scope. Run analysis on some sessions first.
+              {t('export.noInsights')}
             </p>
           )}
 
           <div className="flex justify-between">
             <Button variant="outline" onClick={() => setStep(1)}>
-              Back
+              {t('export.back')}
             </Button>
             <Button onClick={handleStartGeneration} disabled={!hasInsights}>
-              Generate with AI
+              {t('export.generateWithAi')}
               <ChevronRight className="ml-1 h-4 w-4" />
             </Button>
           </div>
@@ -358,19 +359,22 @@ export default function ExportPage() {
                     <div className="space-y-1">
                       <p className="font-medium">
                         {exportState.status === 'loading_insights'
-                          ? 'Loading insights...'
-                          : 'Synthesizing with AI...'}
+                          ? t('export.loadingInsights')
+                          : t('export.synthesizing')}
                       </p>
                       {exportState.status === 'loading_insights' && exportState.insightCount !== null && (
                         <p className="text-sm text-muted-foreground">
                           {exportState.totalInsights !== null && exportState.insightCount < exportState.totalInsights
-                            ? `Using ${exportState.insightCount} of ${exportState.totalInsights} insights`
-                            : `${exportState.insightCount} insights`}
+                            ? t('export.usingInsights', {
+                              count: exportState.insightCount,
+                              total: exportState.totalInsights,
+                            })
+                            : t('export.insightCount', { count: exportState.insightCount })}
                         </p>
                       )}
                       {exportState.status === 'synthesizing' && (
                         <p className="text-sm text-muted-foreground">
-                          This may take 10–30 seconds depending on your LLM provider.
+                          {t('export.waitHint')}
                         </p>
                       )}
                     </div>
@@ -383,9 +387,11 @@ export default function ExportPage() {
                       <Check className="h-5 w-5 text-green-600 dark:text-green-400" />
                     </div>
                     <div className="space-y-1">
-                      <p className="font-medium">Generation complete</p>
+                      <p className="font-medium">{t('export.generationComplete')}</p>
                       <p className="text-sm text-muted-foreground">
-                        {exportState.metadata?.insightCount} insight{exportState.metadata?.insightCount !== 1 ? 's' : ''} synthesized
+                        {t('export.synthesizedCount', {
+                          count: exportState.metadata?.insightCount ?? 0,
+                        })}
                       </p>
                     </div>
                   </>
@@ -397,7 +403,7 @@ export default function ExportPage() {
                       <span className="text-destructive font-bold text-sm">!</span>
                     </div>
                     <div className="space-y-1">
-                      <p className="font-medium text-destructive">Generation failed</p>
+                      <p className="font-medium text-destructive">{t('export.generationFailed')}</p>
                       <p className="text-sm text-muted-foreground">{exportState.error}</p>
                     </div>
                   </>
@@ -410,7 +416,7 @@ export default function ExportPage() {
             {(exportState.status === 'loading_insights' || exportState.status === 'synthesizing') && (
               <>
                 <Button variant="outline" onClick={handleCancelGeneration}>
-                  Cancel
+                  {t('export.cancel')}
                 </Button>
                 <span />
               </>
@@ -418,10 +424,10 @@ export default function ExportPage() {
             {isComplete && (
               <>
                 <Button variant="outline" onClick={handleCancelGeneration}>
-                  Back
+                  {t('export.back')}
                 </Button>
                 <Button onClick={handleGoToReview}>
-                  Review Export
+                  {t('export.reviewExport')}
                   <ChevronRight className="ml-1 h-4 w-4" />
                 </Button>
               </>
@@ -429,10 +435,10 @@ export default function ExportPage() {
             {isError && (
               <>
                 <Button variant="outline" onClick={handleCancelGeneration}>
-                  Back
+                  {t('export.back')}
                 </Button>
                 <Button onClick={handleStartGeneration}>
-                  Try Again
+                  {t('export.tryAgain')}
                 </Button>
               </>
             )}
@@ -447,17 +453,14 @@ export default function ExportPage() {
             <CardHeader>
               <div className="flex items-center justify-between flex-wrap gap-2">
                 <div>
-                  <CardTitle className="text-base">Generated Export</CardTitle>
+                  <CardTitle className="text-base">{t('export.generatedExport')}</CardTitle>
                   <CardDescription>
                     {exportState.metadata && (
-                      <>
-                        {exportState.metadata.sessionCount} session{exportState.metadata.sessionCount !== 1 ? 's' : ''}{' '}
-                        &bull;{' '}
-                        {exportState.metadata.insightCount} insight{exportState.metadata.insightCount !== 1 ? 's' : ''} synthesized
-                        {exportState.metadata.insightCount < exportState.metadata.totalInsights && (
-                          <> of {exportState.metadata.totalInsights} available</>
-                        )}
-                      </>
+                      t('export.metadata', {
+                        sessions: exportState.metadata.sessionCount,
+                        insights: exportState.metadata.insightCount,
+                        total: exportState.metadata.totalInsights,
+                      })
                     )}
                   </CardDescription>
                 </div>
@@ -473,25 +476,25 @@ export default function ExportPage() {
 
           <div className="flex justify-between flex-wrap gap-2">
             <Button variant="outline" onClick={handleStartOver}>
-              Start Over
+              {t('export.startOver')}
             </Button>
             <div className="flex gap-2">
               <Button variant="outline" onClick={handleCopy}>
                 {copied ? (
                   <>
                     <Check className="mr-2 h-4 w-4" />
-                    Copied
+                    {t('export.copied')}
                   </>
                 ) : (
                   <>
                     <Copy className="mr-2 h-4 w-4" />
-                    Copy
+                    {t('export.copy')}
                   </>
                 )}
               </Button>
               <Button onClick={handleDownload}>
                 <Download className="mr-2 h-4 w-4" />
-                Download .md
+                {t('export.downloadMarkdown')}
               </Button>
             </div>
           </div>

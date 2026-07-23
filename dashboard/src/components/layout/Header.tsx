@@ -22,17 +22,20 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet';
 import { ThemeToggle } from './ThemeToggle';
+import { LanguageToggle } from './LanguageToggle';
 import { Logo } from '@/components/brand/Logo';
 import { cn } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
-const NAV_ITEMS = [
-  { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard, exact: true },
-  { href: '/sessions', label: 'Sessions', icon: MessageSquare, exact: false },
-  { href: '/insights', label: 'Insights', icon: Lightbulb, exact: false },
-  { href: '/analytics', label: 'Analytics', icon: BarChart3, exact: false },
-  { href: '/patterns', label: 'Patterns', icon: Sparkles, exact: false },
-  { href: '/export', label: 'Export', icon: Download, exact: false },
-  { href: '/settings', label: 'Settings', icon: Settings, exact: false },
+const NAV_ITEMS: Array<{ href: string; labelKey: MessageKey; icon: typeof LayoutDashboard; exact: boolean }> = [
+  { href: '/dashboard', labelKey: 'nav.dashboard', icon: LayoutDashboard, exact: true },
+  { href: '/sessions', labelKey: 'nav.sessions', icon: MessageSquare, exact: false },
+  { href: '/insights', labelKey: 'nav.insights', icon: Lightbulb, exact: false },
+  { href: '/analytics', labelKey: 'nav.analytics', icon: BarChart3, exact: false },
+  { href: '/patterns', labelKey: 'nav.patterns', icon: Sparkles, exact: false },
+  { href: '/export', labelKey: 'nav.export', icon: Download, exact: false },
+  { href: '/settings', labelKey: 'nav.settings', icon: Settings, exact: false },
 ];
 
 // Bottom tab bar shows the first 4 primary nav items
@@ -44,6 +47,7 @@ interface HeaderProps {
 
 export function Header({ onOpenSearch }: HeaderProps) {
   const { pathname } = useLocation();
+  const { t } = useLocale();
 
   const isActive = (href: string, exact: boolean) =>
     exact ? pathname === href : pathname.startsWith(href);
@@ -66,7 +70,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
             <SheetTrigger asChild>
               <Button variant="ghost" size="icon" className="h-8 w-8 lg:hidden">
                 <Menu className="h-4 w-4" />
-                <span className="sr-only">Open navigation</span>
+                <span className="sr-only">{t('nav.openNavigation')}</span>
               </Button>
             </SheetTrigger>
             <SheetContent side="left" className="w-72 p-0 flex flex-col">
@@ -75,10 +79,10 @@ export function Header({ onOpenSearch }: HeaderProps) {
                   <Logo className="h-4 w-4" />
                   Code Insights
                 </SheetTitle>
-                <SheetDescription className="sr-only">Navigation menu</SheetDescription>
+                <SheetDescription className="sr-only">{t('nav.navigationMenu')}</SheetDescription>
               </SheetHeader>
               <nav className="px-2 py-2">
-                {NAV_ITEMS.map(({ href, label, icon: Icon, exact }) => (
+                {NAV_ITEMS.map(({ href, labelKey, icon: Icon, exact }) => (
                   <Button
                     key={href}
                     variant="ghost"
@@ -93,7 +97,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
                   >
                     <Link to={href}>
                       <Icon className="h-4 w-4 mr-2" />
-                      {label}
+                      {t(labelKey)}
                     </Link>
                   </Button>
                 ))}
@@ -109,7 +113,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
 
           {/* Desktop nav links — hidden below lg */}
           <nav className="hidden lg:flex items-center gap-0.5">
-            {NAV_ITEMS.map(({ href, label, icon: Icon, exact }) => (
+            {NAV_ITEMS.map(({ href, labelKey, icon: Icon, exact }) => (
               <Button
                 key={href}
                 variant="ghost"
@@ -119,7 +123,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
               >
                 <Link to={href}>
                   <Icon className="h-4 w-4 mr-1.5" />
-                  {label}
+                  {t(labelKey)}
                 </Link>
               </Button>
             ))}
@@ -136,13 +140,14 @@ export function Header({ onOpenSearch }: HeaderProps) {
             >
               <span className="flex items-center gap-1.5">
                 <Search className="h-3.5 w-3.5" />
-                Search...
+                {t('nav.search')}
               </span>
               <kbd className="text-[10px] bg-muted px-1.5 py-0.5 rounded border font-mono">
                 ⌘K
               </kbd>
             </Button>
 
+            <LanguageToggle />
             <ThemeToggle />
 
             <Button
@@ -155,7 +160,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
                 href="https://github.com/melagiri/code-insights"
                 target="_blank"
                 rel="noopener noreferrer"
-                aria-label="GitHub repository"
+                aria-label={t('nav.githubRepository')}
               >
                 <Github className="h-4 w-4" />
                 <span className="sr-only">GitHub</span>
@@ -167,7 +172,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
 
       {/* Mobile bottom tab bar — visible below md only */}
       <nav className="md:hidden fixed bottom-0 left-0 right-0 z-50 border-t bg-background flex items-stretch h-14">
-        {BOTTOM_TABS.map(({ href, label, icon: Icon, exact }) => {
+        {BOTTOM_TABS.map(({ href, labelKey, icon: Icon, exact }) => {
           const active = isActive(href, exact);
           return (
             <Link
@@ -179,7 +184,7 @@ export function Header({ onOpenSearch }: HeaderProps) {
               )}
             >
               <Icon className="h-5 w-5" />
-              <span>{label}</span>
+              <span>{t(labelKey)}</span>
             </Link>
           );
         })}
@@ -188,20 +193,20 @@ export function Header({ onOpenSearch }: HeaderProps) {
           <SheetTrigger asChild>
             <button className="flex-1 flex flex-col items-center justify-center gap-0.5 text-xs text-muted-foreground transition-colors">
               <MoreHorizontal className="h-5 w-5" />
-              <span>More</span>
+              <span>{t('nav.more')}</span>
             </button>
           </SheetTrigger>
           <SheetContent side="bottom" className="h-auto">
             <SheetHeader className="px-4 py-3">
-              <SheetTitle className="text-sm font-semibold sr-only">More options</SheetTitle>
-              <SheetDescription className="sr-only">Additional navigation options</SheetDescription>
+              <SheetTitle className="text-sm font-semibold sr-only">{t('nav.moreOptions')}</SheetTitle>
+              <SheetDescription className="sr-only">{t('nav.additionalOptions')}</SheetDescription>
             </SheetHeader>
             <nav className="px-4 pb-6 grid grid-cols-2 gap-2">
-              {NAV_ITEMS.slice(4).map(({ href, label, icon: Icon }) => (
+              {NAV_ITEMS.slice(4).map(({ href, labelKey, icon: Icon }) => (
                 <Button key={href} variant="outline" asChild className="justify-start gap-2">
                   <Link to={href}>
                     <Icon className="h-4 w-4" />
-                    {label}
+                    {t(labelKey)}
                   </Link>
                 </Button>
               ))}

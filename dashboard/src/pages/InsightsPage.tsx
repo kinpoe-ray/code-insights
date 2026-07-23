@@ -1,5 +1,4 @@
 import { useMemo, useState, useCallback, useEffect } from 'react';
-import { format } from 'date-fns';
 import { useSearchParams, Link } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import { useInsights } from '@/hooks/useInsights';
@@ -29,7 +28,7 @@ import {
 } from '@/components/ui/select';
 import { Sparkles, SearchX, X, FileText, GitCommit, BookOpen, Target } from 'lucide-react';
 import { getDateGroup, sortDateGroups } from '@/lib/utils';
-import { INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
+import { INSIGHT_TYPE_MESSAGE_KEYS } from '@/lib/constants/colors';
 import { parseJsonField } from '@/lib/types';
 import type { Insight, InsightType, DispatchPrefill, SessionCharacter, EffectivePattern, FrictionPoint } from '@/lib/types';
 import { InsightTypePills } from '@/components/filters/InsightTypePills';
@@ -44,6 +43,7 @@ import { DispatchEntryButton } from '@/components/insights/DispatchEntryButton';
 import { DispatchDiscoveryCallout } from '@/components/insights/DispatchDiscoveryCallout';
 import { fetchFacets } from '@/lib/api';
 import { captureDispatchCalloutShown, captureDispatchOpenedFromInsights } from '@/lib/telemetry';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 const INSIGHT_TYPES: InsightType[] = ['summary', 'decision', 'learning', 'technique', 'prompt_quality'];
 
@@ -58,10 +58,10 @@ const TYPE_SECTION_ICONS: Record<string, { icon: typeof FileText; color: string 
 };
 
 const VIEW_MODES = [
-  { value: 'timeline', label: 'Timeline' },
-  { value: 'type', label: 'By Type' },
-  { value: 'project', label: 'By Project' },
-  { value: 'session', label: 'By Session' },
+  { value: 'timeline', labelKey: 'insights.view.timeline' },
+  { value: 'type', labelKey: 'insights.view.type' },
+  { value: 'project', labelKey: 'insights.view.project' },
+  { value: 'session', labelKey: 'insights.view.session' },
 ] as const;
 
 interface InsightGroup {
@@ -74,6 +74,7 @@ interface InsightGroup {
 const MAX_DISPATCH_INSIGHTS = 8;
 
 export default function InsightsPage() {
+  const { t, formatDate } = useLocale();
   const [filters, setFilter, setFilters, clearFilters] = useFilterParams({
     q: '',
     project: 'all',
@@ -273,7 +274,18 @@ export default function InsightsPage() {
       const sorted = sortDateGroups(entries);
       return sorted.map(([key, items]) => ({
         key,
-        label: key,
+        label: key === 'Today'
+          ? t('insights.today')
+          : key === 'Yesterday'
+            ? t('insights.yesterday')
+            : formatDate(items[0].created_at, {
+                weekday: 'long',
+                month: 'short',
+                day: 'numeric',
+                ...(new Date(items[0].created_at).getFullYear() !== new Date().getFullYear()
+                  ? { year: 'numeric' as const }
+                  : {}),
+              }),
         count: items.length,
         insights: items,
       }));
@@ -282,7 +294,9 @@ export default function InsightsPage() {
     if (view === 'type') {
       return entries.map(([key, items]) => ({
         key,
-        label: INSIGHT_TYPE_LABELS[key as InsightType] || key,
+        label: INSIGHT_TYPE_MESSAGE_KEYS[key as InsightType]
+          ? t(INSIGHT_TYPE_MESSAGE_KEYS[key as InsightType])
+          : key,
         count: items.length,
         insights: items,
       }));
@@ -306,7 +320,12 @@ export default function InsightsPage() {
     });
     return entries.map(([key, items]) => {
       const first = items[0];
-      const sessionDate = format(new Date(first.created_at), 'MMM d, h:mm a');
+      const sessionDate = formatDate(first.created_at, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      });
       return {
         key,
         label: `${first.project_name} -- ${sessionDate}`,
@@ -314,7 +333,7 @@ export default function InsightsPage() {
         insights: items,
       };
     });
-  }, [filtered, filters.view]);
+  }, [filtered, filters.view, formatDate, t]);
 
   return (
     <div className="flex flex-col h-[calc(100vh-3.5rem)] relative">
@@ -322,11 +341,10 @@ export default function InsightsPage() {
       <div className="shrink-0 sticky top-0 z-10 bg-background border-b px-6 pt-5 pb-3 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h1 className="text-2xl font-bold">Insights</h1>
+            <h1 className="text-2xl font-bold">{t('insights.title')}</h1>
             {!isLoading && (
               <p className="text-muted-foreground text-sm">
-                {filtered.length} insight{filtered.length !== 1 ? 's' : ''}
-                {hasFilters ? ' matching filters' : ''}
+                {t('insights.count', { count: filtered.length, filtered: hasFilters ? 1 : 0 })}
               </p>
             )}
           </div>
@@ -341,10 +359,10 @@ export default function InsightsPage() {
         {filters.pattern && (
           <div className="flex items-center gap-2 rounded-lg border bg-amber-500/5 border-amber-500/20 px-3 py-2">
             <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-amber-500/20">
-              Pattern
+              {t('insights.pattern')}
             </Badge>
             <span className="text-sm text-muted-foreground">
-              Showing {filtered.length} insight{filtered.length !== 1 ? 's' : ''} in this recurring pattern
+              {t('insights.patternShowing', { count: filtered.length })}
             </span>
             <Button
               variant="ghost"
@@ -366,7 +384,7 @@ export default function InsightsPage() {
           />
 
           <Input
-            placeholder="Search insights..."
+            placeholder={t('insights.search')}
             value={filters.q}
             onChange={(e) => setFilter('q', e.target.value)}
             className="max-w-xs"
@@ -374,10 +392,10 @@ export default function InsightsPage() {
 
           <Select value={filters.project} onValueChange={(v) => setFilter('project', v)}>
             <SelectTrigger className="w-[150px]">
-              <SelectValue placeholder="All Projects" />
+              <SelectValue placeholder={t('insights.allProjects')} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All Projects</SelectItem>
+              <SelectItem value="all">{t('insights.allProjects')}</SelectItem>
               {projects.map((p) => (
                 <SelectItem key={p.id} value={p.id}>
                   {p.name}
@@ -400,7 +418,7 @@ export default function InsightsPage() {
             <TabsList variant="default" className="h-9">
               {VIEW_MODES.map((mode) => (
                 <TabsTrigger key={mode.value} value={mode.value} className="text-xs px-3">
-                  {mode.label}
+                  {t(mode.labelKey)}
                 </TabsTrigger>
               ))}
             </TabsList>
@@ -428,7 +446,7 @@ export default function InsightsPage() {
       )}
       <LlmNudgeBanner context="insights" />
       {isError && !isLoading ? (
-        <ErrorCard message="Failed to load insights" onRetry={refetch} />
+        <ErrorCard message={t('insights.failed')} onRetry={refetch} />
       ) : isLoading ? (
         <div className="space-y-3">
           {[...Array(4)].map((_, i) => (
@@ -439,23 +457,23 @@ export default function InsightsPage() {
         hasFilters ? (
           <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
             <SearchX className="h-8 w-8 text-muted-foreground" />
-            <p className="font-medium">No insights match your search</p>
+            <p className="font-medium">{t('insights.noMatches')}</p>
             <p className="text-sm text-muted-foreground">
-              Try different keywords or clear the search to see all insights.
+              {t('insights.noMatchesHint')}
             </p>
             <Button variant="outline" size="sm" onClick={clearFilters}>
-              Clear filters
+              {t('insights.clearFilters')}
             </Button>
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
             <Sparkles className="h-8 w-8 text-muted-foreground" />
-            <p className="font-medium">No insights yet</p>
+            <p className="font-medium">{t('insights.empty')}</p>
             <p className="text-sm text-muted-foreground max-w-sm">
-              If you haven{"'"}t already, configure an LLM provider to unlock AI-powered insights — decisions, learnings, and patterns extracted from your sessions.
+              {t('insights.emptyDescription')}
             </p>
             <Button variant="outline" size="sm" asChild>
-              <Link to="/settings">Configure LLM provider</Link>
+              <Link to="/settings">{t('insights.configureProvider')}</Link>
             </Button>
           </div>
         )
@@ -492,7 +510,7 @@ export default function InsightsPage() {
                             checked={isSelected}
                             disabled={!isSelected && atMax}
                             onCheckedChange={() => handleToggleSelect(insight)}
-                            aria-label={`Select insight: ${insight.title}`}
+                            aria-label={t('insights.select', { title: insight.title })}
                           />
                         </div>
                         <div className={`transition-[padding-left] ${isSelected ? 'pl-8' : 'group-hover/dispatch:pl-8'}`}>

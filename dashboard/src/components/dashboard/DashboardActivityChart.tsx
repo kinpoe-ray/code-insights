@@ -12,6 +12,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { useThemeColors } from '@/lib/hooks/useThemeColors';
 import { CHART_COLORS } from '@/lib/constants/colors';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { DailyStats } from '@/lib/types';
 
 type DashboardRange = '7d' | '30d' | '90d' | 'all';
@@ -22,21 +23,22 @@ interface DashboardActivityChartProps {
   onRangeChange: (range: DashboardRange) => void;
 }
 
-const rangeOptions: { value: DashboardRange; label: string }[] = [
-  { value: '7d', label: '7d' },
-  { value: '30d', label: '30d' },
-  { value: '90d', label: '90d' },
-  { value: 'all', label: 'All' },
-];
+const rangeOptions = [
+  { value: '7d', labelKey: 'dashboard.chart.range.7d' },
+  { value: '30d', labelKey: 'dashboard.chart.range.30d' },
+  { value: '90d', labelKey: 'dashboard.chart.range.90d' },
+  { value: 'all', labelKey: 'dashboard.chart.range.all' },
+] as const satisfies ReadonlyArray<{ value: DashboardRange; labelKey: string }>;
 
 export function DashboardActivityChart({ data, range, onRangeChange }: DashboardActivityChartProps) {
   const { tooltipBg, tooltipBorder } = useThemeColors();
+  const { t, formatDate } = useLocale();
 
   const chartData = useMemo(
     () =>
       data.map((d) => ({
         ...d,
-        date: new Date(d.date).toLocaleDateString('en-US', {
+        date: formatDate(new Date(d.date), {
           month: 'short',
           day: 'numeric',
         }),
@@ -44,15 +46,15 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
         sessionCount: d.session_count,
         insightCount: d.insight_count,
       })),
-    [data]
+    [data, formatDate]
   );
 
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-1">
-        <CardTitle className="text-sm font-medium">Activity</CardTitle>
+        <CardTitle className="text-sm font-medium">{t('dashboard.chart.activity')}</CardTitle>
         <div className="flex gap-1">
-          {rangeOptions.map(({ value, label }) => (
+          {rangeOptions.map(({ value, labelKey }) => (
             <Button
               key={value}
               variant={range === value ? 'default' : 'ghost'}
@@ -60,7 +62,7 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
               className="h-7 px-2.5 text-xs"
               onClick={() => onRangeChange(value)}
             >
-              {label}
+              {t(labelKey)}
             </Button>
           ))}
         </div>
@@ -107,7 +109,7 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
                 <Area
                   type="monotone"
                   dataKey="sessionCount"
-                  name="Sessions"
+                  name={t('dashboard.chart.sessions')}
                   stroke={CHART_COLORS.activity.sessions}
                   fillOpacity={1}
                   fill="url(#dashColorSessions)"
@@ -115,7 +117,7 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
                 <Area
                   type="monotone"
                   dataKey="insightCount"
-                  name="Insights"
+                  name={t('dashboard.chart.insights')}
                   stroke={CHART_COLORS.activity.insights}
                   fillOpacity={1}
                   fill="url(#dashColorInsights)"
@@ -124,7 +126,7 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
             </ResponsiveContainer>
           ) : (
             <div className="flex h-full items-center justify-center">
-              <p className="text-sm text-muted-foreground">No activity data yet</p>
+              <p className="text-sm text-muted-foreground">{t('dashboard.chart.noData')}</p>
             </div>
           )}
         </div>

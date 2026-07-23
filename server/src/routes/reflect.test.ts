@@ -30,6 +30,15 @@ vi.mock('@code-insights/cli/utils/telemetry', () => ({
   getStableMachineId: () => 'test-id',
 }));
 
+const mockLoadConfiguredAnalysisLanguage = vi.hoisted(() => vi.fn(
+  (): 'auto' | 'zh-CN' | 'en-US' => 'zh-CN',
+));
+
+vi.mock('@code-insights/cli/analysis/analysis-language', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@code-insights/cli/analysis/analysis-language')>(),
+  loadConfiguredAnalysisLanguage: mockLoadConfiguredAnalysisLanguage,
+}));
+
 const mockIsLLMConfigured = vi.fn(() => false);
 const mockChat = vi.fn();
 
@@ -141,6 +150,8 @@ describe('Reflect routes', () => {
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockChat.mockReset();
+    mockLoadConfiguredAnalysisLanguage.mockReset();
+    mockLoadConfiguredAnalysisLanguage.mockReturnValue('zh-CN');
   });
 
   afterEach(() => {
@@ -695,6 +706,44 @@ describe('Reflect routes', () => {
       const completeData = JSON.parse(completeEvent!.data);
       expect(completeData.results).toHaveProperty('friction-wins');
       expect(completeData.results['friction-wins'].section).toBe('friction-wins');
+      expect(JSON.stringify(mockChat.mock.calls[0][0]))
+        .toContain('Simplified Chinese (zh-CN)');
+    });
+
+    it('ignores stored system artifacts when Reflect resolves auto language', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockLoadConfiguredAnalysisLanguage.mockReturnValue('auto');
+      mockChat.mockResolvedValue({ content: '<json>{"narrative":"test","topFriction":[],"topWins":[]}</json>' });
+      seedMultipleSessions(8);
+      const insertMessage = testDb.prepare(`
+        INSERT INTO messages (id, session_id, type, content, timestamp)
+        VALUES (?, 'sess-gen-0', 'user', ?, ?)
+      `);
+      [
+        'Please analyze these sessions.',
+        'Keep the result concise.',
+        '<task-notification>大量中文任务通知</task-notification>',
+        'Base directory for this skill: /大量/中文/路径',
+        '<local-command-caveat>大量中文提示</local-command-caveat>',
+        '<local-command-stdout>大量中文输出</local-command-stdout>',
+        '<command-name>/plan 大量中文参数</command-name>',
+      ].forEach((content, index) => {
+        insertMessage.run(
+          `reflect-language-${index}`,
+          content,
+          `2025-06-15T10:${String(index).padStart(2, '0')}:00Z`,
+        );
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      await res.text();
+
+      expect(JSON.stringify(mockChat.mock.calls[0][0])).toContain('English (en-US)');
     });
 
     it('streams complete event for working-style section', async () => {

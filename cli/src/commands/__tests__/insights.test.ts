@@ -9,12 +9,14 @@ import {
 } from '../../analysis/llm-client.js';
 import {
   freezeSessionAnalysisInput,
+  pipelineRevisionForAnalysisLanguage,
   TWO_PASS_PIPELINE_REVISION,
 } from '../../analysis/two-pass-analysis.js';
 
 // ── Shared mocks ──────────────────────────────────────────────────────────────
 
 let mockDb: Database.Database;
+const mockLoadConfig = vi.hoisted(() => vi.fn(() => null));
 
 vi.mock('../../db/client.js', () => ({
   getDb: () => mockDb,
@@ -30,7 +32,7 @@ vi.mock('../../utils/config.js', () => ({
   loadSyncState: () => ({ lastSync: '', files: {} }),
   saveSyncState: vi.fn(),
   getConfigDir: () => '/tmp',
-  loadConfig: vi.fn(() => null),
+  loadConfig: mockLoadConfig,
 }));
 
 const mockInsertSession = vi.fn(() => true);
@@ -122,6 +124,8 @@ beforeEach(() => {
   mockAcquireLlmLock.mockReset();
   mockAcquireLlmLock.mockReturnValue({ release: mockReleaseLlmLock });
   mockProviderChat.mockClear();
+  mockLoadConfig.mockReset();
+  mockLoadConfig.mockReturnValue(null);
 });
 
 // ── Seed helpers ──────────────────────────────────────────────────────────────
@@ -144,6 +148,7 @@ function markSessionCurrent(
   id: string,
   provider = 'openai',
   model = 'gpt-4o',
+  analysisLanguage: 'auto' | 'zh-CN' | 'en-US' = 'auto',
 ): void {
   const input = freezeSessionAnalysisInput(id, db);
   db.prepare(`
@@ -152,14 +157,14 @@ function markSessionCurrent(
       input_revision, pipeline_revision
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(id, 'session', provider, model, input.session.message_count,
-    input.inputRevision, TWO_PASS_PIPELINE_REVISION);
+    input.inputRevision, pipelineRevisionForAnalysisLanguage(analysisLanguage));
   db.prepare(`
     INSERT OR REPLACE INTO analysis_usage (
       session_id, analysis_type, provider, model, session_message_count,
       input_revision, pipeline_revision
     ) VALUES (?, ?, ?, ?, ?, ?, ?)
   `).run(id, 'prompt_quality', provider, model, input.session.message_count,
-    input.inputRevision, TWO_PASS_PIPELINE_REVISION);
+    input.inputRevision, pipelineRevisionForAnalysisLanguage(analysisLanguage));
 }
 
 function makeAnalysisResponse(): string {
@@ -284,6 +289,31 @@ describe('runInsightsCommand — provider mode (no --native)', () => {
     expect(mockFromConfig).toHaveBeenCalledTimes(1);
     expect(mockValidate).not.toHaveBeenCalled();
   }, 15_000);
+
+  it('uses the saved analysis language for both model passes', async () => {
+    seedSession(mockDb);
+    mockLoadConfig.mockReturnValue({
+      sync: { claudeDir: '', excludeProjects: [] },
+      dashboard: { analysisLanguage: 'zh-CN' },
+    });
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({
+        rawJson: makeAnalysisResponse(), durationMs: 100, inputTokens: 50,
+        outputTokens: 50, model: 'gpt-4o', provider: 'openai',
+      })
+      .mockResolvedValueOnce({
+        rawJson: makePQResponse(), durationMs: 80, inputTokens: 30,
+        outputTokens: 30, model: 'gpt-4o', provider: 'openai',
+      });
+
+    const { runInsightsCommand } = await import('../insights.js');
+    await runInsightsCommand({ sessionId: 'sess1', native: false, quiet: true });
+
+    expect(mockProviderChat).toHaveBeenCalledTimes(2);
+    for (const [messages] of mockProviderChat.mock.calls) {
+      expect(JSON.stringify(messages)).toContain('Simplified Chinese (zh-CN)');
+    }
+  });
 
   it('rejects a reused provider runner that lacks the LLMClient contract', async () => {
     seedSession(mockDb);
@@ -826,6 +856,44 @@ describe('runInsightsCommand — resume detection', () => {
     expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
   });
 
+  it('includes the selected language in freshness detection', async () => {
+    seedSession(mockDb, 'sess1', 10);
+    mockLoadConfig.mockReturnValue({
+      sync: { claudeDir: '', excludeProjects: [] },
+      dashboard: { analysisLanguage: 'zh-CN' },
+    });
+    markSessionCurrent(mockDb, 'sess1', 'openai', 'gpt-4o', 'zh-CN');
+
+    const { runInsightsCommand } = await import('../insights.js');
+    await runInsightsCommand({ sessionId: 'sess1', native: false, quiet: true });
+
+    expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+  });
+
+  it('requires the current v2 policy for a directly requested analysis', async () => {
+    seedSession(mockDb, 'sess1', 10);
+    markSessionCurrent(mockDb, 'sess1');
+    mockDb.prepare(`
+      UPDATE analysis_usage
+      SET pipeline_revision = 'analysis-3.0.0/two-pass-v1'
+      WHERE session_id = 'sess1'
+    `).run();
+    mockProviderRunAnalysis
+      .mockResolvedValueOnce({
+        rawJson: makeAnalysisResponse(), durationMs: 1, inputTokens: 1,
+        outputTokens: 1, model: 'gpt-4o', provider: 'openai',
+      })
+      .mockResolvedValueOnce({
+        rawJson: makePQResponse(), durationMs: 1, inputTokens: 1,
+        outputTokens: 1, model: 'gpt-4o', provider: 'openai',
+      });
+
+    const { runInsightsCommand } = await import('../insights.js');
+    await runInsightsCommand({ sessionId: 'sess1', native: false, quiet: true });
+
+    expect(mockProviderRunAnalysis).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['provider', 'anthropic'],
     ['model', 'different-model'],
@@ -989,6 +1057,58 @@ describe('insightsCheckCommand — count-based behavior', () => {
       }
     }
   }
+
+  it('does not auto-invalidate existing analysis only because the language preference changed', async () => {
+    seedSession(mockDb, 'language-existing', 10);
+    markSessionCurrent(mockDb, 'language-existing');
+    mockLoadConfig.mockReturnValue({
+      sync: { claudeDir: '', excludeProjects: [] },
+      dashboard: { analysisLanguage: 'zh-CN' },
+    });
+
+    const { insightsCheckCommand } = await import('../insights.js');
+    await insightsCheckCommand({ days: 7 });
+
+    expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'analysis-3.0.0/two-pass-v1',
+    'analysis-3.0.0/two-pass-v1/lang-zh-CN',
+    'analysis-3.0.0/two-pass-v1/lang-en-US',
+  ])('does not auto-invalidate complete legacy analysis at %s', async (pipelineRevision) => {
+    seedSession(mockDb, 'legacy-v1-complete', 10);
+    const input = freezeSessionAnalysisInput('legacy-v1-complete', mockDb);
+    const insertUsage = mockDb.prepare(`
+      INSERT INTO analysis_usage (
+        session_id, analysis_type, provider, model, session_message_count,
+        input_revision, pipeline_revision
+      ) VALUES (?, ?, 'openai', 'gpt-4o', ?, ?, ?)
+    `);
+    insertUsage.run(
+      'legacy-v1-complete',
+      'session',
+      input.session.message_count,
+      input.inputRevision,
+      pipelineRevision,
+    );
+    insertUsage.run(
+      'legacy-v1-complete',
+      'prompt_quality',
+      input.session.message_count,
+      input.inputRevision,
+      pipelineRevision,
+    );
+    mockLoadConfig.mockReturnValue({
+      sync: { claudeDir: '', excludeProjects: [] },
+      dashboard: { analysisLanguage: 'zh-CN' },
+    });
+
+    const { insightsCheckCommand } = await import('../insights.js');
+    await insightsCheckCommand({ days: 7 });
+
+    expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
+  });
 
   it('exits silently when 0 unanalyzed sessions', async () => {
     seedSessions(mockDb, 2, 2);

@@ -8,6 +8,14 @@ import type { LLMCapabilities, LLMMessage } from './types.js';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+const mockLoadConfig = vi.hoisted(() => vi.fn(() => ({
+  sync: { claudeDir: '', excludeProjects: [] },
+  dashboard: { analysisLanguage: 'zh-CN' as const },
+})));
+
+vi.mock('@code-insights/cli/utils/config', () => ({
+  loadConfig: mockLoadConfig,
+}));
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -231,10 +239,40 @@ beforeEach(() => {
   mockPrepareMessages.mockImplementation((messages: LLMMessage[]) => messages);
   mockEstimateTokens.mockReset();
   mockEstimateTokens.mockImplementation((text: string) => Math.ceil(text.length / 4));
+  mockLoadConfig.mockClear();
 });
 
 afterEach(() => {
   testDb.close();
+});
+
+describe('configured analysis language', () => {
+  it('applies the saved language to session, prompt-quality, and facet requests', async () => {
+    mockChat
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_ANALYSIS_RESPONSE), usage: null })
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null })
+      .mockResolvedValueOnce({
+        content: JSON.stringify(VALID_ANALYSIS_RESPONSE.facets),
+        usage: null,
+      });
+    const messages = [
+      makeMessage({ id: 'user-1', type: 'user', content: 'First request.' }),
+      makeMessage({ id: 'assistant-1', type: 'assistant', content: 'Reply.' }),
+      makeMessage({ id: 'user-2', type: 'user', content: 'Second request.' }),
+    ];
+
+    await analyzeSession(makeSession(), messages);
+    await analyzePromptQuality(makeSession(), messages);
+    await extractFacetsOnly(makeSession(), messages);
+
+    expect(mockChat).toHaveBeenCalledTimes(3);
+    expect(mockChat.mock.calls.map(([request]) => JSON.stringify(request)))
+      .toEqual([
+        expect.stringContaining('Simplified Chinese (zh-CN)'),
+        expect.stringContaining('Simplified Chinese (zh-CN)'),
+        expect.stringContaining('Simplified Chinese (zh-CN)'),
+      ]);
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -526,6 +564,42 @@ describe('findRecurringInsights', () => {
     const result = await findRecurringInsights([makeInsight('i1'), makeInsight('i2')]);
     expect(result.success).toBe(false);
     expect(result.error).toContain('LLM not configured');
+  });
+
+  it('applies the saved language to recurring theme synthesis', async () => {
+    mockChat.mockResolvedValue({ content: JSON.stringify({ groups: [] }), usage: null });
+
+    await findRecurringInsights([makeInsight('i1'), makeInsight('i2')]);
+
+    expect(JSON.stringify(mockChat.mock.calls[0][0]))
+      .toContain('Simplified Chinese (zh-CN)');
+  });
+
+  it('derives recurring synthesis auto language from the source user conversations', async () => {
+    mockLoadConfig.mockReturnValueOnce({
+      sync: { claudeDir: '', excludeProjects: [] },
+      dashboard: { analysisLanguage: 'auto' as const },
+    });
+    testDb.prepare(`
+      INSERT INTO messages (id, session_id, type, content, timestamp)
+      VALUES
+        ('recurring-user-1', 'sess-test', 'user', '请检查这个问题。', '2025-06-15T10:01:00Z'),
+        ('recurring-user-2', 'sess-test', 'user', '可以，继续修复。', '2025-06-15T10:02:00Z'),
+        ('recurring-artifact-1', 'sess-test', 'user', '<task-notification>English task output</task-notification>', '2025-06-15T10:03:00Z'),
+        ('recurring-artifact-2', 'sess-test', 'user', 'Base directory for this skill: /english/path', '2025-06-15T10:04:00Z'),
+        ('recurring-artifact-3', 'sess-test', 'user', '<local-command-caveat>English command caveat</local-command-caveat>', '2025-06-15T10:05:00Z'),
+        ('recurring-artifact-4', 'sess-test', 'user', '<local-command-stdout>English command output</local-command-stdout>', '2025-06-15T10:06:00Z'),
+        ('recurring-artifact-5', 'sess-test', 'user', '<command-name>/plan English arguments</command-name>', '2025-06-15T10:07:00Z')
+    `).run();
+    mockChat.mockResolvedValue({ content: JSON.stringify({ groups: [] }), usage: null });
+
+    await findRecurringInsights([
+      makeInsight('i1', { session_id: 'sess-test', title: 'English legacy title' }),
+      makeInsight('i2', { session_id: 'sess-test', summary: 'English legacy summary' }),
+    ]);
+
+    expect(JSON.stringify(mockChat.mock.calls[0][0]))
+      .toContain('Simplified Chinese (zh-CN)');
   });
 
   it('guard: fewer than 2 non-summary insights', async () => {

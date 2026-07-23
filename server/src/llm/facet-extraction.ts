@@ -16,6 +16,7 @@ import {
   type SessionData,
 } from './analysis-db.js';
 import { buildSessionMeta } from './analysis-internal.js';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 
 /**
  * Extract facets only for a session that already has insights (backfill).
@@ -41,11 +42,17 @@ export async function extractFacetsOnly(
     const formattedMessages = formatMessagesForAnalysis(messages);
 
     const sessionMeta = buildSessionMeta(session);
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
     const preparedRequest = prepareBoundedConversationRequest(client, [
       { role: 'system', content: SHARED_ANALYST_SYSTEM_PROMPT },
       { role: 'user', content: [
         buildCacheableConversationBlock(formattedMessages),
-        { type: 'text' as const, text: buildFacetOnlyInstructions(session.project_name, session.summary, sessionMeta) },
+        { type: 'text' as const, text: buildFacetOnlyInstructions(
+          session.project_name,
+          session.summary,
+          sessionMeta,
+          { preference: analysisLanguage, messages },
+        ) },
       ] },
     ]);
     if (!preparedRequest) {

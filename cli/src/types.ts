@@ -329,6 +329,7 @@ export interface WorkingStyleResult {
 export type ReflectResult = FrictionWinsResult | RulesSkillsResult | WorkingStyleResult;
 
 export type LLMProvider = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'llamacpp';
+export type AnalysisLanguage = 'auto' | 'zh-CN' | 'en-US';
 
 export interface LLMProviderConfig {
   provider: LLMProvider;
@@ -362,6 +363,7 @@ export interface ClaudeInsightConfig {
   dashboard?: {
     port?: number;
     llm?: LLMProviderConfig;
+    analysisLanguage?: AnalysisLanguage;
   };
   telemetry?: boolean;              // default true (opt-out)
 }

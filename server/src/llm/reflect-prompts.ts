@@ -2,6 +2,11 @@
 // These prompts receive pre-aggregated facet data and produce cross-session narratives.
 // LLMs synthesize — they don't count. All counting is done in code before calling these.
 
+import {
+  appendAnalysisLanguageInstruction,
+  type AnalysisLanguageContext,
+} from '@code-insights/cli/analysis/analysis-language';
+
 // --- Friction & Wins ---
 
 export const FRICTION_WINS_SYSTEM_PROMPT = `You are analyzing cross-session patterns from a developer's AI coding sessions. You will receive pre-aggregated friction categories and effective patterns with counts and severity scores.
@@ -32,7 +37,7 @@ export function generateFrictionWinsPrompt(data: {
     deficits: Array<{ category: string; count: number }>;
     strengths: Array<{ category: string; count: number }>;
   };
-}): string {
+}, languageContext?: AnalysisLanguageContext): string {
   const hasPQData = data.pqSignals?.deficits.length || data.pqSignals?.strengths.length;
   const pqSection = hasPQData
     ? `
@@ -46,7 +51,7 @@ ${((data.pqSignals?.strengths ?? []).map(s => `  ${s.category}: ${s.count}`).joi
 `
     : '';
 
-  return `Analyze these cross-session patterns from ${data.totalSessions} sessions over ${data.period}.
+  const prompt = `Analyze these cross-session patterns from ${data.totalSessions} sessions over ${data.period}.
 
 FRICTION CATEGORIES (ranked by frequency × severity):
 ${JSON.stringify(data.frictionCategories.slice(0, 15), null, 2)}
@@ -75,6 +80,7 @@ Respond with this JSON format:
 }
 
 Respond with valid JSON only, wrapped in <json>...</json> tags.`;
+  return appendAnalysisLanguageInstruction(prompt, languageContext);
 }
 
 // --- Rules & Skills ---
@@ -98,8 +104,8 @@ export function generateRulesSkillsPrompt(data: {
   recurringFriction: Array<{ category: string; count: number; avg_severity: number; examples: string[] }>;
   effectivePatterns: Array<{ category: string; label: string; frequency: number; avg_confidence: number; descriptions: string[] }>;
   targetTool: string;
-}): string {
-  return `Generate actionable artifacts from these recurring patterns.
+}, languageContext?: AnalysisLanguageContext): string {
+  const prompt = `Generate actionable artifacts from these recurring patterns.
 
 TARGET TOOL: ${data.targetTool} (generate artifacts compatible with this tool's ecosystem)
 
@@ -128,6 +134,7 @@ Respond with this JSON format:
 }
 
 Respond with valid JSON only, wrapped in <json>...</json> tags.`;
+  return appendAnalysisLanguageInstruction(prompt, languageContext);
 }
 
 // --- Working Style ---
@@ -157,8 +164,8 @@ export function generateWorkingStylePrompt(data: {
   totalSessions: number;
   period: string;
   frictionFrequency: number;
-}): string {
-  return `Write a working style profile based on ${data.totalSessions} sessions over ${data.period}.
+}, languageContext?: AnalysisLanguageContext): string {
+  const prompt = `Write a working style profile based on ${data.totalSessions} sessions over ${data.period}.
 
 WORKFLOW PATTERNS:
 ${JSON.stringify(data.workflowDistribution, null, 2)}
@@ -179,4 +186,5 @@ Respond with this JSON format:
 }
 
 Respond with valid JSON only, wrapped in <json>...</json> tags.`;
+  return appendAnalysisLanguageInstruction(prompt, languageContext);
 }

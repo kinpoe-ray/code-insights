@@ -14,7 +14,6 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { CompactSessionRow } from './CompactSessionRow';
-import { getSessionTitle, getDateGroup, sortDateGroups } from '@/lib/utils';
 import { parseJsonField } from '@/lib/types';
 import type { Session, Insight, InsightMetadata } from '@/lib/types';
 import { extractPQScore } from '@/lib/score-utils';
@@ -26,6 +25,8 @@ import { SavedFiltersDropdown } from '@/components/filters/SavedFiltersDropdown'
 import { SourceToolSelect } from '@/components/filters/SourceToolSelect';
 import { useSavedFilters } from '@/hooks/useSavedFilters';
 import { subDays, startOfDay, formatISO } from 'date-fns';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
 const SESSION_CHARACTERS = [
   'deep_focus',
@@ -38,20 +39,38 @@ const SESSION_CHARACTERS = [
 ] as const;
 
 const DATE_PRESETS = [
-  { label: 'Last 7 days', value: '7d' },
-  { label: 'Last 30 days', value: '30d' },
-  { label: 'Last 90 days', value: '90d' },
-  { label: 'All time', value: 'all' },
-  { label: 'Custom range...', value: 'custom' },
+  { labelKey: 'sessions.filters.last7Days', value: '7d' },
+  { labelKey: 'sessions.filters.last30Days', value: '30d' },
+  { labelKey: 'sessions.filters.last90Days', value: '90d' },
+  { labelKey: 'sessions.filters.allTime', value: 'all' },
+  { labelKey: 'sessions.filters.customRangeOption', value: 'custom' },
 ] as const;
 
 const OUTCOME_OPTIONS = [
-  { label: 'All Outcomes', value: 'all' },
-  { label: 'Success', value: 'success', color: 'text-emerald-600' },
-  { label: 'Partial', value: 'partial', color: 'text-amber-600' },
-  { label: 'Blocked', value: 'blocked', color: 'text-red-600' },
-  { label: 'Abandoned', value: 'abandoned', color: 'text-red-600' },
+  { labelKey: 'sessions.filters.allOutcomes', value: 'all' },
+  { labelKey: 'sessions.filters.outcomeSuccess', value: 'success', color: 'text-emerald-600' },
+  { labelKey: 'sessions.filters.outcomePartial', value: 'partial', color: 'text-amber-600' },
+  { labelKey: 'sessions.filters.outcomeBlocked', value: 'blocked', color: 'text-red-600' },
+  { labelKey: 'sessions.filters.outcomeAbandoned', value: 'abandoned', color: 'text-red-600' },
 ] as const;
+
+const CHARACTER_LABEL_KEYS: Record<(typeof SESSION_CHARACTERS)[number], MessageKey> = {
+  deep_focus: 'sessions.character.deepFocus',
+  bug_hunt: 'sessions.character.bugHunt',
+  feature_build: 'sessions.character.featureBuild',
+  exploration: 'sessions.character.exploration',
+  refactor: 'sessions.character.refactor',
+  learning: 'sessions.character.learning',
+  quick_task: 'sessions.character.quickTask',
+};
+
+function localDateKey(value: string | Date): string {
+  const date = value instanceof Date ? value : new Date(value);
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
 
 interface SessionListPanelProps {
   sessions: Session[];
@@ -94,6 +113,7 @@ export function SessionListPanel({
   loading,
   missingFacetIds,
 }: SessionListPanelProps) {
+  const { t, formatDate } = useLocale();
   const [customDateOpen, setCustomDateOpen] = useState(false);
   const { savedFilters, saveFilter, deleteFilter } = useSavedFilters('sessions');
 
@@ -160,7 +180,7 @@ export function SessionListPanel({
       if (filters.status === 'unanalyzed' && analyzedSessionIds.has(s.id)) return false;
       if (filters.q) {
         const q = filters.q.toLowerCase();
-        const title = getSessionTitle(s).toLowerCase();
+        const title = (s.custom_title || s.generated_title || s.summary || t('sessions.untitled')).toLowerCase();
         if (!title.includes(q) && !s.project_name.toLowerCase().includes(q)) return false;
       }
       if (dateBounds) {
@@ -174,21 +194,42 @@ export function SessionListPanel({
       }
       return true;
     });
-  }, [sessions, filters.character, filters.status, filters.q, analyzedSessionIds, dateBounds, filters.outcome, sessionOutcomes]);
+  }, [sessions, filters.character, filters.status, filters.q, analyzedSessionIds, dateBounds, filters.outcome, sessionOutcomes, t]);
 
   const groupedSessions = useMemo(() => {
     const groups = new Map<string, Session[]>();
     for (const s of filteredSessions) {
-      const group = getDateGroup(s.started_at);
+      const group = localDateKey(s.started_at);
       const arr = groups.get(group) || [];
       arr.push(s);
       groups.set(group, arr);
     }
-    return sortDateGroups([...groups.entries()]).map(([group, sessions]) => ({
-      group,
-      sessions,
-    }));
-  }, [filteredSessions]);
+    const now = new Date();
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const todayKey = localDateKey(now);
+    const yesterdayKey = localDateKey(yesterday);
+
+    return [...groups.entries()]
+      .sort(([a], [b]) => b.localeCompare(a))
+      .map(([groupKey, sessions]) => {
+        let label: string;
+        if (groupKey === todayKey) {
+          label = t('sessions.date.today');
+        } else if (groupKey === yesterdayKey) {
+          label = t('sessions.date.yesterday');
+        } else {
+          const date = new Date(sessions[0].started_at);
+          label = formatDate(date, {
+            weekday: 'long',
+            month: 'short',
+            day: 'numeric',
+            ...(date.getFullYear() === now.getFullYear() ? {} : { year: 'numeric' }),
+          });
+        }
+        return { groupKey, label, sessions };
+      });
+  }, [filteredSessions, formatDate, t]);
 
   const hasClientFilters =
     filters.character !== 'all' ||
@@ -204,15 +245,16 @@ export function SessionListPanel({
   };
 
   const dateRangeLabel = useMemo(() => {
-    if (!filters.dateRange || filters.dateRange === 'all') return 'All time';
+    if (!filters.dateRange || filters.dateRange === 'all') return t('sessions.filters.allTime');
     if (filters.dateRange === 'custom') {
       if (filters.dateFrom && filters.dateTo) return `${filters.dateFrom} – ${filters.dateTo}`;
-      if (filters.dateFrom) return `From ${filters.dateFrom}`;
-      if (filters.dateTo) return `To ${filters.dateTo}`;
-      return 'Custom';
+      if (filters.dateFrom) return t('sessions.filters.fromValue', { value: filters.dateFrom });
+      if (filters.dateTo) return t('sessions.filters.toValue', { value: filters.dateTo });
+      return t('sessions.filters.custom');
     }
-    return DATE_PRESETS.find((p) => p.value === filters.dateRange)?.label ?? filters.dateRange;
-  }, [filters.dateRange, filters.dateFrom, filters.dateTo]);
+    const preset = DATE_PRESETS.find((p) => p.value === filters.dateRange);
+    return preset ? t(preset.labelKey) : filters.dateRange;
+  }, [filters.dateRange, filters.dateFrom, filters.dateTo, t]);
 
   return (
     <div className="flex flex-col h-full">
@@ -226,7 +268,7 @@ export function SessionListPanel({
             onDelete={deleteFilter}
           />
           <Input
-            placeholder="Search sessions..."
+            placeholder={t('sessions.searchPlaceholder')}
             value={filters.q}
             onChange={(e) => onFilterChange('q', e.target.value)}
             className="h-8 text-xs flex-1"
@@ -240,13 +282,13 @@ export function SessionListPanel({
             onValueChange={(v) => onFilterChange('character', v)}
           >
             <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder="Type" />
+              <SelectValue placeholder={t('sessions.filters.type')} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All Types</SelectItem>
+              <SelectItem value="all">{t('sessions.filters.allTypes')}</SelectItem>
               {SESSION_CHARACTERS.map((c) => (
                 <SelectItem key={c} value={c} className="capitalize text-xs">
-                  {c.replace(/_/g, ' ')}
+                  {t(CHARACTER_LABEL_KEYS[c])}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -256,12 +298,12 @@ export function SessionListPanel({
             onValueChange={(v) => onFilterChange('status', v)}
           >
             <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder="Status" />
+              <SelectValue placeholder={t('sessions.filters.status')} />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="all">All Status</SelectItem>
-              <SelectItem value="analyzed">Analyzed</SelectItem>
-              <SelectItem value="unanalyzed">Not Analyzed</SelectItem>
+              <SelectItem value="all">{t('sessions.filters.allStatus')}</SelectItem>
+              <SelectItem value="analyzed">{t('sessions.filters.analyzed')}</SelectItem>
+              <SelectItem value="unanalyzed">{t('sessions.filters.notAnalyzed')}</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -281,10 +323,10 @@ export function SessionListPanel({
                 if (preset.value === 'custom') {
                   return (
                     <div key="custom" className="border-t mt-1 pt-1">
-                      <div className="text-xs text-muted-foreground px-2 py-1">Custom range</div>
+                      <div className="text-xs text-muted-foreground px-2 py-1">{t('sessions.filters.customRange')}</div>
                       <div className="px-2 space-y-1.5 pb-1">
                         <Input
-                          placeholder="From (YYYY-MM-DD)"
+                          placeholder={t('sessions.filters.fromDate')}
                           value={filters.dateFrom}
                           onChange={(e) => {
                             onFilterChange('dateFrom', e.target.value);
@@ -293,7 +335,7 @@ export function SessionListPanel({
                           className="h-7 text-xs"
                         />
                         <Input
-                          placeholder="To (YYYY-MM-DD)"
+                          placeholder={t('sessions.filters.toDate')}
                           value={filters.dateTo}
                           onChange={(e) => {
                             onFilterChange('dateTo', e.target.value);
@@ -319,7 +361,7 @@ export function SessionListPanel({
                       isActive ? 'font-medium text-foreground' : 'text-muted-foreground'
                     }`}
                   >
-                    {isActive ? '✓ ' : ''}{preset.label}
+                    {isActive ? '✓ ' : ''}{t(preset.labelKey)}
                   </button>
                 );
               })}
@@ -331,12 +373,12 @@ export function SessionListPanel({
             onValueChange={(v) => onFilterChange('outcome', v)}
           >
             <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder="Outcome" />
+              <SelectValue placeholder={t('sessions.filters.outcome')} />
             </SelectTrigger>
             <SelectContent>
               {OUTCOME_OPTIONS.map((o) => (
                 <SelectItem key={o.value} value={o.value} className="text-xs">
-                  {o.label}
+                  {t(o.labelKey)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -372,27 +414,27 @@ export function SessionListPanel({
           hasClientFilters ? (
             <div className="flex flex-col items-center justify-center py-12 text-center px-4 space-y-2">
               <SearchX className="h-6 w-6 text-muted-foreground" />
-              <p className="text-sm font-medium">No matching sessions</p>
+              <p className="text-sm font-medium">{t('sessions.noMatching')}</p>
               <Button variant="outline" size="sm" onClick={onClearFilters}>
-                Clear filters
+                {t('sessions.clearFilters')}
               </Button>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-center px-4 space-y-2">
               <Terminal className="h-6 w-6 text-muted-foreground" />
-              <p className="text-sm font-medium">No sessions yet</p>
+              <p className="text-sm font-medium">{t('sessions.noSessionsYet')}</p>
               <p className="text-xs text-muted-foreground">
-                Run code-insights sync to get started.
+                {t('sessions.syncToStart')}
               </p>
             </div>
           )
         ) : (
           <div>
-            {groupedSessions.map(({ group, sessions: groupSessions }) => (
-              <div key={group}>
+            {groupedSessions.map(({ groupKey, label, sessions: groupSessions }) => (
+              <div key={groupKey}>
                 <div className="px-3 pt-3 pb-1">
                   <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    {group}
+                    {label}
                   </h3>
                 </div>
                 {groupSessions.map((session) => (
@@ -419,7 +461,7 @@ export function SessionListPanel({
       {projectId && deletedCount > 0 && (
         <div className="shrink-0 border-t px-3 py-2 flex items-center gap-1.5 text-xs text-muted-foreground">
           <EyeOff className="h-3 w-3 shrink-0" />
-          <span>{deletedCount} hidden session{deletedCount !== 1 ? 's' : ''}</span>
+          <span>{t('sessions.hiddenCount', { count: deletedCount })}</span>
         </div>
       )}
     </div>

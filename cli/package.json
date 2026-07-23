@@ -32,6 +32,7 @@
     "./analysis/analysis-db": "./dist/analysis/analysis-db.js",
     "./analysis/analysis-usage-db": "./dist/analysis/analysis-usage-db.js",
     "./analysis/analysis-engine": "./dist/analysis/analysis-engine.js",
+    "./analysis/analysis-language": "./dist/analysis/analysis-language.js",
     "./analysis/analysis-pricing": "./dist/analysis/analysis-pricing.js",
     "./analysis/llm-client": "./dist/analysis/llm-client.js",
     "./analysis/provider-runner": "./dist/analysis/provider-runner.js",

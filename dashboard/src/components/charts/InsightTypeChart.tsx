@@ -2,6 +2,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recha
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useThemeColors } from '@/lib/hooks/useThemeColors';
 import { CHART_COLORS } from '@/lib/constants/colors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface InsightTypeChartProps {
   data: {
@@ -14,19 +15,19 @@ interface InsightTypeChartProps {
 
 const COLORS = CHART_COLORS.insightTypes;
 
-const LABELS = {
-  summary: 'Summaries',
-  decision: 'Decisions',
-  learning: 'Learnings',
-  prompt_quality: 'Prompt Quality',
-};
-
 export function InsightTypeChart({ data }: InsightTypeChartProps) {
   const { tooltipBg, tooltipBorder } = useThemeColors();
+  const { t } = useLocale();
+  const labels = {
+    summary: t('analytics.summaries'),
+    decision: t('analytics.decisions'),
+    learning: t('analytics.learnings'),
+    prompt_quality: t('analytics.promptQuality'),
+  };
   const chartData = Object.entries(data)
     .filter(([_, value]) => value > 0)
     .map(([name, value]) => ({
-      name: LABELS[name as keyof typeof LABELS],
+      name: labels[name as keyof typeof labels],
       value,
       color: COLORS[name as keyof typeof COLORS],
     }));
@@ -35,11 +36,11 @@ export function InsightTypeChart({ data }: InsightTypeChartProps) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Insight Types</CardTitle>
+          <CardTitle className="text-base">{t('analytics.insightTypes')}</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex h-[200px] items-center justify-center">
-            <p className="text-sm text-muted-foreground">No insights yet</p>
+            <p className="text-sm text-muted-foreground">{t('analytics.noInsights')}</p>
           </div>
         </CardContent>
       </Card>
@@ -49,7 +50,7 @@ export function InsightTypeChart({ data }: InsightTypeChartProps) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">Insight Types</CardTitle>
+        <CardTitle className="text-base">{t('analytics.insightTypes')}</CardTitle>
       </CardHeader>
       <CardContent>
         <div className="h-[200px]">

@@ -1,8 +1,9 @@
 import { Link } from 'react-router';
 import { formatDistanceToNow } from 'date-fns';
+import { enUS, zhCN } from 'date-fns/locale';
 import { MessageSquare, FileText, GitCommit, BookOpen, Target, Activity } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { getSessionTitle } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { INSIGHT_TYPE_COLORS, SOURCE_TOOL_COLORS } from '@/lib/constants/colors';
 import type { Session, Insight, InsightType } from '@/lib/types';
 
@@ -24,15 +25,16 @@ const insightTypeIcons: Record<InsightType, typeof FileText> = {
   prompt_quality: Target,
 };
 
-const insightTypeLabels: Record<InsightType, string> = {
-  summary: 'Summary',
-  decision: 'Decision',
-  learning: 'Learning',
-  technique: 'Learning',
-  prompt_quality: 'Prompt Quality',
-};
+const insightTypeLabelKeys = {
+  summary: 'dashboard.feed.summary',
+  decision: 'dashboard.feed.decision',
+  learning: 'dashboard.feed.learning',
+  technique: 'dashboard.feed.learning',
+  prompt_quality: 'dashboard.feed.promptQuality',
+} as const;
 
 export function ActivityFeed({ sessions, insights, limit = 7 }: ActivityFeedProps) {
+  const { t } = useLocale();
   const feedItems: FeedItem[] = [
     ...sessions.map((s) => ({ kind: 'session' as const, session: s, timestamp: new Date(s.started_at) })),
     ...insights.map((i) => ({ kind: 'insight' as const, insight: i, timestamp: new Date(i.timestamp) })),
@@ -44,8 +46,8 @@ export function ActivityFeed({ sessions, insights, limit = 7 }: ActivityFeedProp
     return (
       <div className="flex flex-col items-center justify-center py-4 gap-1.5 text-center">
         <Activity className="h-8 w-8 text-muted-foreground/50" />
-        <p className="text-sm text-muted-foreground">No recent activity</p>
-        <p className="text-xs text-muted-foreground">Start an AI coding session and run code-insights sync to see it here.</p>
+        <p className="text-sm text-muted-foreground">{t('dashboard.feed.emptyTitle')}</p>
+        <p className="text-xs text-muted-foreground">{t('dashboard.feed.emptyDescription')}</p>
       </div>
     );
   }
@@ -64,10 +66,14 @@ export function ActivityFeed({ sessions, insights, limit = 7 }: ActivityFeedProp
 }
 
 function SessionFeedItem({ session }: { session: Session }) {
+  const { locale, t } = useLocale();
   const startedAt = new Date(session.started_at);
   const endedAt = new Date(session.ended_at);
   const durationMin = Math.round((endedAt.getTime() - startedAt.getTime()) / 60000);
-  const displayTitle = getSessionTitle(session);
+  const displayTitle = session.custom_title
+    || session.generated_title
+    || session.summary
+    || t('dashboard.feed.untitledSession');
 
   return (
     <Link to={`/sessions?session=${session.id}`} className="block group">
@@ -89,11 +95,17 @@ function SessionFeedItem({ session }: { session: Session }) {
               </Badge>
             )}
             <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
-              &middot; {session.message_count} msgs &middot; {durationMin}m
+              &middot; {t('dashboard.feed.sessionMeta', {
+                messages: session.message_count,
+                minutes: durationMin,
+              })}
             </span>
           </div>
           <span className="text-xs text-muted-foreground shrink-0">
-            {formatDistanceToNow(startedAt, { addSuffix: true })}
+            {formatDistanceToNow(startedAt, {
+              addSuffix: true,
+              locale: locale === 'zh-CN' ? zhCN : enUS,
+            })}
           </span>
         </div>
       </div>
@@ -102,9 +114,10 @@ function SessionFeedItem({ session }: { session: Session }) {
 }
 
 function InsightFeedItem({ insight }: { insight: Insight }) {
+  const { locale, t } = useLocale();
   const Icon = insightTypeIcons[insight.type];
   const colorClass = INSIGHT_TYPE_COLORS[insight.type];
-  const label = insightTypeLabels[insight.type];
+  const label = t(insightTypeLabelKeys[insight.type]);
 
   return (
     <Link to={`/sessions?session=${insight.session_id}`} className="block group">
@@ -122,7 +135,10 @@ function InsightFeedItem({ insight }: { insight: Insight }) {
             </Badge>
           </div>
           <span className="text-xs text-muted-foreground shrink-0">
-            {formatDistanceToNow(new Date(insight.timestamp), { addSuffix: true })}
+            {formatDistanceToNow(new Date(insight.timestamp), {
+              addSuffix: true,
+              locale: locale === 'zh-CN' ? zhCN : enUS,
+            })}
           </span>
         </div>
       </div>

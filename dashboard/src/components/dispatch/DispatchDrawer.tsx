@@ -30,20 +30,10 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { Switch } from '@/components/ui/switch';
 import { generateDispatch } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
 import { PostOverlay } from './PostOverlay';
 import type { Insight, DispatchPrefill } from '@/lib/types';
 import type { DispatchTone, DispatchFormat, DispatchResponse } from '@/lib/api';
-
-const FORMAT_OPTIONS: { value: DispatchFormat; label: string; description: string }[] = [
-  { value: 'blog', label: 'Blog post', description: 'Full narrative, 800-1000 words, markdown ready to paste to dev.to / Hashnode' },
-  { value: 'linkedin', label: 'LinkedIn', description: 'Hook-first, 150-250 words, optimized for LinkedIn feed' },
-];
-
-const TONE_OPTIONS: { value: DispatchTone; label: string; description: string }[] = [
-  { value: 'technical', label: 'Technical deep-dive', description: 'For senior engineers — precise, depth-first' },
-  { value: 'accessible', label: 'Accessible', description: 'Broader audience — clear, with analogies' },
-  { value: 'quick-tips', label: 'Quick tips', description: 'Scannable — bold tips + brief context' },
-];
 
 const INSIGHT_TYPE_COLORS: Record<string, string> = {
   learning: 'bg-green-500/10 text-green-700 dark:text-green-400 border-green-500/20',
@@ -59,6 +49,7 @@ interface SortableInsightItemProps {
 }
 
 function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
+  const { t } = useLocale();
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: insight.id });
 
   const style = {
@@ -68,6 +59,13 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
   };
 
   const colorClass = INSIGHT_TYPE_COLORS[insight.type] ?? INSIGHT_TYPE_COLORS.summary;
+  const typeLabel = {
+    learning: t('dispatch.insightType.learning'),
+    decision: t('dispatch.insightType.decision'),
+    technique: t('dispatch.insightType.technique'),
+    summary: t('dispatch.insightType.summary'),
+    prompt_quality: t('dispatch.insightType.promptQuality'),
+  }[insight.type] ?? insight.type.replace('_', ' ');
 
   return (
     <div
@@ -79,7 +77,7 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
         className="mt-0.5 shrink-0 cursor-grab text-muted-foreground hover:text-foreground active:cursor-grabbing"
         {...attributes}
         {...listeners}
-        aria-label="Drag to reorder"
+        aria-label={t('dispatch.dragAria')}
         aria-describedby="drag-hint"
       >
         <GripVertical className="h-4 w-4" />
@@ -87,7 +85,7 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5 mb-1">
           <Badge variant="outline" className={`text-[10px] px-1.5 py-0 ${colorClass}`}>
-            {insight.type.replace('_', ' ')}
+            {typeLabel}
           </Badge>
         </div>
         <p className="text-xs text-muted-foreground leading-snug line-clamp-2">{insight.summary || insight.title}</p>
@@ -95,7 +93,7 @@ function SortableInsightItem({ insight, onRemove }: SortableInsightItemProps) {
       <button
         className="shrink-0 text-muted-foreground hover:text-destructive transition-colors mt-0.5"
         onClick={() => onRemove(insight.id)}
-        aria-label="Remove insight"
+        aria-label={t('dispatch.removeAria')}
       >
         <X className="h-3.5 w-3.5" />
       </button>
@@ -120,6 +118,7 @@ export function DispatchDrawer({
   onRemove,
   prefill,
 }: DispatchDrawerProps) {
+  const { t } = useLocale();
   const [context, setContext] = useState('');
   const [contextEdited, setContextEdited] = useState(false);
   const [format, setFormat] = useState<DispatchFormat>('blog');
@@ -184,6 +183,15 @@ export function DispatchDrawer({
 
   const canGenerate = selectedInsights.length >= 3 && context.trim().length > 0 && !mutation.isPending;
   const contextTooLong = context.length > 500;
+  const formatOptions: { value: DispatchFormat; label: string; description: string }[] = [
+    { value: 'blog', label: t('dispatch.format.blog'), description: t('dispatch.format.blogDescription') },
+    { value: 'linkedin', label: t('dispatch.format.linkedin'), description: t('dispatch.format.linkedinDescription') },
+  ];
+  const toneOptions: { value: DispatchTone; label: string; description: string }[] = [
+    { value: 'technical', label: t('dispatch.tone.technical'), description: t('dispatch.tone.technicalDescription') },
+    { value: 'accessible', label: t('dispatch.tone.accessible'), description: t('dispatch.tone.accessibleDescription') },
+    { value: 'quick-tips', label: t('dispatch.tone.quickTips'), description: t('dispatch.tone.quickTipsDescription') },
+  ];
 
   return (
     <>
@@ -193,11 +201,11 @@ export function DispatchDrawer({
         className="w-full sm:max-w-none sm:w-[480px] flex flex-col p-0 gap-0"
       >
         <SheetHeader className="px-4 py-3 border-b shrink-0">
-          <SheetTitle>Create Post</SheetTitle>
+          <SheetTitle>{t('dispatch.createPost')}</SheetTitle>
           <SheetDescription>
             {prefill
-              ? `Drafting from ${prefill.title}`
-              : 'Curate insights and context, then generate a publishable post.'}
+              ? t('dispatch.drawer.draftingFrom', { title: prefill.title })
+              : t('dispatch.drawer.description')}
           </SheetDescription>
         </SheetHeader>
 
@@ -205,13 +213,13 @@ export function DispatchDrawer({
             {/* Selected insights with drag-to-reorder */}
             <div>
               <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                Selected ({selectedInsights.length})
+                {t('dispatch.selected', { count: selectedInsights.length })}
                 {selectedInsights.length > 0 && (
-                  <span className="ml-1 normal-case font-normal">— drag to reorder</span>
+                  <span className="ml-1 normal-case font-normal">{t('dispatch.dragToReorder')}</span>
                 )}
               </p>
               <span id="drag-hint" className="sr-only">
-                Press Space or Enter to pick up, arrow keys to move, Space or Enter to drop, Escape to cancel.
+                {t('dispatch.dragHint')}
               </span>
               <DndContext
                 sensors={sensors}
@@ -235,7 +243,7 @@ export function DispatchDrawer({
               </DndContext>
               {selectedInsights.length === 0 && (
                 <p className="text-sm text-muted-foreground text-center py-4">
-                  No insights selected. Close this panel and select at least 3 from the list.
+                  {t('dispatch.noSelection')}
                 </p>
               )}
             </div>
@@ -243,19 +251,19 @@ export function DispatchDrawer({
             {/* Context textarea */}
             <div>
               <label className="block text-xs font-medium text-muted-foreground uppercase tracking-wider mb-1.5">
-                {"What's the story?"}
+                {t('dispatch.story')}
               </label>
               <Textarea
                 rows={4}
                 maxLength={500}
-                placeholder="2-3 sentences framing the narrative. What did you build or discover? Why does it matter?"
+                placeholder={t('dispatch.storyPlaceholder')}
                 value={context}
                 onChange={(e) => { setContext(e.target.value); if (prefill) setContextEdited(true); }}
                 className="resize-none"
               />
               <div className="flex justify-between mt-1">
                 <p className="text-xs text-muted-foreground">
-                  This shapes the arc — the model reads it before the insights.
+                  {t('dispatch.storyHint')}
                 </p>
                 <span className={`text-xs ${contextTooLong ? 'text-destructive' : 'text-muted-foreground'}`}>
                   {context.length}/500
@@ -268,16 +276,16 @@ export function DispatchDrawer({
                   className="mt-1 h-7 text-xs text-muted-foreground"
                   onClick={() => { setContext(prefill.contextMarkdown); setContextEdited(false); }}
                 >
-                  Reset to defaults
+                  {t('dispatch.resetDefaults')}
                 </Button>
               )}
             </div>
 
             {/* Format selector */}
             <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
-              <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Format</legend>
+              <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('dispatch.format')}</legend>
               <div className="space-y-1.5">
-                {FORMAT_OPTIONS.map((opt) => (
+                {formatOptions.map((opt) => (
                   <label
                     key={opt.value}
                     className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 cursor-pointer transition-colors ${
@@ -305,9 +313,9 @@ export function DispatchDrawer({
 
             {/* Tone selector */}
             <fieldset className="space-y-2 border-0 p-0 m-0 min-w-0">
-              <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Tone</legend>
+              <legend className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{t('dispatch.tone')}</legend>
               <div className="space-y-1.5">
-                {TONE_OPTIONS.map((opt) => (
+                {toneOptions.map((opt) => (
                   <label
                     key={opt.value}
                     className={`flex items-start gap-2.5 rounded-md border px-3 py-2.5 cursor-pointer transition-colors ${
@@ -337,10 +345,10 @@ export function DispatchDrawer({
             <div className="flex items-center justify-between rounded-md border px-3 py-2.5">
               <div className="space-y-0.5">
                 <label htmlFor="session-background" className="text-sm font-medium cursor-pointer">
-                  Include session background
+                  {t('dispatch.includeSessionBackground')}
                 </label>
                 <p id="session-bg-desc" className="text-xs text-muted-foreground">
-                  Adds session summaries to help the model understand context (up to 4 sessions).
+                  {t('dispatch.includeSessionBackgroundDescription')}
                 </p>
               </div>
               <Switch
@@ -355,7 +363,7 @@ export function DispatchDrawer({
             {mutation.isError && (
               <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2.5 text-sm text-destructive">
                 <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
-                <span>{mutation.error instanceof Error ? mutation.error.message : 'Generation failed. Please try again.'}</span>
+                <span>{mutation.error instanceof Error ? mutation.error.message : t('dispatch.generationFailed')}</span>
               </div>
             )}
           </div>
@@ -371,15 +379,15 @@ export function DispatchDrawer({
               {mutation.isPending ? (
                 <>
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Generating...
+                  {t('dispatch.generating')}
                 </>
               ) : (
-                'Generate Post'
+                t('dispatch.generatePost')
               )}
             </Button>
             {!context.trim() && selectedInsights.length >= 3 && (
               <p className="text-xs text-muted-foreground text-center mt-1.5">
-                Add a context paragraph to enable generation
+                {t('dispatch.contextRequired')}
               </p>
             )}
           </div>
@@ -389,14 +397,14 @@ export function DispatchDrawer({
               className="flex-1"
               onClick={() => setOverlayOpen(true)}
             >
-              View post
+              {t('dispatch.viewPost')}
             </Button>
             <Button
               variant="outline"
               className="flex-1"
               onClick={() => { setResult(null); mutation.reset(); }}
             >
-              Regenerate
+              {t('dispatch.regenerate')}
             </Button>
           </div>
         )}

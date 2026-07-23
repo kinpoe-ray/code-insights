@@ -12,6 +12,8 @@ import {
 import { useAnalysisCost } from '@/hooks/useAnalysisCost';
 import { formatCost } from '@/lib/cost-utils';
 import { formatTokenCount } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
 interface AnalysisCostLineProps {
   sessionId: string;
@@ -19,15 +21,11 @@ interface AnalysisCostLineProps {
   isAnalyzing: boolean;
 }
 
-/** Human-readable label for each analysis type. */
-function analysisTypeLabel(type: string): string {
-  switch (type) {
-    case 'session': return 'Session Analysis';
-    case 'prompt_quality': return 'Prompt Quality';
-    case 'facet': return 'Facet Extraction';
-    default: return type;
-  }
-}
+const ANALYSIS_TYPE_KEYS: Record<string, MessageKey> = {
+  session: 'sessions.cost.type.session',
+  prompt_quality: 'sessions.cost.type.promptQuality',
+  facet: 'sessions.cost.type.facet',
+};
 
 /** Format a token count for the sublabel (e.g. "82.4K"). */
 function formatTokens(n: number): string {
@@ -35,6 +33,7 @@ function formatTokens(n: number): string {
 }
 
 export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLineProps) {
+  const { t } = useLocale();
   const { data } = useAnalysisCost(sessionId);
 
   // While analysis is running, show a placeholder
@@ -42,7 +41,7 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
     return (
       <div className="flex items-center gap-1.5 text-sm text-muted-foreground px-1 py-1">
         <Sparkles className="h-3.5 w-3.5 text-purple-500 shrink-0" />
-        <span>Analyzing... cost will appear when complete</span>
+        <span>{t('sessions.cost.analyzing')}</span>
       </div>
     );
   }
@@ -69,9 +68,9 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
 
   // Build sublabel
   const sublabelParts: string[] = [modelLabel];
-  if (totalInput > 0) sublabelParts.push(`${formatTokens(totalInput)} in`);
-  if (totalOutput > 0) sublabelParts.push(`${formatTokens(totalOutput)} out`);
-  if (cacheSavingsUsd > 0.005) sublabelParts.push(`saved ${formatCost(cacheSavingsUsd)}`);
+  if (totalInput > 0) sublabelParts.push(t('sessions.cost.input', { count: formatTokens(totalInput) }));
+  if (totalOutput > 0) sublabelParts.push(t('sessions.cost.output', { count: formatTokens(totalOutput) }));
+  if (cacheSavingsUsd > 0.005) sublabelParts.push(t('sessions.cost.saved', { cost: formatCost(cacheSavingsUsd) }));
   const sublabel = sublabelParts.join(' · ');
 
   // Legacy sessions: usage row exists but cost is 0 and provider is not Ollama or native
@@ -82,8 +81,8 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
   if (allNative) {
     const durationSec = totalDurationMs > 0 ? Math.round(totalDurationMs / 1000) : null;
     const nativeLabel = durationSec != null
-      ? `Analyzed via Claude Code · ${durationSec}s`
-      : 'Analyzed via Claude Code';
+      ? t('sessions.cost.viaClaudeDuration', { seconds: durationSec })
+      : t('sessions.cost.viaClaude');
     return (
       <div className="flex flex-col gap-0.5 px-1 py-1 select-none">
         <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -96,10 +95,10 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
   }
 
   const primaryText = allOllama
-    ? 'Analysis: local (free)'
+    ? t('sessions.cost.localFree')
     : isLegacy
-      ? 'Analysis cost: not tracked'
-      : `Analysis cost: ${formatCost(totalCostUsd)}`;
+      ? t('sessions.cost.notTracked')
+      : t('sessions.cost.totalCost', { cost: formatCost(totalCostUsd) });
 
   const showPopover = usage.length > 0 && !isLegacy;
 
@@ -125,7 +124,7 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
         <div className="select-none hover:opacity-80 transition-opacity">{content}</div>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-72 p-3">
-        <p className="text-xs font-semibold text-foreground mb-2">Analysis Cost Breakdown</p>
+        <p className="text-xs font-semibold text-foreground mb-2">{t('sessions.cost.breakdown')}</p>
         <div className="space-y-2">
           {usage.map((row, idx) => {
             const cacheRead = row.cache_read_tokens;
@@ -142,19 +141,28 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
                 {idx > 0 && <div className="border-t my-2" />}
                 <div className="flex items-start justify-between gap-2">
                   <span className="text-xs font-medium text-foreground">
-                    {analysisTypeLabel(row.analysis_type)}
+                    {ANALYSIS_TYPE_KEYS[row.analysis_type]
+                      ? t(ANALYSIS_TYPE_KEYS[row.analysis_type])
+                      : row.analysis_type}
                   </span>
                   <span className="text-xs font-medium text-foreground shrink-0">
-                    {row.provider === 'ollama' || row.provider === 'llamacpp' || row.provider === 'claude-code-native' ? 'free' : formatCost(row.estimated_cost_usd)}
+                    {row.provider === 'ollama' || row.provider === 'llamacpp' || row.provider === 'claude-code-native'
+                      ? t('sessions.cost.free')
+                      : formatCost(row.estimated_cost_usd)}
                   </span>
                 </div>
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  {formatTokens(row.input_tokens)} in · {formatTokens(row.output_tokens)} out
+                  {t('sessions.cost.input', { count: formatTokens(row.input_tokens) })} ·{' '}
+                  {t('sessions.cost.output', { count: formatTokens(row.output_tokens) })}
                 </p>
                 {cacheRead > 0 && (
                   <p className="text-[10px] text-muted-foreground">
-                    Cache: {formatTokens(cacheRead)} read
-                    {rowCacheSavings > 0.005 && ` (saved ${formatCost(rowCacheSavings)})`}
+                    {rowCacheSavings > 0.005
+                      ? t('sessions.cost.cacheSaved', {
+                          count: formatTokens(cacheRead),
+                          cost: formatCost(rowCacheSavings),
+                        })
+                      : t('sessions.cost.cacheRead', { count: formatTokens(cacheRead) })}
                   </p>
                 )}
               </div>
@@ -164,9 +172,9 @@ export function AnalysisCostLine({ sessionId, isAnalyzing }: AnalysisCostLinePro
             <>
               <div className="border-t my-2" />
               <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold text-foreground">Total</span>
+                <span className="text-xs font-semibold text-foreground">{t('sessions.cost.total')}</span>
                 <span className="text-xs font-semibold text-foreground">
-                  {allOllama || allNative ? 'free' : formatCost(totalCostUsd)}
+                  {allOllama || allNative ? t('sessions.cost.free') : formatCost(totalCostUsd)}
                 </span>
               </div>
             </>

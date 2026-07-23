@@ -3,6 +3,7 @@
 // normalization live in cli/src/analysis/analysis-engine.ts.
 
 import { createAnalysisEngine } from '@code-insights/cli/analysis/analysis-engine';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 import { createLLMClient, isLLMConfigured } from './client.js';
 import type { SQLiteMessageRow } from './prompt-types.js';
 import {
@@ -69,7 +70,10 @@ export async function analyzeSession(
   }
 
   try {
-    const engine = createAnalysisEngine({ client: createLLMClient() });
+    const engine = createAnalysisEngine({
+      client: createLLMClient(),
+      analysisLanguage: loadConfiguredAnalysisLanguage(),
+    });
     const outcome = await engine.analyzeSession(
       { session, messages },
       {

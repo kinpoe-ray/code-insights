@@ -2,6 +2,7 @@
 // Extracted from prompts.ts — used by prompt generator functions in prompts.ts.
 
 import type { SQLiteMessageRow, SessionMetadata } from './prompt-types.js';
+import { classifyUserMessageText } from '../parser/user-message-classification.js';
 
 // Safely parse a JSON-encoded string field from SQLite.
 // Returns defaultValue if the field is null, empty, or invalid JSON.
@@ -40,18 +41,7 @@ export function classifyStoredUserMessage(content: string): 'human' | 'tool-resu
   // The DB stores these as stringified JSON arrays starting with '['.
   if (content.startsWith('[') && content.includes('"tool_result"')) return 'tool-result';
 
-  // Auto-compact summary: Claude Code uses two known prefixes for LLM-initiated
-  // context compaction summaries. Both must be checked.
-  if (content.startsWith('Here is a summary of our conversation')) return 'system-artifact';
-  if (content.startsWith('This session is being continued')) return 'system-artifact';
-
-  // Slash command or skill load: single-line starting with / followed by a lowercase letter.
-  // Requires content.trim() to be short (≤2 lines) to avoid false-positives on messages
-  // containing file paths like "/usr/bin/..." as part of a longer instruction.
-  const trimmed = content.trim();
-  if (/^\/[a-z]/.test(trimmed) && trimmed.split('\n').length <= 2) return 'system-artifact';
-
-  return 'human';
+  return classifyUserMessageText(content) === 'human' ? 'human' : 'system-artifact';
 }
 
 /**

@@ -18,6 +18,7 @@ import { enqueueAnalysisBatch } from '@/lib/api';
 import { useLlmConfig } from '@/hooks/useConfig';
 import { useAnalysisBatchQueue } from '@/hooks/useAnalysisQueue';
 import type { Session } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface BulkAnalyzeButtonProps {
   sessions: Session[];
@@ -28,6 +29,7 @@ export function BulkAnalyzeButton({
   sessions,
   onComplete,
 }: BulkAnalyzeButtonProps) {
+  const { t } = useLocale();
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -56,7 +58,7 @@ export function BulkAnalyzeButton({
       rememberReceipt(response.batch);
     } catch (error) {
       setSubmitError(
-        error instanceof Error ? error.message : 'Unable to queue analysis',
+        error instanceof Error ? error.message : t('analysis.bulk.unableQueue'),
       );
     } finally {
       setSubmitting(false);
@@ -67,9 +69,9 @@ export function BulkAnalyzeButton({
     return (
       <Button variant="outline" disabled className="gap-2">
         <Sparkles className="h-4 w-4" />
-        Analyze Selected
+        {t('analysis.bulk.analyzeSelected')}
         <span className="text-xs text-muted-foreground ml-1">
-          (Configure AI first)
+          {t('analysis.bulk.configureFirst')}
         </span>
       </Button>
     );
@@ -85,15 +87,14 @@ export function BulkAnalyzeButton({
           onClick={() => setOpen(true)}
         >
           <Sparkles className="h-4 w-4" />
-          Analyze {sessions.length} Session{sessions.length !== 1 ? 's' : ''}
+          {t('analysis.bulk.trigger', { count: sessions.length })}
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>Bulk Analysis</DialogTitle>
+          <DialogTitle>{t('analysis.bulk.title')}</DialogTitle>
           <DialogDescription>
-            Generate AI insights for {sessions.length} selected session
-            {sessions.length !== 1 ? 's' : ''}.
+            {t('analysis.bulk.description', { count: sessions.length })}
           </DialogDescription>
         </DialogHeader>
 
@@ -101,8 +102,7 @@ export function BulkAnalyzeButton({
           {!receipt && (
             <>
               <p className="text-sm text-muted-foreground">
-                The sessions will be added to a durable background queue. You
-                can close this window while analysis continues.
+                {t('analysis.bulk.queueHelp')}
               </p>
               {submitError && (
                 <div className="flex items-start gap-2 text-sm text-red-500">
@@ -118,7 +118,7 @@ export function BulkAnalyzeButton({
                 {submitting
                   ? <Loader2 className="h-4 w-4 animate-spin" />
                   : <Sparkles className="h-4 w-4" />}
-                {submitting ? 'Queueing Analysis...' : 'Start Analysis'}
+                {submitting ? t('analysis.bulk.queueing') : t('analysis.bulk.start')}
               </Button>
             </>
           )}
@@ -133,7 +133,7 @@ export function BulkAnalyzeButton({
                 <span>
                   {queueError instanceof Error
                     ? queueError.message
-                    : 'Unable to load batch status'}
+                    : t('analysis.bulk.unableStatus')}
                 </span>
               </div>
               <Button
@@ -141,7 +141,7 @@ export function BulkAnalyzeButton({
                 onClick={retrySnapshot}
                 className="w-full"
               >
-                Retry
+                {t('analysis.bulk.retry')}
               </Button>
             </div>
           )}
@@ -149,7 +149,7 @@ export function BulkAnalyzeButton({
           {receipt && !queueError && !progress && (
             <div className="flex items-center gap-2">
               <Loader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm">Loading batch status...</span>
+              <span className="text-sm">{t('analysis.bulk.loadingStatus')}</span>
             </div>
           )}
 
@@ -158,12 +158,15 @@ export function BulkAnalyzeButton({
               <div className="flex items-center gap-2">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 <span className="text-sm" aria-live="polite">
-                  {progress.finished} of {progress.total} finished
+                  {t('analysis.bulk.finished', {
+                    finished: progress.finished,
+                    total: progress.total,
+                  })}
                 </span>
               </div>
               <div
                 role="progressbar"
-                aria-label="Batch analysis progress"
+                aria-label={t('analysis.bulk.progressLabel')}
                 aria-valuemin={0}
                 aria-valuemax={progress.total}
                 aria-valuenow={progress.finished}
@@ -179,7 +182,10 @@ export function BulkAnalyzeButton({
                 />
               </div>
               <p className="text-xs text-muted-foreground">
-                {progress.processing} processing · {progress.pending} waiting
+                {t('analysis.bulk.processingWaiting', {
+                  processing: progress.processing,
+                  pending: progress.pending,
+                })}
               </p>
             </div>
           )}
@@ -189,15 +195,14 @@ export function BulkAnalyzeButton({
               <div className="flex items-center gap-2 text-green-600">
                 <CheckCircle className="h-4 w-4" />
                 <span aria-live="polite">
-                  {progress.completed} session
-                  {progress.completed !== 1 ? 's' : ''} analyzed successfully
+                  {t('analysis.bulk.success', { count: progress.completed })}
                 </span>
               </div>
               {progress.failed > 0 && (
                 <div className="space-y-1">
                   <div className="flex items-center gap-2 text-red-500">
                     <AlertCircle className="h-4 w-4" />
-                    <span>{progress.failed} failed</span>
+                    <span>{t('analysis.bulk.failed', { count: progress.failed })}</span>
                   </div>
                   <ul className="text-xs text-muted-foreground list-disc list-inside max-h-32 overflow-y-auto">
                     {progress.errors.slice(0, 5).map((error) => (
@@ -210,7 +215,7 @@ export function BulkAnalyzeButton({
                       </li>
                     ))}
                     {progress.errors.length > 5 && (
-                      <li>...and {progress.errors.length - 5} more</li>
+                      <li>{t('analysis.bulk.more', { count: progress.errors.length - 5 })}</li>
                     )}
                   </ul>
                 </div>
@@ -221,13 +226,13 @@ export function BulkAnalyzeButton({
                   onClick={clearReceipt}
                   className="flex-1"
                 >
-                  Analyze Again
+                  {t('analysis.bulk.again')}
                 </Button>
                 <Button
                   onClick={() => setOpen(false)}
                   className="flex-1"
                 >
-                  Done
+                  {t('analysis.bulk.done')}
                 </Button>
               </div>
             </div>

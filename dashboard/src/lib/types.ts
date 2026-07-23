@@ -262,9 +262,12 @@ export interface DispatchPrefill {
   contextMarkdown: string;
 }
 
+export type AnalysisLanguage = 'auto' | 'zh-CN' | 'en-US';
+
 // LLM config from /api/config/llm
 export interface LLMConfig {
   dashboardPort: number;
+  analysisLanguage?: AnalysisLanguage;
   provider?: 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'llamacpp';
   model?: string;
   apiKey?: string;      // masked by server before returning (first4...last4)

@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { useUserProfile, normalizeGithubUsername } from '@/hooks/useUserProfile';
 import type { UserProfile } from '@/hooks/useUserProfile';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ProfilePromptDialogProps {
   open: boolean;
@@ -36,6 +37,7 @@ export function ProfilePromptDialog({
   onSkip,
   onOpenChange,
 }: ProfilePromptDialogProps) {
+  const { t } = useLocale();
   const { profile, saveProfile } = useUserProfile();
 
   const [name, setName] = useState(profile?.name ?? '');
@@ -73,9 +75,9 @@ export function ProfilePromptDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add your profile to the share card</DialogTitle>
+          <DialogTitle>{t('profilePrompt.title')}</DialogTitle>
           <DialogDescription>
-            Your name and GitHub avatar will appear in the card footer, personalizing it for social sharing.
+            {t('profilePrompt.description')}
           </DialogDescription>
         </DialogHeader>
 
@@ -86,7 +88,7 @@ export function ProfilePromptDialog({
               {avatarUrl && !avatarError ? (
                 <img
                   src={avatarUrl}
-                  alt="GitHub avatar preview"
+                  alt={t('settings.profile.avatarAlt')}
                   className="h-full w-full object-cover"
                   onError={() => setAvatarError(true)}
                   onLoad={() => setAvatarError(false)}
@@ -98,21 +100,21 @@ export function ProfilePromptDialog({
               )}
             </div>
             <div className="text-sm">
-              <p className="font-medium">{name.trim() || 'Your Name'}</p>
+              <p className="font-medium">{name.trim() || t('settings.profile.defaultName')}</p>
               {normalizedUsername ? (
                 <p className="text-muted-foreground text-xs">@{normalizedUsername}</p>
               ) : (
-                <p className="text-muted-foreground text-xs italic">Enter your GitHub username</p>
+                <p className="text-muted-foreground text-xs italic">{t('settings.profile.enterGithub')}</p>
               )}
             </div>
           </div>
 
           {/* Name input */}
           <div>
-            <label className="text-sm font-medium">Display Name</label>
+            <label className="text-sm font-medium">{t('settings.profile.displayName')}</label>
             <Input
               className="mt-1"
-              placeholder="e.g. Srikanth Rao"
+              placeholder={t('settings.profile.displayPlaceholder')}
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
@@ -120,10 +122,10 @@ export function ProfilePromptDialog({
 
           {/* GitHub username input */}
           <div>
-            <label className="text-sm font-medium">GitHub Username</label>
+            <label className="text-sm font-medium">{t('settings.profile.githubUsername')}</label>
             <Input
               className="mt-1"
-              placeholder="e.g. melagiri"
+              placeholder={t('settings.profile.githubPlaceholder')}
               value={githubUsername}
               onChange={(e) => {
                 setGithubUsername(e.target.value);
@@ -131,17 +133,17 @@ export function ProfilePromptDialog({
               }}
             />
             <p className="text-xs text-muted-foreground mt-1">
-              Used to load your GitHub avatar. No @ prefix needed.
+              {t('profilePrompt.githubHelp')}
             </p>
           </div>
         </div>
 
         <DialogFooter>
           <Button variant="ghost" onClick={handleSkip} type="button">
-            Skip
+            {t('profilePrompt.skip')}
           </Button>
           <Button onClick={handleSave} disabled={!canSave} type="button">
-            Save & Download
+            {t('profilePrompt.saveDownload')}
           </Button>
         </DialogFooter>
       </DialogContent>

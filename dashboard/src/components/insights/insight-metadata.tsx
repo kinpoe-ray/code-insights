@@ -15,24 +15,26 @@ import {
 } from 'lucide-react';
 import type { InsightType, InsightMetadata } from '@/lib/types';
 import type { LucideIcon } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 // --- Outcome Badge ---
 
-export const OUTCOME_CONFIG: Record<string, { label: string; className: string; icon: typeof CheckCircle2 }> = {
-  success: { label: 'Success', className: 'bg-green-500/10 text-green-600 border-green-500/20', icon: CheckCircle2 },
-  partial: { label: 'Partial', className: 'bg-yellow-500/10 text-yellow-600 border-yellow-500/20', icon: AlertCircle },
-  abandoned: { label: 'Abandoned', className: 'bg-gray-500/10 text-gray-500 border-gray-500/20', icon: XCircle },
-  blocked: { label: 'Blocked', className: 'bg-red-500/10 text-red-600 border-red-500/20', icon: Ban },
-};
+export const OUTCOME_CONFIG = {
+  success: { labelKey: 'insights.outcome.success', className: 'bg-green-500/10 text-green-600 border-green-500/20', icon: CheckCircle2 },
+  partial: { labelKey: 'insights.outcome.partial', className: 'bg-yellow-500/10 text-yellow-600 border-yellow-500/20', icon: AlertCircle },
+  abandoned: { labelKey: 'insights.outcome.abandoned', className: 'bg-gray-500/10 text-gray-500 border-gray-500/20', icon: XCircle },
+  blocked: { labelKey: 'insights.outcome.blocked', className: 'bg-red-500/10 text-red-600 border-red-500/20', icon: Ban },
+} as const;
 
 export function OutcomeBadge({ outcome }: { outcome: string }) {
-  const config = OUTCOME_CONFIG[outcome];
+  const { t } = useLocale();
+  const config = OUTCOME_CONFIG[outcome as keyof typeof OUTCOME_CONFIG];
   if (!config) return null;
   const Icon = config.icon;
   return (
     <Badge variant="outline" className={config.className}>
       <Icon className="h-3 w-3 mr-1" />
-      {config.label}
+      {t(config.labelKey)}
     </Badge>
   );
 }
@@ -40,22 +42,22 @@ export function OutcomeBadge({ outcome }: { outcome: string }) {
 // --- Field icon config ---
 
 const FIELD_CONFIG: Record<string, { icon: LucideIcon; color: string }> = {
-  'What Happened': { icon: AlertCircle, color: 'text-muted-foreground' },
-  'Why': { icon: HelpCircle, color: 'text-muted-foreground' },
-  'Takeaway': { icon: Lightbulb, color: 'text-yellow-500' },
-  'Applies When': { icon: CalendarClock, color: 'text-muted-foreground' },
-  'Situation': { icon: FileText, color: 'text-muted-foreground' },
-  'Choice': { icon: CheckCircle2, color: 'text-blue-500' },
-  'Reasoning': { icon: Scale, color: 'text-muted-foreground' },
-  'Alternatives Considered': { icon: GitFork, color: 'text-muted-foreground' },
-  'Trade-offs': { icon: ArrowRightLeft, color: 'text-muted-foreground' },
-  'Revisit When': { icon: Clock, color: 'text-muted-foreground' },
+  whatHappened: { icon: AlertCircle, color: 'text-muted-foreground' },
+  why: { icon: HelpCircle, color: 'text-muted-foreground' },
+  takeaway: { icon: Lightbulb, color: 'text-yellow-500' },
+  appliesWhen: { icon: CalendarClock, color: 'text-muted-foreground' },
+  situation: { icon: FileText, color: 'text-muted-foreground' },
+  choice: { icon: CheckCircle2, color: 'text-blue-500' },
+  reasoning: { icon: Scale, color: 'text-muted-foreground' },
+  tradeoffs: { icon: ArrowRightLeft, color: 'text-muted-foreground' },
+  revisitWhen: { icon: Clock, color: 'text-muted-foreground' },
+  evidence: { icon: FileText, color: 'text-muted-foreground' },
 };
 
 // --- Shared metadata helpers ---
 
-export function MetadataSection({ label, children, prominent }: { label: string; children: React.ReactNode; prominent?: boolean }) {
-  const fieldConfig = FIELD_CONFIG[label];
+export function MetadataSection({ field, label, children, prominent }: { field: string; label: string; children: React.ReactNode; prominent?: boolean }) {
+  const fieldConfig = FIELD_CONFIG[field];
   const FieldIcon = fieldConfig?.icon;
 
   return (
@@ -86,26 +88,27 @@ export function formatAlternatives(alternatives: InsightMetadata['alternatives']
 // --- Type-specific content components ---
 
 export function DecisionContent({ metadata }: { metadata: InsightMetadata }) {
+  const { t } = useLocale();
   const hasStructured = metadata.situation || metadata.choice || metadata.reasoning;
   if (!hasStructured) return null;
 
   return (
     <div className="space-y-2.5">
-      {metadata.situation && <MetadataSection label="Situation">{metadata.situation}</MetadataSection>}
-      {metadata.choice && <MetadataSection label="Choice" prominent>{metadata.choice}</MetadataSection>}
-      {metadata.reasoning && <MetadataSection label="Reasoning">{metadata.reasoning}</MetadataSection>}
+      {metadata.situation && <MetadataSection field="situation" label={t('insights.metadata.situation')}>{metadata.situation}</MetadataSection>}
+      {metadata.choice && <MetadataSection field="choice" label={t('insights.metadata.choice')} prominent>{metadata.choice}</MetadataSection>}
+      {metadata.reasoning && <MetadataSection field="reasoning" label={t('insights.metadata.reasoning')}>{metadata.reasoning}</MetadataSection>}
       {metadata.alternatives && metadata.alternatives.length > 0 && (
         <div className="space-y-0.5">
           <span className="flex items-center gap-1 text-xs font-medium text-muted-foreground">
             <GitFork className="h-3 w-3 text-muted-foreground" />
-            Alternatives Considered
+            {t('insights.metadata.alternatives')}
           </span>
           <div className="flex flex-wrap gap-1.5 pt-0.5">
             {metadata.alternatives.map((alt, i) => {
               const label = typeof alt === 'string' ? alt : alt.option;
               const reason = typeof alt === 'string' ? undefined : alt.rejected_because;
               return (
-                <Badge key={i} variant="outline" className="text-xs font-normal" title={reason ? `Rejected: ${reason}` : undefined}>
+                <Badge key={i} variant="outline" className="text-xs font-normal" title={reason ? t('insights.metadata.rejected', { reason }) : undefined}>
                   {label}
                   {reason && <span className="ml-1 text-muted-foreground/60">- {reason}</span>}
                 </Badge>
@@ -114,27 +117,28 @@ export function DecisionContent({ metadata }: { metadata: InsightMetadata }) {
           </div>
         </div>
       )}
-      {metadata.trade_offs && <MetadataSection label="Trade-offs">{metadata.trade_offs}</MetadataSection>}
+      {metadata.trade_offs && <MetadataSection field="tradeoffs" label={t('insights.metadata.tradeoffs')}>{metadata.trade_offs}</MetadataSection>}
       {metadata.revisit_when && metadata.revisit_when !== 'N/A' && (
-        <MetadataSection label="Revisit When">{metadata.revisit_when}</MetadataSection>
+        <MetadataSection field="revisitWhen" label={t('insights.metadata.revisitWhen')}>{metadata.revisit_when}</MetadataSection>
       )}
       {metadata.evidence && metadata.evidence.length > 0 && (
-        <MetadataSection label="Evidence">{metadata.evidence.join(', ')}</MetadataSection>
+        <MetadataSection field="evidence" label={t('insights.metadata.evidence')}>{metadata.evidence.join(', ')}</MetadataSection>
       )}
     </div>
   );
 }
 
 export function LearningContent({ metadata }: { metadata: InsightMetadata }) {
+  const { t } = useLocale();
   const hasStructured = metadata.symptom || metadata.root_cause || metadata.takeaway;
   if (!hasStructured) return null;
 
   return (
     <div className="space-y-2.5">
-      {metadata.symptom && <MetadataSection label="What Happened">{metadata.symptom}</MetadataSection>}
-      {metadata.root_cause && <MetadataSection label="Why">{metadata.root_cause}</MetadataSection>}
-      {metadata.takeaway && <MetadataSection label="Takeaway" prominent>{metadata.takeaway}</MetadataSection>}
-      {metadata.applies_when && <MetadataSection label="Applies When">{metadata.applies_when}</MetadataSection>}
+      {metadata.symptom && <MetadataSection field="whatHappened" label={t('insights.metadata.whatHappened')}>{metadata.symptom}</MetadataSection>}
+      {metadata.root_cause && <MetadataSection field="why" label={t('insights.metadata.why')}>{metadata.root_cause}</MetadataSection>}
+      {metadata.takeaway && <MetadataSection field="takeaway" label={t('insights.metadata.takeaway')} prominent>{metadata.takeaway}</MetadataSection>}
+      {metadata.applies_when && <MetadataSection field="appliesWhen" label={t('insights.metadata.appliesWhen')}>{metadata.applies_when}</MetadataSection>}
     </div>
   );
 }

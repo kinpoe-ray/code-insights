@@ -408,6 +408,15 @@ describe('buildSessionAnalysisInstructions', () => {
     const result = buildSessionAnalysisInstructions('proj', null);
     expect(result).toContain('<json>...</json>');
   });
+
+  it('adds the selected language instruction outside the cached conversation', () => {
+    const result = buildSessionAnalysisInstructions('proj', null, undefined, {
+      preference: 'zh-CN',
+      messages: [{ type: 'user', content: 'Please analyze this.' }],
+    });
+
+    expect(result).toContain('Simplified Chinese (zh-CN)');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -465,6 +474,15 @@ describe('buildPromptQualityInstructions', () => {
     const result = buildPromptQualityInstructions('proj', sessionMeta);
     expect(result).toContain('<json>...</json>');
   });
+
+  it('adds an English output instruction when selected', () => {
+    const result = buildPromptQualityInstructions('proj', sessionMeta, undefined, {
+      preference: 'en-US',
+      messages: [{ type: 'user', content: '请分析提示质量。' }],
+    });
+
+    expect(result).toContain('English (en-US)');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -490,6 +508,19 @@ describe('buildFacetOnlyInstructions', () => {
   it('ends with json tags instruction', () => {
     const result = buildFacetOnlyInstructions('proj', null);
     expect(result).toContain('<json>...</json>');
+  });
+
+  it('resolves auto from the dominant user conversation language', () => {
+    const result = buildFacetOnlyInstructions('proj', null, undefined, {
+      preference: 'auto',
+      messages: [
+        { type: 'user', content: '请分析会话。' },
+        { type: 'user', content: '请继续。' },
+        { type: 'user', content: 'Keep paths unchanged.' },
+      ],
+    });
+
+    expect(result).toContain('Simplified Chinese (zh-CN)');
   });
 });
 
