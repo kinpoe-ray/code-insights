@@ -4,6 +4,7 @@ export const sharedMessages = defineMessages(
   {
     'common.somethingWentWrong': 'Something went wrong',
     'common.unexpectedDashboardError': 'An unexpected error occurred in the dashboard.',
+    'common.loadingPage': 'Loading page…',
     'common.retry': 'Retry',
     'common.reload': 'Reload',
     'theme.toggle': 'Toggle theme',
@@ -63,6 +64,7 @@ export const sharedMessages = defineMessages(
   {
     'common.somethingWentWrong': '出现了一些问题',
     'common.unexpectedDashboardError': '仪表盘出现了意外错误。',
+    'common.loadingPage': '正在加载页面…',
     'common.retry': '重试',
     'common.reload': '重新加载',
     'theme.toggle': '切换主题',

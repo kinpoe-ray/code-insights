@@ -12,7 +12,6 @@
 //   disable_session_recording: true — no video replay
 //   ip: false — PostHog discards IP before storing
 
-import posthog from 'posthog-js';
 import type { BeforeSendFn } from 'posthog-js';
 import { dashboardFetch } from './dashboard-http';
 
@@ -20,6 +19,7 @@ const POSTHOG_API_KEY = 'phc_552ZSApq5xuagswylfdw2vx8nckm31jn6LCpTVyVn8j';
 const POSTHOG_HOST = 'https://code-insights.app/ingest';
 
 let initialized = false;
+let posthogClient: typeof import('posthog-js').default | undefined;
 
 type DashboardTelemetryEvent =
   | '$pageview'
@@ -122,9 +122,9 @@ function captureAllowed(
   event: DashboardTelemetryEvent,
   properties: Record<string, unknown> = {},
 ): void {
-  if (!initialized) return;
+  if (!initialized || !posthogClient) return;
   try {
-    posthog.capture(event, sanitizeTelemetryProperties(event, properties));
+    posthogClient.capture(event, sanitizeTelemetryProperties(event, properties));
   } catch {
     // Telemetry must never affect the product.
   }
@@ -142,7 +142,12 @@ export async function initTelemetry(): Promise<void> {
     const data = await res.json() as { enabled: boolean; distinct_id?: string };
     if (!data.enabled || !data.distinct_id?.trim()) return;
 
-    posthog.init(POSTHOG_API_KEY, {
+    // The SDK is only needed after the server has opted telemetry in. Keeping
+    // it out of the initial application chunk avoids delaying first render for
+    // installations where telemetry is disabled.
+    const { default: posthog } = await import('posthog-js');
+    posthogClient = posthog;
+    posthogClient.init(POSTHOG_API_KEY, {
       api_host: POSTHOG_HOST,
       ui_host: 'https://us.i.posthog.com',
       autocapture: false,
