@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import type Database from 'better-sqlite3';
 import type { AnalysisLanguage } from '../types.js';
 import { getDb } from '../db/client.js';
+import { redactCredentialText } from '../privacy/outbound-credential-guard.js';
 import { createAnalysisEngine } from './analysis-engine.js';
 import {
   applyGeneratedTitle,
@@ -27,14 +28,18 @@ import {
   SHARED_ANALYST_SYSTEM_PROMPT,
 } from './prompts.js';
 import { parseAnalysisResponse, parsePromptQualityResponse } from './response-parsers.js';
-import type { AnalysisRunner, RunAnalysisResult } from './runner-types.js';
+import type {
+  AnalysisRunner,
+  RunAnalysisParams,
+  RunAnalysisResult,
+} from './runner-types.js';
 
 /**
  * Bump whenever pass orchestration, prompts, parsing, or publication semantics
  * change in a way that must not be mixed inside one durable campaign.
  */
 export const LEGACY_TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v1`;
-export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v3`;
+export const TWO_PASS_PIPELINE_REVISION = `analysis-${ANALYSIS_VERSION}/two-pass-v4`;
 
 export function pipelineRevisionForAnalysisLanguage(
   analysisLanguage: AnalysisLanguage,
@@ -216,6 +221,22 @@ function normalizeUsage(usage: {
   };
 }
 
+/**
+ * The configured-provider path has its own final outbound guard through
+ * LLMClient.prepareMessages(). Non-LLM runners (notably ClaudeNativeRunner)
+ * cross this shared boundary instead, immediately before runner invocation.
+ */
+function runGuardedAnalysis(
+  runner: AnalysisRunner,
+  params: RunAnalysisParams,
+): Promise<RunAnalysisResult> {
+  return runner.runAnalysis({
+    ...params,
+    systemPrompt: redactCredentialText(params.systemPrompt),
+    userPrompt: redactCredentialText(params.userPrompt),
+  });
+}
+
 function commonStageFields(
   input: FrozenSessionAnalysisInput,
   provider: string,
@@ -298,7 +319,7 @@ export async function prepareSessionAnalysisPass(
       { preference: analysisLanguage, messages: input.messages },
     );
     const formattedMessages = formatMessagesForAnalysis(input.messages);
-    const result = await runner.runAnalysis({
+    const result = await runGuardedAnalysis(runner, {
       systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
       userPrompt: `${buildCacheableConversationBlock(formattedMessages).text}\n${instructions}`,
     });
@@ -338,7 +359,7 @@ async function runPromptQualityPass(
   const conversationBlock = buildCacheableConversationBlock(formattedMessages);
 
   if (!isAnalysisLLMClient(runner)) {
-    return runner.runAnalysis({
+    return runGuardedAnalysis(runner, {
       systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
       userPrompt: `${conversationBlock.text}\n${instructions}`,
     });

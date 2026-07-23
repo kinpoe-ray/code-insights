@@ -17,6 +17,7 @@ import {
 import { buildWhereClause, buildPeriodFilter, parseIsoWeek, formatIsoWeek, getAggregatedData } from './shared-aggregation.js';
 import type { ReflectSection } from '@code-insights/cli/types';
 import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
+import { redactCredentialValues } from '@code-insights/cli/privacy/outbound-credential-guard';
 
 const app = new Hono();
 
@@ -29,10 +30,10 @@ function parseLLMJson<T>(response: string): T | null {
   const payload = extractJsonPayload(response);
   if (!payload) return null;
   try {
-    return JSON.parse(payload) as T;
+    return redactCredentialValues(JSON.parse(payload) as T);
   } catch {
     try {
-      return JSON.parse(jsonrepair(payload)) as T;
+      return redactCredentialValues(JSON.parse(jsonrepair(payload)) as T);
     } catch {
       return null;
     }
@@ -223,6 +224,11 @@ app.post('/generate', requireLLM(), async (c) => {
         }
       }
 
+      // The final result also includes legacy facet aggregates appended after
+      // parsing the model response. Guard the complete object once at the
+      // persistence/response boundary so neither source can bypass redaction.
+      const safeResults = redactCredentialValues(results);
+
       // Only save snapshot if the request was not aborted mid-generation.
       // Saving partial results would cause stale/incomplete data to auto-load on next visit.
       if (!c.req.raw.signal.aborted) {
@@ -255,7 +261,7 @@ app.post('/generate', requireLLM(), async (c) => {
           period,
           projectKey,
           sourceScope,
-          JSON.stringify(results),
+          JSON.stringify(safeResults),
           new Date().toISOString(),
           windowStart,
           windowEnd,
@@ -266,7 +272,7 @@ app.post('/generate', requireLLM(), async (c) => {
 
       await stream.writeSSE({
         event: 'complete',
-        data: JSON.stringify({ results }),
+        data: JSON.stringify({ results: safeResults }),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';

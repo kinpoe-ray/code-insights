@@ -366,10 +366,12 @@ function collectKnownSecretSpans(
 }
 
 function collectInlineAssignmentSpans(text: string, spans: CandidateSpan[]): void {
-  const pattern = /[{\[,]\s*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*[:=]\s*/g;
+  const pattern = /[{\[,]\s*["']?([A-Za-z_][A-Za-z0-9_.-]*)["']?\s*([:=])\s*/g;
   let match: RegExpExecArray | null;
   while ((match = pattern.exec(text)) !== null) {
-    if (isCredentialKey(match[1])) {
+    const isAuthorizationAssignment = normalizedKey(match[1]) === 'authorization'
+      && match[2] === '=';
+    if (isCredentialKey(match[1]) || isAuthorizationAssignment) {
       const value = scalarSpan(text, match.index + match[0].length);
       if (value && !isPlaceholder(text.slice(value.start, value.end))) {
         addSpan(
@@ -651,7 +653,9 @@ function collectHeaderAndAssignmentSpans(text: string, spans: CandidateSpan[]): 
     const equals = withoutExport.indexOf('=');
     if (equals > 0) {
       const key = withoutExport.slice(0, equals).trim().replace(/^["']|["']$/g, '');
-      if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key) && isCredentialKey(key)) {
+      const isCredentialAssignment = isCredentialKey(key)
+        || normalizedKey(key) === 'authorization';
+      if (/^[A-Za-z_][A-Za-z0-9_.-]*$/.test(key) && isCredentialAssignment) {
         const value = scalarSpan(line, exportOffset + equals + 1);
         if (value && !isPlaceholder(line.slice(value.start, value.end))) {
           addSpan(
@@ -795,6 +799,46 @@ function redactText(text: string, knownSecrets: readonly string[]): RedactedText
   }
   pieces.push(text.slice(cursor));
   return { text: pieces.join(''), counts };
+}
+
+/**
+ * Redact credential-shaped values from one text value without tying the call to
+ * a transport provider. Analysis prompt construction and parsed model output
+ * use this shared primitive before either value reaches a runner or durable
+ * derived-data store.
+ */
+export function redactCredentialText(
+  text: string,
+  knownSecrets: readonly string[] = [],
+): string {
+  return redactText(text, knownSecrets).text;
+}
+
+/**
+ * Clone JSON-compatible data while redacting every string value. This is used
+ * for parsed model output and non-rollback derived snapshots; callers retain
+ * their original value and receive a safe derived copy.
+ */
+export function redactCredentialValues<T>(
+  value: T,
+  knownSecrets: readonly string[] = [],
+): T {
+  const visit = (candidate: unknown): unknown => {
+    if (typeof candidate === 'string') {
+      return redactCredentialText(candidate, knownSecrets);
+    }
+    if (Array.isArray(candidate)) {
+      return candidate.map(visit);
+    }
+    if (candidate !== null && typeof candidate === 'object') {
+      return Object.fromEntries(
+        Object.entries(candidate).map(([key, entry]) => [key, visit(entry)]),
+      );
+    }
+    return candidate;
+  };
+
+  return visit(value) as T;
 }
 
 function appendReport(
