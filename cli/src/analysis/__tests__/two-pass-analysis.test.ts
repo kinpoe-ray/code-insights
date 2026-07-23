@@ -88,6 +88,11 @@ const pqResponse: PromptQualityResponse = {
   },
 };
 
+/** Keep credential-shaped fixtures out of static secret-scanner signatures. */
+function runtimeFixture(...parts: string[]): string {
+  return parts.join('');
+}
+
 beforeEach(() => {
   mockDb = new Database(':memory:');
   runMigrations(mockDb);
@@ -108,13 +113,127 @@ function databaseSnapshot(db: Database.Database = mockDb): unknown {
 }
 
 describe('two-pass preparation and publication', () => {
+  it('redacts historical session credentials at the shared prompt-to-runner seam', async () => {
+    const {
+      calculateSessionInputRevision,
+      loadFrozenSessionInput,
+      preparePromptQualityPass,
+      prepareSessionPass,
+    } = await import('../two-pass-analysis.js');
+    const secrets = [
+      runtimeFixture('sk', '-abcdefghijklmnopqrstuvwxyz012345'),
+      'bearer-fixture-value-123456',
+      'fixture-api-key-value-123456',
+      'fixture-authorization-value-123456',
+      'fixture-access-token-value-123456',
+      'fixture-refresh-token-value-123456',
+    ];
+    const transcript = [
+      `provider_token=${secrets[0]}`,
+      `Authorization: Bearer ${secrets[1]}`,
+      `api_key=${secrets[2]}`,
+      `authorization=${secrets[3]}`,
+      `access_token=${secrets[4]}`,
+      `refresh_token=${secrets[5]}`,
+    ].join('\n');
+    mockDb.prepare(`UPDATE messages SET content = ? WHERE id = 'm1'`).run(transcript);
+
+    const frozen = loadFrozenSessionInput('sess1');
+    const originalRevision = frozen.inputRevision;
+    const runner = {
+      name: 'native-test',
+      runAnalysis: vi.fn()
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(sessionResponse), durationMs: 10,
+          inputTokens: 11, outputTokens: 12, provider: 'native', model: 'model-a',
+        })
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(pqResponse), durationMs: 13,
+          inputTokens: 14, outputTokens: 15, provider: 'native', model: 'model-a',
+        }),
+    };
+
+    const sessionStage = await prepareSessionPass(frozen, runner);
+    await preparePromptQualityPass(frozen, runner, sessionStage);
+
+    expect(runner.runAnalysis).toHaveBeenCalledTimes(2);
+    for (const [request] of runner.runAnalysis.mock.calls) {
+      for (const secret of secrets) {
+        expect(request.userPrompt).not.toContain(secret);
+      }
+      expect(request.userPrompt).toContain('[REDACTED:');
+    }
+    expect(frozen.messages[0].content).toBe(transcript);
+    expect(mockDb.prepare(`SELECT content FROM messages WHERE id = 'm1'`).get())
+      .toEqual({ content: transcript });
+    expect(calculateSessionInputRevision(frozen.session, frozen.messages)).toBe(originalRevision);
+  });
+
+  it('does not stage or publish credential-shaped model output', async () => {
+    const {
+      loadFrozenSessionInput,
+      preparePromptQualityPass,
+      prepareSessionPass,
+      publishPreparedTwoPass,
+    } = await import('../two-pass-analysis.js');
+    const secret = runtimeFixture('sk', '-model-output-abcdefghijklmnopqrstuvwxyz');
+    const credentialResponse: AnalysisResponse = {
+      ...sessionResponse,
+      summary: {
+        ...sessionResponse.summary,
+        title: `Credential ${secret}`,
+        content: `Authorization: Bearer ${secret}`,
+        bullets: [`api_key=${secret}`],
+      },
+      facets: {
+        ...sessionResponse.facets!,
+        friction_points: [{
+          category: 'stale-assumptions',
+          description: `refresh_token=${secret}`,
+          severity: 'medium',
+          resolution: 'resolved',
+        }],
+      },
+    };
+    const credentialPqResponse: PromptQualityResponse = {
+      ...pqResponse,
+      assessment: `access_token=${secret}`,
+    };
+    const frozen = loadFrozenSessionInput('sess1');
+    const runner = {
+      name: 'native-test',
+      runAnalysis: vi.fn()
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(credentialResponse), durationMs: 10,
+          inputTokens: 11, outputTokens: 12, provider: 'native', model: 'model-a',
+        })
+        .mockResolvedValueOnce({
+          rawJson: JSON.stringify(credentialPqResponse), durationMs: 13,
+          inputTokens: 14, outputTokens: 15, provider: 'native', model: 'model-a',
+        }),
+    };
+
+    const sessionStage = await prepareSessionPass(frozen, runner);
+    const promptQualityStage = await preparePromptQualityPass(frozen, runner, sessionStage);
+    publishPreparedTwoPass(frozen, sessionStage, promptQualityStage);
+
+    const durableData = {
+      stages: [sessionStage, promptQualityStage],
+      insights: mockDb.prepare(`SELECT * FROM insights WHERE session_id = 'sess1'`).all(),
+      facets: mockDb.prepare(`SELECT * FROM session_facets WHERE session_id = 'sess1'`).all(),
+      title: mockDb.prepare(`SELECT generated_title FROM sessions WHERE id = 'sess1'`).get(),
+    };
+    expect(JSON.stringify(durableData)).not.toContain(secret);
+    expect(JSON.stringify(durableData)).toContain('[REDACTED:');
+  });
+
   it('binds the pipeline revision to the visible analysis artifact version', async () => {
     const {
       TWO_PASS_PIPELINE_REVISION,
       pipelineRevisionForAnalysisLanguage,
     } = await import('../two-pass-analysis.js');
     const { ANALYSIS_VERSION } = await import('../analysis-db.js');
-    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v3`);
+    expect(TWO_PASS_PIPELINE_REVISION).toBe(`analysis-${ANALYSIS_VERSION}/two-pass-v4`);
     expect(pipelineRevisionForAnalysisLanguage('auto')).toBe(TWO_PASS_PIPELINE_REVISION);
     expect(pipelineRevisionForAnalysisLanguage('zh-CN'))
       .toBe(`${TWO_PASS_PIPELINE_REVISION}/lang-zh-CN`);
@@ -159,13 +278,13 @@ describe('two-pass preparation and publication', () => {
       kind: 'session', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: sessionResponse,
       analysisLanguage: 'zh-CN',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
     });
     expect(pqStage).toMatchObject({
       kind: 'prompt_quality', sessionId: 'sess1', sessionMessageCount: 1,
       provider: 'native', model: 'model-a', response: pqResponse,
       analysisLanguage: 'zh-CN',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
     });
     expect(sessionStage.inputRevision).toBe(pqStage.inputRevision);
     expect(runner.runAnalysis).toHaveBeenCalledTimes(2);
@@ -293,7 +412,7 @@ describe('two-pass preparation and publication', () => {
       provider: 'new-provider',
       model: 'new-model',
       analysisLanguage: 'zh-CN' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
       usage,
       response: sessionResponse,
     };
@@ -322,13 +441,13 @@ describe('two-pass preparation and publication', () => {
       {
         analysis_type: 'prompt_quality', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
       {
         analysis_type: 'session', provider: 'new-provider',
         model: 'new-model', input_revision: frozen.inputRevision,
-        pipeline_revision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+        pipeline_revision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
         analyzed_at: expect.not.stringContaining('2000-01-01'),
       },
     ]);
@@ -404,7 +523,7 @@ describe('two-pass preparation and publication', () => {
       provider: 'new-provider',
       model: 'new-model',
       analysisLanguage: 'zh-CN' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
       usage,
       response,
     };
@@ -442,14 +561,14 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'zh-CN' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
     };
     const pqStage = {
       ...sessionStage,
       kind: 'prompt_quality' as const,
       response: pqResponse,
       analysisLanguage: 'en-US' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-en-US',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-en-US',
     };
 
     expect(() => publishPreparedTwoPass(frozen, sessionStage, pqStage))
@@ -497,7 +616,7 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'auto' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -536,7 +655,7 @@ describe('two-pass preparation and publication', () => {
         sessionMessageCount: frozen.session.message_count,
         provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
         analysisLanguage: 'auto' as const,
-        pipelineRevision: 'analysis-3.0.0/two-pass-v3',
+        pipelineRevision: 'analysis-3.0.0/two-pass-v4',
       };
       const pqStage = {
         ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,
@@ -569,7 +688,7 @@ describe('two-pass preparation and publication', () => {
       sessionMessageCount: frozen.session.message_count,
       provider: 'new-provider', model: 'new-model', usage, response: sessionResponse,
       analysisLanguage: 'auto' as const,
-      pipelineRevision: 'analysis-3.0.0/two-pass-v3',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v4',
     };
     const pqStage = {
       ...sessionStage, kind: 'prompt_quality' as const, response: pqResponse,

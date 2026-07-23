@@ -9,6 +9,7 @@ import {
 } from './prompt-constants.js';
 import { normalizeFrictionCategory } from './friction-normalize.js';
 import { normalizePatternCategory } from './pattern-normalize.js';
+import { redactCredentialValues } from '../privacy/outbound-credential-guard.js';
 
 type AnalysisFacets = NonNullable<AnalysisResponse['facets']>;
 type FrictionPoint = AnalysisFacets['friction_points'][number];
@@ -131,11 +132,11 @@ export function validateAnalysisFacets(value: unknown): AnalysisResponse['facets
     .map(normalizeEffectivePattern)
     .filter((pattern): pattern is EffectivePattern => pattern !== undefined);
 
-  return {
+  return redactCredentialValues({
     ...facets,
     friction_points: frictionPoints,
     effective_patterns: effectivePatterns,
-  } as unknown as AnalysisResponse['facets'];
+  } as unknown as NonNullable<AnalysisResponse['facets']>);
 }
 
 /**
@@ -195,6 +196,11 @@ export function parseAnalysisResponse(response: string): ParseResult<AnalysisRes
       delete parsed.facets;
     }
   }
+
+  // Treat model output as another untrusted boundary. A provider must not be
+  // able to reintroduce credential-shaped strings into durable insights or
+  // facets, even when it echoes or hallucinates sensitive-looking content.
+  parsed = redactCredentialValues(parsed);
 
   // Observability: two-tier tooling-limitation monitor.
   // Tier 1: _reasoning contains misclassification signals NOT in a negation context → likely wrong category.
@@ -322,5 +328,5 @@ export function parsePromptQualityResponse(response: string): ParseResult<Prompt
     // Finding has unexpected type value — expected deficit or strength
   }
 
-  return { success: true, data: parsed };
+  return { success: true, data: redactCredentialValues(parsed) };
 }

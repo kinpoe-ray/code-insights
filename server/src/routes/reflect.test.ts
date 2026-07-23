@@ -139,6 +139,11 @@ function parseSSEEvents(text: string): Array<{ event: string; data: string }> {
   return events;
 }
 
+/** Keep credential-shaped fixtures out of static secret-scanner signatures. */
+function runtimeFixture(...parts: string[]): string {
+  return parts.join('');
+}
+
 // ──────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────
@@ -831,6 +836,71 @@ describe('Reflect routes', () => {
       expect(snapshotBody.snapshot).not.toBeNull();
       expect(snapshotBody.snapshot.period).toBe('all');
       expect(snapshotBody.snapshot.results).toHaveProperty('friction-wins');
+    });
+
+    it('redacts credential-shaped synthesis output before snapshot persistence', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      const secret = runtimeFixture('sk', '-reflect-abcdefghijklmnopqrstuvwxyz');
+      mockChat.mockResolvedValue({
+        content: `<json>${JSON.stringify({
+          narrative: `Authorization: Bearer ${secret}`,
+          topFriction: [{ description: `api_key=${secret}` }],
+          topWins: [],
+        })}</json>`,
+      });
+      seedMultipleSessions(10);
+
+      const app = createApp();
+      const generateRes = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      const generateText = await generateRes.text();
+      const snapshotRes = await app.request('/api/reflect/snapshot?period=all');
+      const snapshotText = JSON.stringify(await snapshotRes.json());
+
+      expect(generateText).not.toContain(secret);
+      expect(snapshotText).not.toContain(secret);
+      expect(`${generateText}\n${snapshotText}`).toContain('[REDACTED:');
+    });
+
+    it('redacts credential-shaped legacy facet text at the final snapshot and SSE boundary', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      const secret = runtimeFixture('sk', '-legacy-facet-abcdefghijklmnopqrstuvwxyz');
+      mockChat.mockResolvedValue({
+        content: '<json>{"narrative":"safe synthesis","topFriction":[],"topWins":[]}</json>',
+      });
+      for (let index = 0; index < 10; index++) {
+        seedSessionWithFacets(`sess-legacy-secret-${index}`, {
+          frictionPoints: [{
+            category: 'wrong-approach',
+            description: `Authorization: Bearer ${secret}`,
+            severity: 'medium',
+            attribution: 'user-actionable',
+          }],
+          effectivePatterns: [{
+            category: 'structured-planning',
+            description: `api_key=${secret}`,
+            confidence: 80,
+            driver: 'user-driven',
+          }],
+        });
+      }
+
+      const app = createApp();
+      const generateRes = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      const generateText = await generateRes.text();
+      const snapshotRes = await app.request('/api/reflect/snapshot?period=all');
+      const snapshotText = JSON.stringify(await snapshotRes.json());
+
+      expect(generateText).not.toContain(secret);
+      expect(snapshotText).not.toContain(secret);
+      expect(`${generateText}\n${snapshotText}`).toContain('[REDACTED:');
     });
 
     it('stores generated snapshots independently for each source scope', async () => {

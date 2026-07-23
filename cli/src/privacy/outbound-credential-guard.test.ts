@@ -310,12 +310,13 @@ describe('guardOutboundCredentials credential families', () => {
       "client_secret: 'yaml-secret-value-123456'",
       'AWS_SECRET_ACCESS_KEY=aws-secret-value-123456',
       'PRIVATE_TOKEN=generic-token-value-123456',
+      'authorization=authorization-assignment-value-123456',
       '{"safe":"visible","apiKey":"inline-json-secret-value-123456"}',
       'flow: { client_secret: inline-yaml-secret-value-123456 }',
     ].join('\n'));
 
     expect(result.content).not.toMatch(
-      /env-secret|shell-secret|json-secret|yaml-secret|aws-secret|generic-token|inline-json-secret|inline-yaml-secret/,
+      /env-secret|shell-secret|json-secret|yaml-secret|aws-secret|generic-token|authorization-assignment|inline-json-secret|inline-yaml-secret/,
     );
     expect(result.content).toContain(
       '{"safe":"visible","apiKey":"[REDACTED:credential-assignment]"}',
@@ -323,7 +324,7 @@ describe('guardOutboundCredentials credential families', () => {
     expect(result.content).toContain(
       'flow: { client_secret: [REDACTED:credential-assignment] }',
     );
-    expect(result.report[0]).toMatchObject({ category: 'credential-assignment', count: 8 });
+    expect(result.report[0]).toMatchObject({ category: 'credential-assignment', count: 9 });
   });
 
   it('redacts PEM, OpenSSH, and PGP private material as whole blocks', () => {
