@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronUp, CheckCircle2, AlertTriangle, Sparkles, User } from 'lucide-react';
 import { SESSION_CHARACTER_COLORS } from '@/lib/constants/colors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface WorkingStyleHighlightsProps {
   narrative?: string;
@@ -17,10 +18,6 @@ interface WorkingStyleHighlightsProps {
   topPattern?: { label: string; frequency: number };
 }
 
-function formatCharacterName(raw: string): string {
-  return raw.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-}
-
 export function WorkingStyleHighlights({
   narrative,
   totalSessions,
@@ -29,7 +26,19 @@ export function WorkingStyleHighlights({
   topFriction,
   topPattern,
 }: WorkingStyleHighlightsProps) {
+  const { t, formatNumber } = useLocale();
   const [showNarrative, setShowNarrative] = useState(false);
+
+  const characterLabel = (raw: string): string => {
+    if (raw === 'deep_focus') return t('patterns.character.deep_focus');
+    if (raw === 'bug_hunt') return t('patterns.character.bug_hunt');
+    if (raw === 'feature_build') return t('patterns.character.feature_build');
+    if (raw === 'exploration') return t('patterns.character.exploration');
+    if (raw === 'refactor') return t('patterns.character.refactor');
+    if (raw === 'learning') return t('patterns.character.learning');
+    if (raw === 'quick_task') return t('patterns.character.quick_task');
+    return raw;
+  };
 
   // Build pill data from available props
   const pills: Array<{
@@ -42,8 +51,8 @@ export function WorkingStyleHighlights({
   if (totalSessions > 0) {
     pills.push({
       icon: <CheckCircle2 className="h-4 w-4 text-emerald-500" />,
-      value: `${successCount}/${totalSessions}`,
-      sublabel: 'high-quality',
+      value: `${formatNumber(successCount)}/${formatNumber(totalSessions)}`,
+      sublabel: t('patterns.highQuality'),
       className: 'bg-emerald-500/10 border-emerald-500/20',
     });
   }
@@ -51,7 +60,7 @@ export function WorkingStyleHighlights({
   if (topFriction) {
     pills.push({
       icon: <AlertTriangle className="h-4 w-4 text-red-500" />,
-      value: `${topFriction.count}x`,
+      value: t('patterns.times', { count: formatNumber(topFriction.count) }),
       sublabel: topFriction.category,
       className: 'bg-red-500/10 border-red-500/20',
     });
@@ -60,7 +69,7 @@ export function WorkingStyleHighlights({
   if (topPattern) {
     pills.push({
       icon: <Sparkles className="h-4 w-4 text-blue-500" />,
-      value: `${topPattern.frequency}x`,
+      value: t('patterns.times', { count: formatNumber(topPattern.frequency) }),
       sublabel: topPattern.label,
       className: 'bg-blue-500/10 border-blue-500/20',
     });
@@ -70,8 +79,8 @@ export function WorkingStyleHighlights({
     const charColorClass = SESSION_CHARACTER_COLORS[topCharacter.name] ?? 'bg-muted text-muted-foreground border-border';
     pills.push({
       icon: <User className="h-4 w-4" />,
-      value: `${topCharacter.percentage}%`,
-      sublabel: formatCharacterName(topCharacter.name),
+      value: `${formatNumber(topCharacter.percentage)}%`,
+      sublabel: characterLabel(topCharacter.name),
       // Use the character color classes but override bg/border via className merge
       className: charColorClass,
     });
@@ -108,9 +117,9 @@ export function WorkingStyleHighlights({
             onClick={() => setShowNarrative(prev => !prev)}
           >
             {showNarrative ? (
-              <><ChevronUp className="h-3.5 w-3.5" />Hide full analysis</>
+              <><ChevronUp className="h-3.5 w-3.5" />{t('patterns.hideFullAnalysis')}</>
             ) : (
-              <><ChevronDown className="h-3.5 w-3.5" />Show full analysis</>
+              <><ChevronDown className="h-3.5 w-3.5" />{t('patterns.showFullAnalysis')}</>
             )}
           </button>
 

@@ -1,5 +1,9 @@
 # Reflect Feature Enhancement — Design Plan
 
+> **Historical plan:** Reflect is now shipped and Schema V11 keys snapshots by
+> `(period, project_id, source_scope)`. Any older table shape below is design
+> history, not the current database contract.
+
 > **Status:** Feature 1 Complete (PRs #125, #127, #129, #132, #136, #138) · Feature 2 (Progress Tracking) Deferred
 > **Date:** 2026-03-09
 > **Scope:** Server (prompts, aggregation, normalization), Dashboard (PatternsPage, Insights), CLI (types)

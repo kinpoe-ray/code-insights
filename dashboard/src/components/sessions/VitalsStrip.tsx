@@ -1,7 +1,7 @@
-import { format } from 'date-fns';
 import { formatDuration, formatModelName, formatTokenCount } from '@/lib/utils';
 import { parseJsonField } from '@/lib/types';
 import type { Session } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface VitalsStripProps {
   session: Session;
@@ -12,16 +12,8 @@ interface VitalsStripProps {
  * Same AM/PM: "7:17 – 8:12 AM"
  * Different AM/PM: "7:17 AM – 8:12 PM"
  */
-function formatTimeRange(start: Date, end: Date): string {
-  const startPeriod = format(start, 'a');
-  const endPeriod = format(end, 'a');
-  if (startPeriod === endPeriod) {
-    return `${format(start, 'h:mm')} – ${format(end, 'h:mm a')}`;
-  }
-  return `${format(start, 'h:mm a')} – ${format(end, 'h:mm a')}`;
-}
-
 export function VitalsStrip({ session }: VitalsStripProps) {
+  const { t, formatDate } = useLocale();
   const startedAt = new Date(session.started_at);
   const endedAt = new Date(session.ended_at);
   const modelsUsed = parseJsonField<string[]>(session.models_used, []);
@@ -30,13 +22,13 @@ export function VitalsStrip({ session }: VitalsStripProps) {
   const compactCount = session.compact_count ?? 0;
   const autoCompactCount = session.auto_compact_count ?? 0;
   const messageSublabelParts: string[] = [
-    `${session.user_message_count} user \u00B7 ${session.assistant_message_count} asst`,
+    `${t('sessions.vitals.userMessages', { count: session.user_message_count })} \u00B7 ${t('sessions.vitals.assistantMessages', { count: session.assistant_message_count })}`,
   ];
   if (compactCount > 0) {
-    messageSublabelParts.push(`${compactCount} compact${compactCount > 1 ? 's' : ''}`);
+    messageSublabelParts.push(t('sessions.vitals.compacts', { count: compactCount }));
   }
   if (autoCompactCount > 0) {
-    messageSublabelParts.push(`${autoCompactCount} ctx overflow${autoCompactCount > 1 ? 's' : ''}`);
+    messageSublabelParts.push(t('sessions.vitals.contextOverflows', { count: autoCompactCount }));
   }
   const messageSublabel = messageSublabelParts.join(' \u00B7 ');
 
@@ -51,33 +43,35 @@ export function VitalsStrip({ session }: VitalsStripProps) {
 
   // Build token sublabel: "359 in · 25.9M cch · 51.2K out"
   const tokenParts: string[] = [];
-  if (inputTokens > 0) tokenParts.push(`${formatTokenCount(inputTokens)} in`);
+  if (inputTokens > 0) tokenParts.push(t('sessions.vitals.inputTokens', { count: formatTokenCount(inputTokens) }));
   const cacheTotal = cacheCreation + cacheRead;
-  if (cacheTotal > 0) tokenParts.push(`${formatTokenCount(cacheTotal)} cch`);
-  if (outputTokens > 0) tokenParts.push(`${formatTokenCount(outputTokens)} out`);
+  if (cacheTotal > 0) tokenParts.push(t('sessions.vitals.cacheTokens', { count: formatTokenCount(cacheTotal) }));
+  if (outputTokens > 0) tokenParts.push(t('sessions.vitals.outputTokens', { count: formatTokenCount(outputTokens) }));
   const tokenSublabel = tokenParts.join(' \u00B7 ');
+  const timeOptions: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' };
+  const timeRange = `${formatDate(startedAt, timeOptions)} – ${formatDate(endedAt, timeOptions)}`;
 
   return (
     <div className="space-y-1.5">
       {/* Primary stats grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         <StatCell
-          label="Duration"
+          label={t('sessions.vitals.duration')}
           value={formatDuration(startedAt, endedAt)}
-          sublabel={formatTimeRange(startedAt, endedAt)}
+          sublabel={timeRange}
         />
         <StatCell
-          label="Messages"
+          label={t('sessions.vitals.messages')}
           value={String(session.message_count)}
           sublabel={messageSublabel}
         />
         <StatCell
-          label="Tokens"
+          label={t('sessions.vitals.tokens')}
           value={hasTokens ? formatTokenCount(totalTokens) : '--'}
           sublabel={hasTokens ? tokenSublabel : undefined}
         />
         <StatCell
-          label="Cost"
+          label={t('sessions.vitals.cost')}
           value={
             session.estimated_cost_usd != null
               ? `$${session.estimated_cost_usd.toFixed(2)}`

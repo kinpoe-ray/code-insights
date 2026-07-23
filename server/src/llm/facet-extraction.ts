@@ -7,14 +7,16 @@ import { calculateAnalysisCost } from './analysis-pricing.js';
 import { saveAnalysisUsage } from './analysis-usage-db.js';
 import type { SQLiteMessageRow, AnalysisResponse } from './prompt-types.js';
 import { formatMessagesForAnalysis } from './message-format.js';
-import { extractJsonPayload } from './response-parsers.js';
+import { extractJsonPayload, validateAnalysisFacets } from './response-parsers.js';
 import { SHARED_ANALYST_SYSTEM_PROMPT, buildCacheableConversationBlock, buildFacetOnlyInstructions } from './prompts.js';
+import { prepareBoundedConversationRequest } from './types.js';
 import {
   ANALYSIS_VERSION,
   saveFacetsToDb,
   type SessionData,
 } from './analysis-db.js';
-import { getMaxInputTokens, buildSessionMeta } from './analysis-internal.js';
+import { buildSessionMeta } from './analysis-internal.js';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 
 /**
  * Extract facets only for a session that already has insights (backfill).
@@ -37,40 +39,51 @@ export async function extractFacetsOnly(
   try {
     const startTime = Date.now();
     const client = createLLMClient();
-    const maxInputTokens = getMaxInputTokens(client.provider);
-    let formattedMessages = formatMessagesForAnalysis(messages);
-
-    // Truncate if conversation exceeds token limits (same pattern as PQ analysis)
-    const estimatedTokens = client.estimateTokens(formattedMessages);
-    if (estimatedTokens > maxInputTokens) {
-      const targetLength = Math.floor((maxInputTokens / estimatedTokens) * formattedMessages.length * 0.8);
-      formattedMessages = formattedMessages.slice(0, targetLength) + '\n\n[... conversation truncated for analysis ...]';
-    }
+    const formattedMessages = formatMessagesForAnalysis(messages);
 
     const sessionMeta = buildSessionMeta(session);
-    const response = await client.chat([
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
+    const preparedRequest = prepareBoundedConversationRequest(client, [
       { role: 'system', content: SHARED_ANALYST_SYSTEM_PROMPT },
       { role: 'user', content: [
         buildCacheableConversationBlock(formattedMessages),
-        { type: 'text' as const, text: buildFacetOnlyInstructions(session.project_name, session.summary, sessionMeta) },
+        { type: 'text' as const, text: buildFacetOnlyInstructions(
+          session.project_name,
+          session.summary,
+          sessionMeta,
+          { preference: analysisLanguage, messages },
+        ) },
       ] },
-    ], { signal: options?.signal });
+    ]);
+    if (!preparedRequest) {
+      return {
+        success: false,
+        error: 'Facet extraction request exceeds the provider context window.',
+      };
+    }
+    const response = await client.chat(preparedRequest.messages, { signal: options?.signal });
 
     const jsonPayload = extractJsonPayload(response.content);
     if (!jsonPayload) {
-      return { success: false, error: 'No JSON in facet response.' };
+      return { success: false, error: 'Facet extraction returned an invalid response.' };
     }
 
-    let facets: AnalysisResponse['facets'];
+    let parsedFacets: unknown;
     try {
-      facets = JSON.parse(jsonPayload);
+      parsedFacets = JSON.parse(jsonPayload);
     } catch {
-      facets = JSON.parse(jsonrepair(jsonPayload));
+      try {
+        parsedFacets = JSON.parse(jsonrepair(jsonPayload));
+      } catch {
+        return { success: false, error: 'Facet extraction returned an invalid response.' };
+      }
     }
+    const facets: AnalysisResponse['facets'] | undefined = validateAnalysisFacets(parsedFacets);
 
-    if (facets) {
-      saveFacetsToDb(session.id, facets, ANALYSIS_VERSION);
+    if (!facets) {
+      return { success: false, error: 'Facet extraction returned an invalid response.' };
     }
+    saveFacetsToDb(session.id, facets, ANALYSIS_VERSION);
 
     // Record analysis cost to analysis_usage table (V7).
     const llmConfig = loadLLMConfig();
@@ -103,7 +116,7 @@ export async function extractFacetsOnly(
     }
     return {
       success: false,
-      error: error instanceof Error ? error.message : 'Facet extraction failed',
+      error: 'Facet extraction provider request failed.',
     };
   }
 }

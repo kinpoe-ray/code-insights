@@ -4,7 +4,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
-import { formatDurationMinutes, formatModelName, formatTokenCount } from '@/lib/utils';
+import { formatModelName } from '@/lib/utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 import {
   MessageSquare,
   Wrench,
@@ -34,13 +35,6 @@ interface StatsHeroProps {
   };
 }
 
-function formatCompact(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 10_000) return `${(n / 1_000).toFixed(1)}k`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
-  return n.toString();
-}
-
 export function StatsHero({
   totalSessions,
   totalMessages,
@@ -53,7 +47,19 @@ export function StatsHero({
   topModel,
   tokenBreakdown,
 }: StatsHeroProps) {
+  const { t, formatNumber } = useLocale();
+  const formatCompact = (value: number) => formatNumber(value, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  });
   const showUsage = (totalTokens ?? 0) > 0 || (totalCost ?? 0) > 0;
+  const hours = Math.floor(totalDurationMin / 60);
+  const minutes = totalDurationMin % 60;
+  const duration = totalDurationMin < 60
+    ? t('dashboard.duration.minutes', { minutes: totalDurationMin })
+    : minutes > 0
+      ? t('dashboard.duration.hoursMinutes', { hours, minutes })
+      : t('dashboard.duration.hours', { hours });
 
   const coreCell = (
     key: string,
@@ -77,18 +83,18 @@ export function StatsHero({
     <Card>
       <CardContent className="p-0">
         <div className="flex flex-wrap">
-          {coreCell('sessions', 'Sessions', formatCompact(totalSessions), Zap)}
-          {coreCell('messages', 'Messages', `${!isExact ? '~' : ''}${formatCompact(totalMessages)}`, MessageSquare)}
-          {coreCell('toolCalls', 'Tool Calls', `${!isExact ? '~' : ''}${formatCompact(totalToolCalls)}`, Wrench)}
-          {coreCell('duration', 'Coding Time', `${!isExact ? '~' : ''}${formatDurationMinutes(totalDurationMin)}`, Clock)}
+          {coreCell('sessions', t('dashboard.stats.sessions'), formatCompact(totalSessions), Zap)}
+          {coreCell('messages', t('dashboard.stats.messages'), `${!isExact ? '~' : ''}${formatCompact(totalMessages)}`, MessageSquare)}
+          {coreCell('toolCalls', t('dashboard.stats.toolCalls'), `${!isExact ? '~' : ''}${formatCompact(totalToolCalls)}`, Wrench)}
+          {coreCell('duration', t('dashboard.stats.codingTime'), `${!isExact ? '~' : ''}${duration}`, Clock)}
           <div
             className={`flex-1 min-w-[100px] px-3 py-2 ${showUsage ? 'border-r border-border' : ''}`}
           >
             <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
               <FolderOpen className="h-3 w-3" />
-              <span className="text-[11px] font-medium uppercase tracking-wide">Projects</span>
+              <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.projects')}</span>
             </div>
-            <div className="text-base font-bold text-primary">{totalProjects}</div>
+            <div className="text-base font-bold text-primary">{formatCompact(totalProjects)}</div>
           </div>
 
           {showUsage && (
@@ -96,28 +102,28 @@ export function StatsHero({
               <div className="flex-1 min-w-[100px] px-3 py-2 border-r border-border last:border-r-0">
                 <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
                   <Coins className="h-3 w-3" />
-                  <span className="text-[11px] font-medium uppercase tracking-wide">Tokens</span>
+                  <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.tokens')}</span>
                 </div>
                 {tokenBreakdown ? (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <div
                         className="text-base font-bold text-primary cursor-default"
-                        aria-label="Token breakdown"
+                        aria-label={t('dashboard.stats.tokenBreakdown')}
                       >
-                        {formatTokenCount(totalTokens ?? 0)}
+                        {formatCompact(totalTokens ?? 0)}
                       </div>
                     </TooltipTrigger>
                     <TooltipContent side="bottom" className="text-xs space-y-0.5">
-                      <p>Input: {formatTokenCount(tokenBreakdown.inputTokens)}</p>
-                      <p>Output: {formatTokenCount(tokenBreakdown.outputTokens)}</p>
-                      <p>Cache Write: {formatTokenCount(tokenBreakdown.cacheCreationTokens)}</p>
-                      <p>Cache Read: {formatTokenCount(tokenBreakdown.cacheReadTokens)}</p>
+                      <p>{t('dashboard.stats.tokenInput')}: {formatCompact(tokenBreakdown.inputTokens)}</p>
+                      <p>{t('dashboard.stats.tokenOutput')}: {formatCompact(tokenBreakdown.outputTokens)}</p>
+                      <p>{t('dashboard.stats.cacheWrite')}: {formatCompact(tokenBreakdown.cacheCreationTokens)}</p>
+                      <p>{t('dashboard.stats.cacheRead')}: {formatCompact(tokenBreakdown.cacheReadTokens)}</p>
                     </TooltipContent>
                   </Tooltip>
                 ) : (
                   <div className="text-base font-bold text-primary">
-                    {formatTokenCount(totalTokens ?? 0)}
+                    {formatCompact(totalTokens ?? 0)}
                   </div>
                 )}
               </div>
@@ -125,7 +131,7 @@ export function StatsHero({
               <div className="flex-1 min-w-[100px] px-3 py-2 border-r border-border last:border-r-0">
                 <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
                   <DollarSign className="h-3 w-3" />
-                  <span className="text-[11px] font-medium uppercase tracking-wide">Cost</span>
+                  <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.cost')}</span>
                 </div>
                 <div className="text-base font-bold text-primary">
                   ${(totalCost ?? 0).toFixed(2)}
@@ -136,7 +142,7 @@ export function StatsHero({
                 <div className="flex-1 min-w-[100px] px-3 py-2 last:border-r-0">
                   <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
                     <Cpu className="h-3 w-3" />
-                    <span className="text-[11px] font-medium uppercase tracking-wide">Top Model</span>
+                    <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.topModel')}</span>
                   </div>
                   <div className="text-base font-bold text-primary">
                     {formatModelName(topModel)}

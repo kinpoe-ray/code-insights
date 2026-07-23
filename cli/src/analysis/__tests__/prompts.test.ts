@@ -7,6 +7,7 @@ import {
 import {
   parseAnalysisResponse,
   parsePromptQualityResponse,
+  validateAnalysisFacets,
 } from '../response-parsers.js';
 import {
   SHARED_ANALYST_SYSTEM_PROMPT,
@@ -33,6 +34,19 @@ function makeMessage(overrides: Partial<SQLiteMessageRow> = {}): SQLiteMessageRo
     usage: null,
     timestamp: '2025-06-15T10:00:00Z',
     parent_id: null,
+    ...overrides,
+  };
+}
+
+function makeFacets(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    outcome_satisfaction: 'high',
+    workflow_pattern: 'direct-execution',
+    had_course_correction: false,
+    course_correction_reason: null,
+    iteration_count: 0,
+    friction_points: [],
+    effective_patterns: [],
     ...overrides,
   };
 }
@@ -394,6 +408,15 @@ describe('buildSessionAnalysisInstructions', () => {
     const result = buildSessionAnalysisInstructions('proj', null);
     expect(result).toContain('<json>...</json>');
   });
+
+  it('adds the selected language instruction outside the cached conversation', () => {
+    const result = buildSessionAnalysisInstructions('proj', null, undefined, {
+      preference: 'zh-CN',
+      messages: [{ type: 'user', content: 'Please analyze this.' }],
+    });
+
+    expect(result).toContain('Simplified Chinese (zh-CN)');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -451,6 +474,15 @@ describe('buildPromptQualityInstructions', () => {
     const result = buildPromptQualityInstructions('proj', sessionMeta);
     expect(result).toContain('<json>...</json>');
   });
+
+  it('adds an English output instruction when selected', () => {
+    const result = buildPromptQualityInstructions('proj', sessionMeta, undefined, {
+      preference: 'en-US',
+      messages: [{ type: 'user', content: '请分析提示质量。' }],
+    });
+
+    expect(result).toContain('English (en-US)');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -477,6 +509,19 @@ describe('buildFacetOnlyInstructions', () => {
     const result = buildFacetOnlyInstructions('proj', null);
     expect(result).toContain('<json>...</json>');
   });
+
+  it('resolves auto from the dominant user conversation language', () => {
+    const result = buildFacetOnlyInstructions('proj', null, undefined, {
+      preference: 'auto',
+      messages: [
+        { type: 'user', content: '请分析会话。' },
+        { type: 'user', content: '请继续。' },
+        { type: 'user', content: 'Keep paths unchanged.' },
+      ],
+    });
+
+    expect(result).toContain('Simplified Chinese (zh-CN)');
+  });
 });
 
 // ──────────────────────────────────────────────────────
@@ -484,6 +529,133 @@ describe('buildFacetOnlyInstructions', () => {
 // ──────────────────────────────────────────────────────
 
 describe('parseAnalysisResponse', () => {
+  it('rejects an array as a facets payload', () => {
+    expect(validateAnalysisFacets([])).toBeUndefined();
+  });
+
+  it('rejects an empty object as a facets payload', () => {
+    expect(validateAnalysisFacets({})).toBeUndefined();
+  });
+
+  it('rejects a facets payload with a non-string workflow pattern', () => {
+    expect(validateAnalysisFacets(makeFacets({ workflow_pattern: 42 }))).toBeUndefined();
+  });
+
+  it('rejects a facets payload with a non-boolean course-correction flag', () => {
+    expect(validateAnalysisFacets(makeFacets({ had_course_correction: 'false' }))).toBeUndefined();
+  });
+
+  it('rejects a facets payload with a non-string course-correction reason', () => {
+    expect(validateAnalysisFacets(makeFacets({ course_correction_reason: 42 }))).toBeUndefined();
+  });
+
+  it.each(['1', Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects a facets payload with an invalid iteration count (%s)',
+    iteration_count => {
+      expect(validateAnalysisFacets(makeFacets({ iteration_count }))).toBeUndefined();
+    },
+  );
+
+  it.each([-1, 1.5])(
+    'rejects a facets payload with an out-of-schema iteration count (%s)',
+    iteration_count => {
+      expect(validateAnalysisFacets(makeFacets({ iteration_count }))).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['friction_points', 'none'],
+    ['effective_patterns', null],
+  ])('rejects a facets payload with non-array %s', (field, value) => {
+    expect(validateAnalysisFacets(makeFacets({ [field]: value }))).toBeUndefined();
+  });
+
+  it('filters malformed nested facet items while preserving valid items', () => {
+    const result = validateAnalysisFacets(makeFacets({
+      friction_points: [
+        null,
+        { category: 'wrong-approach', description: 42, severity: 'medium', resolution: 'fixed' },
+        { category: 'unknown', description: 'bad category', severity: 'medium', resolution: 'fixed' },
+        {
+          _reasoning: 'Observed a wrong approach.',
+          category: 'wrong-approach',
+          attribution: 'user-actionable',
+          description: 'Started with the wrong abstraction.',
+          severity: 'medium',
+          resolution: 'Changed the abstraction.',
+        },
+      ],
+      effective_patterns: [
+        'not-an-object',
+        { category: 'structured-planning', description: 'good', confidence: 101 },
+        { category: 'unknown', description: 'bad category', confidence: 50 },
+        {
+          _reasoning: 'The plan reduced rework.',
+          category: 'structured-planning',
+          description: 'Planned before editing.',
+          confidence: 90,
+          driver: 'collaborative',
+        },
+      ],
+    }));
+
+    expect(result?.friction_points).toEqual([{
+      _reasoning: 'Observed a wrong approach.',
+      category: 'wrong-approach',
+      attribution: 'user-actionable',
+      description: 'Started with the wrong abstraction.',
+      severity: 'medium',
+      resolution: 'Changed the abstraction.',
+    }]);
+    expect(result?.effective_patterns).toEqual([{
+      _reasoning: 'The plan reduced rework.',
+      category: 'structured-planning',
+      description: 'Planned before editing.',
+      confidence: 90,
+      driver: 'collaborative',
+    }]);
+  });
+
+  it('canonicalizes known nested facet aliases before strict membership validation', () => {
+    const result = validateAnalysisFacets(makeFacets({
+      friction_points: [{
+        category: 'missing-dependency',
+        description: 'A dependency was unavailable.',
+        severity: 'medium',
+        resolution: 'Installed the dependency.',
+      }],
+      effective_patterns: [{
+        category: 'task-decomposition',
+        description: 'Split the task into bounded steps.',
+        confidence: 90,
+        driver: 'collaborative',
+      }],
+    }));
+
+    expect(result?.friction_points[0]?.category).toBe('stale-assumptions');
+    expect(result?.effective_patterns[0]?.category).toBe('structured-planning');
+  });
+
+  it('still rejects arbitrary nested facet categories after canonicalization', () => {
+    const result = validateAnalysisFacets(makeFacets({
+      friction_points: [{
+        category: 'secret-novel-friction',
+        description: 'Should not pass the schema boundary.',
+        severity: 'medium',
+        resolution: 'N/A',
+      }],
+      effective_patterns: [{
+        category: 'secret-novel-pattern',
+        description: 'Should not pass the schema boundary.',
+        confidence: 90,
+        driver: 'collaborative',
+      }],
+    }));
+
+    expect(result?.friction_points).toEqual([]);
+    expect(result?.effective_patterns).toEqual([]);
+  });
+
   it('parses valid JSON in <json> tags', () => {
     const response = `<json>
 {
@@ -562,15 +734,55 @@ describe('parseAnalysisResponse', () => {
     expect(result.data.learnings).toEqual([]);
   });
 
-  it('coerces facet arrays to [] when LLM returns non-array facets', () => {
-    // LLM returned friction_points as a string instead of an array
-    const response = '<json>{ "summary": { "title": "Test", "content": "c", "bullets": [] }, "decisions": [], "learnings": [], "facets": { "friction_points": "none", "effective_patterns": null } }</json>';
+  it.each([
+    ['an array', []],
+    ['an empty object', {}],
+    ['wrong field types', makeFacets({ friction_points: 'none', effective_patterns: null })],
+  ])('keeps the main response but removes facets when facets is %s', (_description, facets) => {
+    const response = `<json>${JSON.stringify({
+      summary: { title: 'Test', content: 'c', bullets: [] },
+      decisions: [],
+      learnings: [],
+      facets,
+    })}</json>`;
     const result = parseAnalysisResponse(response);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    // Both must be arrays — .some() calls on monitors must not throw
-    expect(Array.isArray(result.data.facets?.friction_points)).toBe(true);
-    expect(Array.isArray(result.data.facets?.effective_patterns)).toBe(true);
+    expect(result.data.facets).toBeUndefined();
+  });
+
+  it('filters friction points without a non-empty string category', () => {
+    const response = `<json>{
+      "summary": { "title": "Test", "content": "c", "bullets": [] },
+      "decisions": [],
+      "learnings": [],
+      "facets": {
+        "outcome_satisfaction": "high",
+        "workflow_pattern": "direct-execution",
+        "had_course_correction": false,
+        "course_correction_reason": null,
+        "iteration_count": 0,
+        "friction_points": [
+          "reasoning-only primitive",
+          { "_reasoning": "No friction occurred." },
+          { "category": null, "description": "N/A", "severity": null, "resolution": null },
+          { "category": 42, "description": "N/A" },
+          { "category": { "nested": true }, "description": "N/A" },
+          { "category": ["wrong-approach"], "description": "N/A" },
+          { "category": "   ", "description": "N/A" },
+          { "category": "wrong-approach", "description": "Valid", "severity": "medium", "resolution": "Resolved" }
+        ],
+        "effective_patterns": []
+      }
+    }</json>`;
+
+    const result = parseAnalysisResponse(response);
+
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.facets?.friction_points).toEqual([
+      expect.objectContaining({ category: 'wrong-approach', description: 'Valid' }),
+    ]);
   });
 });
 

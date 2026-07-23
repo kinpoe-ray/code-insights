@@ -329,6 +329,7 @@ export interface WorkingStyleResult {
 export type ReflectResult = FrictionWinsResult | RulesSkillsResult | WorkingStyleResult;
 
 export type LLMProvider = 'openai' | 'anthropic' | 'gemini' | 'ollama' | 'llamacpp';
+export type AnalysisLanguage = 'auto' | 'zh-CN' | 'en-US';
 
 export interface LLMProviderConfig {
   provider: LLMProvider;
@@ -350,6 +351,7 @@ export interface ProviderInfo {
   name: string;
   models: ProviderModelOption[];
   requiresApiKey: boolean;
+  supportsCustomBaseUrl: boolean;
   apiKeyLink?: string;
 }
 
@@ -361,6 +363,7 @@ export interface ClaudeInsightConfig {
   dashboard?: {
     port?: number;
     llm?: LLMProviderConfig;
+    analysisLanguage?: AnalysisLanguage;
   };
   telemetry?: boolean;              // default true (opt-out)
 }
@@ -370,10 +373,18 @@ export type ExportTemplate = 'knowledge-base' | 'agent-rules';
 export interface SyncState {
   lastSync: string;
   files: Record<string, FileSyncState>;
+  /** Absolute DB path plus the persistent identity stored inside SQLite. */
+  databaseIdentity?: string;
+  migrations?: {
+    /** All Codex transcripts were re-synced after message IDs became session-scoped. */
+    codexScopedMessageIds?: boolean;
+  };
 }
 
 export interface FileSyncState {
   lastModified: string;
+  /** Byte size of the parsed snapshot; catches same-timestamp appends. */
+  fileSize?: number;
   lastSyncedLine: number;
   sessionId: string;
   syncedSessionIds?: string[];  // For providers where 1 file = N sessions (e.g., Cursor SQLite)
@@ -439,4 +450,3 @@ export interface DispatchImagePromptResponse {
   model: string;
   tokensUsed: { input: number; output: number };
 }
-

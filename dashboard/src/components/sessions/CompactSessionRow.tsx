@@ -1,10 +1,29 @@
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { SESSION_CHARACTER_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
-import { formatDuration, getSessionTitle, cn } from '@/lib/utils';
+import { formatDuration, cn } from '@/lib/utils';
 import { Sparkles, Target, Loader2 } from 'lucide-react';
 import type { Session } from '@/lib/types';
 import { getScoreTier } from '@/lib/score-utils';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
+
+const CHARACTER_LABEL_KEYS: Record<NonNullable<Session['session_character']>, MessageKey> = {
+  deep_focus: 'sessions.character.deepFocus',
+  bug_hunt: 'sessions.character.bugHunt',
+  feature_build: 'sessions.character.featureBuild',
+  exploration: 'sessions.character.exploration',
+  refactor: 'sessions.character.refactor',
+  learning: 'sessions.character.learning',
+  quick_task: 'sessions.character.quickTask',
+};
+
+const OUTCOME_LABEL_KEYS: Record<string, MessageKey> = {
+  success: 'sessions.outcome.success',
+  partial: 'sessions.outcome.partial',
+  abandoned: 'sessions.outcome.abandoned',
+  blocked: 'sessions.outcome.blocked',
+};
 
 const SOURCE_LABELS: Record<string, string> = {
   'claude-code': 'Claude Code',
@@ -44,9 +63,13 @@ export function CompactSessionRow({
   isQueued = false,
   onClick,
 }: CompactSessionRowProps) {
+  const { t } = useLocale();
   const startedAt = new Date(session.started_at);
   const endedAt = new Date(session.ended_at);
-  const title = getSessionTitle(session);
+  const title = session.custom_title
+    || session.generated_title
+    || session.summary
+    || t('sessions.untitled');
   const characterColor = session.session_character
     ? (SESSION_CHARACTER_COLORS[session.session_character] ?? 'bg-muted text-muted-foreground')
     : null;
@@ -80,7 +103,7 @@ export function CompactSessionRow({
         {isQueued && (
           <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-blue-600 border-blue-300 gap-0.5">
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
-            Analyzing...
+            {t('sessions.rowAnalyzing')}
           </Badge>
         )}
         {outcome && OUTCOME_DOT[outcome] && (
@@ -88,12 +111,14 @@ export function CompactSessionRow({
             <TooltipTrigger asChild>
               <span className={cn('w-2 h-2 rounded-full shrink-0', OUTCOME_DOT[outcome].color)} />
             </TooltipTrigger>
-            <TooltipContent side="right" className="text-xs">{OUTCOME_DOT[outcome].label}</TooltipContent>
+            <TooltipContent side="right" className="text-xs">
+              {OUTCOME_LABEL_KEYS[outcome] ? t(OUTCOME_LABEL_KEYS[outcome]) : OUTCOME_DOT[outcome].label}
+            </TooltipContent>
           </Tooltip>
         )}
         {session.session_character && characterColor && (
           <Badge variant="outline" className={`text-[10px] px-1.5 py-0 capitalize ${characterColor}`}>
-            {session.session_character.replace(/_/g, ' ')}
+            {t(CHARACTER_LABEL_KEYS[session.session_character])}
           </Badge>
         )}
       </div>
@@ -106,7 +131,7 @@ export function CompactSessionRow({
             <span className="text-muted-foreground/30">&middot;</span>
           </>
         )}
-        <span>{session.message_count} msgs</span>
+        <span>{t('sessions.rowMessages', { count: session.message_count })}</span>
         <span className="text-muted-foreground/30">&middot;</span>
         <span>{formatDuration(startedAt, endedAt)}</span>
         {session.estimated_cost_usd != null && (
@@ -127,7 +152,7 @@ export function CompactSessionRow({
                   </span>
                 </TooltipTrigger>
                 <TooltipContent side="right" className="text-xs max-w-[200px]">
-                  Missing pattern data — re-analyze or run <code className="text-[10px]">reflect backfill</code>
+                  {t('sessions.row.missingPatterns')} <code className="text-[10px]">reflect backfill</code>
                 </TooltipContent>
               </Tooltip>
             ) : (

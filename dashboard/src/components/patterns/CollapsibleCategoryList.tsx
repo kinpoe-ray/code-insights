@@ -9,7 +9,8 @@
 
 import { useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
-import { DRIVER_LABELS, DRIVER_STYLES } from '@/lib/constants/patterns';
+import { DRIVER_STYLES } from '@/lib/constants/patterns';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export interface CategoryItem {
   category: string;
@@ -33,8 +34,16 @@ export function CollapsibleCategoryList({
   variant,
   maxVisible = 5,
 }: CollapsibleCategoryListProps) {
+  const { t, formatNumber } = useLocale();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAll, setShowAll] = useState(false);
+
+  const driverLabel = (driver: string) => {
+    if (driver === 'user-driven') return t('patterns.driver.user-driven');
+    if (driver === 'ai-driven') return t('patterns.driver.ai-driven');
+    if (driver === 'collaborative') return t('patterns.driver.collaborative');
+    return driver;
+  };
 
   function toggle(category: string) {
     setExpanded(prev => {
@@ -83,11 +92,11 @@ export function CollapsibleCategoryList({
                   className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold shrink-0"
                   style={{ backgroundColor: `${item.color}20`, color: item.color }}
                 >
-                  {item.count}x
+                  {t('patterns.times', { count: formatNumber(item.count) })}
                 </span>
               ) : (
                 <span className="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold bg-primary/10 text-primary shrink-0">
-                  {item.count}x
+                  {t('patterns.times', { count: formatNumber(item.count) })}
                 </span>
               )}
 
@@ -97,7 +106,7 @@ export function CollapsibleCategoryList({
               {/* Driver badge — patterns only */}
               {variant === 'pattern' && item.driver && (
                 <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-xs font-medium shrink-0 ${DRIVER_STYLES[item.driver] ?? 'bg-muted text-muted-foreground'}`}>
-                  {DRIVER_LABELS[item.driver] ?? item.driver}
+                  {driverLabel(item.driver)}
                 </span>
               )}
 
@@ -123,7 +132,7 @@ export function CollapsibleCategoryList({
                 ))}
                 {item.descriptions.length > MAX_DESC_VISIBLE && (
                   <li className="text-xs text-muted-foreground italic">
-                    +{item.descriptions.length - MAX_DESC_VISIBLE} more
+                    {t('patterns.more', { count: formatNumber(item.descriptions.length - MAX_DESC_VISIBLE) })}
                   </li>
                 )}
               </ul>
@@ -140,7 +149,7 @@ export function CollapsibleCategoryList({
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             onClick={() => setShowAll(true)}
           >
-            +{hiddenCount} more
+            {t('patterns.more', { count: formatNumber(hiddenCount) })}
           </button>
         </li>
       )}
@@ -151,7 +160,7 @@ export function CollapsibleCategoryList({
             className="text-xs text-muted-foreground hover:text-foreground transition-colors"
             onClick={() => setShowAll(false)}
           >
-            Show less
+            {t('patterns.showLess')}
           </button>
         </li>
       )}

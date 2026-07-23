@@ -77,6 +77,106 @@ describe('CodexProvider — Format A system context filtering', () => {
     expect(session!.assistantMessageCount).toBe(1);
   });
 
+  it('rejects when a discovered rollout file cannot be read', async () => {
+    const provider = new CodexProvider();
+    const missingPath = path.join(tempDir, 'rollout-missing.jsonl');
+
+    await expect(provider.parse(missingPath)).rejects.toThrow(/rollout-missing\.jsonl/);
+  });
+
+  it('rejects malformed legacy JSON instead of reporting an empty session', async () => {
+    const filePath = path.join(tempDir, 'rollout-broken.json');
+    fs.writeFileSync(filePath, '{"session":');
+
+    const provider = new CodexProvider();
+
+    await expect(provider.parse(filePath)).rejects.toThrow(/invalid Codex JSON/i);
+  });
+
+  it('rejects a malformed complete JSONL line instead of silently dropping it', async () => {
+    const filePath = path.join(tempDir, 'rollout-corrupt.jsonl');
+    fs.writeFileSync(filePath, buildJSONL([
+      sessionMeta(),
+      userMessageLine('First complete prompt'),
+      '{not valid json}',
+      assistantLine('This complete line proves the malformed line was not a trailing write.'),
+    ]));
+
+    const provider = new CodexProvider();
+
+    await expect(provider.parse(filePath)).rejects.toThrow(/line 3/i);
+  });
+
+  it('tolerates only an unfinished final JSONL line from an active rollout', async () => {
+    const filePath = path.join(tempDir, 'rollout-active.jsonl');
+    fs.writeFileSync(filePath, buildJSONL([
+      sessionMeta(),
+      userMessageLine('Keep the complete snapshot'),
+      assistantLine('Complete response'),
+      '{"type":"response_item","payload":',
+    ]));
+
+    const provider = new CodexProvider();
+    const session = await provider.parse(filePath);
+
+    expect(session).not.toBeNull();
+    expect(session!.userMessageCount).toBe(1);
+    expect(session!.assistantMessageCount).toBe(1);
+  });
+
+  it('rejects a complete but malformed final JSONL line', async () => {
+    const filePath = path.join(tempDir, 'rollout-corrupt-tail.jsonl');
+    fs.writeFileSync(filePath, buildJSONL([
+      sessionMeta(),
+      userMessageLine('Complete prompt before corrupt tail'),
+      '{not valid json}',
+    ]));
+
+    const provider = new CodexProvider();
+
+    await expect(provider.parse(filePath)).rejects.toThrow(/line 3/i);
+  });
+
+  it('rejects a closed final JSON object with a trailing comma', async () => {
+    const filePath = path.join(tempDir, 'rollout-corrupt-trailing-comma.jsonl');
+    fs.writeFileSync(filePath, buildJSONL([
+      sessionMeta(),
+      userMessageLine('Complete prompt before malformed tail'),
+      '{"a":1,}',
+    ]));
+
+    const provider = new CodexProvider();
+
+    await expect(provider.parse(filePath)).rejects.toThrow(/line 3/i);
+  });
+
+  it('keeps message IDs unique across different Codex sessions', async () => {
+    const firstPath = path.join(tempDir, 'rollout-first.jsonl');
+    const secondPath = path.join(tempDir, 'rollout-second.jsonl');
+    fs.writeFileSync(firstPath, buildJSONL([
+      sessionMeta('session-one'),
+      userMessageLine('First question'),
+      assistantLine('First answer'),
+      taskCompleteLine(),
+    ]));
+    fs.writeFileSync(secondPath, buildJSONL([
+      sessionMeta('session-two'),
+      userMessageLine('Second question'),
+      assistantLine('Second answer'),
+      taskCompleteLine(),
+    ]));
+
+    const provider = new CodexProvider();
+    const first = await provider.parse(firstPath);
+    const second = await provider.parse(secondPath);
+
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    const firstIds = new Set(first!.messages.map(message => message.id));
+    const secondIds = second!.messages.map(message => message.id);
+    expect(secondIds.every(id => !firstIds.has(id))).toBe(true);
+  });
+
   it('filters out <permissions> system context messages', async () => {
     const content = buildJSONL([
       sessionMeta(),

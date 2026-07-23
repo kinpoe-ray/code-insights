@@ -9,12 +9,13 @@
 import { useState, useCallback } from 'react';
 import { Activity, CheckCircle2, LayoutGrid, Flame, Zap, Download } from 'lucide-react';
 import { toast } from 'sonner';
-import { SESSION_CHARACTER_COLORS, SESSION_CHARACTER_LABELS } from '@/lib/constants/colors';
+import { SESSION_CHARACTER_COLORS } from '@/lib/constants/colors';
 import { downloadShareCard } from '@/lib/share-card-utils';
 import { ProfilePromptDialog } from '@/components/ProfilePromptDialog';
 import { useUserProfile, isProfileComplete } from '@/hooks/useUserProfile';
 import type { UserProfile } from '@/hooks/useUserProfile';
 import type { PQDimensionScores } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface WeekAtAGlanceStripProps {
   tagline?: string;
@@ -44,13 +45,6 @@ const OUTCOME_COLORS: Record<string, string> = {
   abandoned: '#ef4444', // red-500
 };
 
-const OUTCOME_LABELS: Record<string, string> = {
-  high: 'High',
-  medium: 'Medium',
-  low: 'Low',
-  abandoned: 'Abandoned',
-};
-
 const MAX_TAGLINE_CHARS = 80;
 const MAX_CHARACTER_BADGES = 3;
 
@@ -72,6 +66,7 @@ export function WeekAtAGlanceStrip({
   totalTokens,
   effectivePatterns,
 }: WeekAtAGlanceStripProps) {
+  const { t, formatNumber } = useLocale();
   const outcomeTotal = Object.values(outcomeDistribution).reduce((s, v) => s + v, 0);
   const hasOutcomes = outcomeTotal > 0;
 
@@ -106,6 +101,24 @@ export function WeekAtAGlanceStrip({
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const { profile } = useUserProfile();
 
+  const outcomeLabel = (key: string) => {
+    if (key === 'high') return t('patterns.outcome.high');
+    if (key === 'medium') return t('patterns.outcome.medium');
+    if (key === 'low') return t('patterns.outcome.low');
+    if (key === 'abandoned') return t('patterns.outcome.abandoned');
+    return key;
+  };
+  const characterLabel = (key: string) => {
+    if (key === 'deep_focus') return t('patterns.character.deep_focus');
+    if (key === 'bug_hunt') return t('patterns.character.bug_hunt');
+    if (key === 'feature_build') return t('patterns.character.feature_build');
+    if (key === 'exploration') return t('patterns.character.exploration');
+    if (key === 'refactor') return t('patterns.character.refactor');
+    if (key === 'learning') return t('patterns.character.learning');
+    if (key === 'quick_task') return t('patterns.character.quick_task');
+    return key;
+  };
+
   // profileOverride: pass the just-saved profile from the dialog's onSave callback to avoid
   // a stale closure — React hasn't re-rendered yet when onSave fires, so the hook value
   // still holds the old (incomplete) profile. The override bypasses the stale value.
@@ -128,13 +141,13 @@ export function WeekAtAGlanceStrip({
         effectivePatterns,
         userProfile,
       });
-      toast.success('AI Fluency Score card downloaded');
+      toast.success(t('patterns.cardDownloaded'));
     } catch {
-      toast.error('Failed to generate card');
+      toast.error(t('patterns.cardFailed'));
     } finally {
       setIsDownloading(false);
     }
-  }, [isDownloading, displayTagline, pqScores, totalSessions, totalTokens, lifetimeSessions, sourceTools, currentWeek, effectivePatterns, profile]);
+  }, [isDownloading, displayTagline, pqScores, totalSessions, totalTokens, lifetimeSessions, sourceTools, currentWeek, effectivePatterns, profile, t]);
 
   const handleDownload = useCallback(() => {
     if (isDownloading || !displayTagline) return;
@@ -180,7 +193,7 @@ export function WeekAtAGlanceStrip({
               </p>
             ) : (
               <p className="text-sm text-muted-foreground italic">
-                Generate patterns to discover your working style
+                {t('patterns.discoverStyle')}
               </p>
             )}
           </div>
@@ -188,19 +201,22 @@ export function WeekAtAGlanceStrip({
             {showStreak && (
               <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 text-xs font-medium border border-amber-500/20">
                 <Flame className="h-3 w-3" />
-                {streak}d streak
+                {t('patterns.streak', { count: formatNumber(streak ?? 0) })}
               </span>
             )}
             {(rateLimitCount ?? 0) > 0 && (
               <span
                 className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400 px-2 py-0.5 text-xs font-medium border border-amber-500/20"
                 title={rateLimitSessionsAffected != null
-                  ? `${rateLimitCount} rate limit${rateLimitCount !== 1 ? 's' : ''} affecting ${rateLimitSessionsAffected} session${rateLimitSessionsAffected !== 1 ? 's' : ''}`
-                  : `${rateLimitCount} rate limit${rateLimitCount !== 1 ? 's' : ''}`
+                  ? t('patterns.rateLimitAffected', {
+                      limits: formatNumber(rateLimitCount ?? 0),
+                      sessions: formatNumber(rateLimitSessionsAffected),
+                    })
+                  : t('patterns.rateLimit', { count: formatNumber(rateLimitCount ?? 0) })
                 }
               >
                 <Zap className="h-3 w-3" />
-                {rateLimitCount} rate limit{rateLimitCount !== 1 ? 's' : ''}
+                {t('patterns.rateLimit', { count: formatNumber(rateLimitCount ?? 0) })}
               </span>
             )}
             {/* Download button — only visible after reflection is generated */}
@@ -209,10 +225,10 @@ export function WeekAtAGlanceStrip({
                 onClick={handleDownload}
                 disabled={isDownloading}
                 className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 text-blue-600 dark:text-blue-400 px-2 py-0.5 text-xs font-medium border border-blue-500/20 hover:bg-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                title="Download working style card"
+                title={t('patterns.downloadCard')}
               >
                 <Download className="h-3 w-3" />
-                {isDownloading ? 'Generating…' : 'Share'}
+                {isDownloading ? t('patterns.shareGenerating') : t('patterns.share')}
               </button>
             )}
           </div>
@@ -222,26 +238,26 @@ export function WeekAtAGlanceStrip({
         <div className="flex gap-4 flex-wrap">
           <div className="flex items-center gap-1.5">
             <Activity className="h-3.5 w-3.5 text-muted-foreground" />
-            <span className="text-xl font-bold tabular-nums">{totalSessions}</span>
+            <span className="text-xl font-bold tabular-nums">{formatNumber(totalSessions)}</span>
             <span className="text-xs text-muted-foreground">
-              {totalSessions === 1 ? 'session' : 'sessions'}
+              {totalSessions === 1 ? t('patterns.session') : t('patterns.sessions')}
               {totalAllSessions > totalSessions && (
-                <> of {totalAllSessions}</>
+                <> {t('patterns.ofTotal', { total: formatNumber(totalAllSessions) })}</>
               )}
             </span>
           </div>
           {totalAllSessions > 0 && (
             <div className="flex items-center gap-1.5">
               <LayoutGrid className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="text-xl font-bold tabular-nums">{coveragePct}%</span>
-              <span className="text-xs text-muted-foreground">analyzed</span>
+              <span className="text-xl font-bold tabular-nums">{formatNumber(coveragePct)}%</span>
+              <span className="text-xs text-muted-foreground">{t('patterns.analyzed')}</span>
             </div>
           )}
           {totalSessions > 0 && (
             <div className="flex items-center gap-1.5">
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
-              <span className="text-xl font-bold tabular-nums">{successCount}</span>
-              <span className="text-xs text-muted-foreground">high-quality</span>
+              <span className="text-xl font-bold tabular-nums">{formatNumber(successCount)}</span>
+              <span className="text-xs text-muted-foreground">{t('patterns.highQuality')}</span>
             </div>
           )}
         </div>
@@ -254,7 +270,7 @@ export function WeekAtAGlanceStrip({
                 key={key}
                 className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium border ${SESSION_CHARACTER_COLORS[key] ?? 'bg-muted text-muted-foreground border-border'}`}
               >
-                {SESSION_CHARACTER_LABELS[key] ?? key} {count}
+                {characterLabel(key)} {formatNumber(count)}
               </span>
             ))}
           </div>
@@ -263,12 +279,12 @@ export function WeekAtAGlanceStrip({
         {/* Outcome stacked bar */}
         {hasOutcomes && (
           <div>
-            <p className="text-xs text-muted-foreground mb-1">Outcomes</p>
-            <div className="flex h-2 rounded-full overflow-hidden" role="img" aria-label="Outcome distribution">
+            <p className="text-xs text-muted-foreground mb-1">{t('patterns.outcomes')}</p>
+            <div className="flex h-2 rounded-full overflow-hidden" role="img" aria-label={t('patterns.outcomeDistribution')}>
               {segments.map(({ key, pct }) => (
                 <div
                   key={key}
-                  title={`${OUTCOME_LABELS[key] ?? key}: ${outcomeDistribution[key]} (${Math.round(pct)}%)`}
+                  title={`${outcomeLabel(key)}: ${formatNumber(outcomeDistribution[key])} (${formatNumber(Math.round(pct))}%)`}
                   style={{
                     flexBasis: `${pct}%`,
                     backgroundColor: OUTCOME_COLORS[key] ?? '#94a3b8',
@@ -283,7 +299,7 @@ export function WeekAtAGlanceStrip({
                     className="inline-block w-1.5 h-1.5 rounded-full mr-0.5 align-middle"
                     style={{ backgroundColor: OUTCOME_COLORS[key] ?? '#94a3b8' }}
                   />
-                  {value} {OUTCOME_LABELS[key] ?? key} ({Math.round(pct)}%)
+                  {formatNumber(value)} {outcomeLabel(key)} ({formatNumber(Math.round(pct))}%)
                 </span>
               ))}
             </div>

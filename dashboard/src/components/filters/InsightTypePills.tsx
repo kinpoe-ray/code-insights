@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils';
-import { INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
+import { INSIGHT_TYPE_MESSAGE_KEYS } from '@/lib/constants/colors';
 import type { InsightType } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 const INSIGHT_TYPES: InsightType[] = ['summary', 'decision', 'learning', 'technique', 'prompt_quality'];
 
@@ -16,6 +17,7 @@ interface InsightTypePillsProps {
  * All inactive = treated as all (prevents zero-result dead-end).
  */
 export function InsightTypePills({ activeTypes, onChange }: InsightTypePillsProps) {
+  const { t } = useLocale();
   const allActive = activeTypes.length === 0 || activeTypes.length === INSIGHT_TYPES.length;
 
   function toggle(type: InsightType) {
@@ -36,7 +38,7 @@ export function InsightTypePills({ activeTypes, onChange }: InsightTypePillsProp
   }
 
   return (
-    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Filter by insight type">
+    <div className="flex flex-wrap items-center gap-1.5" role="group" aria-label={t('insights.filterByType')}>
       {INSIGHT_TYPES.map((type) => {
         const isActive = allActive || activeTypes.includes(type);
         return (
@@ -51,7 +53,7 @@ export function InsightTypePills({ activeTypes, onChange }: InsightTypePillsProp
                 : 'bg-transparent text-muted-foreground border-border hover:border-primary/30 hover:text-foreground'
             )}
           >
-            {INSIGHT_TYPE_LABELS[type]}
+            {t(INSIGHT_TYPE_MESSAGE_KEYS[type])}
           </button>
         );
       })}

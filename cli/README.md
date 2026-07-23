@@ -6,7 +6,9 @@
 
 Extract decisions, learnings, and prompt quality scores from your AI coding sessions. Detect cross-session patterns. Get better at working with AI. Stores structured data in a local SQLite database and serves a built-in browser dashboard with LLM-powered synthesis.
 
-**Local-first. No accounts. No cloud. No data leaves your machine.**
+**Local-first storage. No account and no Code Insights cloud sync.** Configured
+cloud-provider analysis sends credential-pattern-redacted session content
+directly to the provider you select.
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/melagiri/code-insights/master/docs/assets/screenshots/code-insights-ai-fluency-score.png" alt="AI Fluency Score — your coding fingerprint across tools" width="600" />
@@ -14,8 +16,8 @@ Extract decisions, learnings, and prompt quality scores from your AI coding sess
 
 ---
 
-> **Claude Code users: zero-config analysis, zero cost.**
-> Install the hook once. Every session gets analyzed automatically using your Claude subscription.
+> **Claude Code users: zero-config analysis with no separate API key.**
+> Install the hook once. Every session gets analyzed automatically using your existing Claude subscription.
 > ```bash
 > code-insights install-hook
 > ```
@@ -205,6 +207,9 @@ code-insights reflect --week 2026-W11
 # Scope to a specific project
 code-insights reflect --project "my-project"
 
+# Scope to a specific source tool
+code-insights reflect --source cursor
+
 # Backfill facets for sessions that were synced before Reflect existed
 code-insights reflect backfill
 
@@ -242,6 +247,11 @@ code-insights doctor --json
 # Show sync statistics (sessions, projects, last sync)
 code-insights status
 
+# Pause all automatic maintenance, inspect its state, then resume it
+code-insights maintenance pause
+code-insights maintenance status
+code-insights maintenance resume
+
 # Open the local dashboard in your browser
 code-insights open
 code-insights open --project           # Open filtered to the current project
@@ -269,25 +279,153 @@ code-insights insights check --analyze
 code-insights insights check --days 14
 ```
 
+### Historical Reanalysis Campaigns
+
+Use a durable campaign for a full-history model change or any reanalysis that
+must continue safely across several runs.
+
+```bash
+# Strictly read-only: opens SQLite read-only and makes no model calls
+code-insights reanalyze --dry-run
+
+# Change the configured model before beginning a model migration
+code-insights config llm
+
+# Preview an inclusive local-date range; --model must match current configuration
+code-insights reanalyze --dry-run --from 2026-02-01 --to 2026-07-21 --model glm-5.2
+
+# Create the fixed campaign; --expected-count protects against a changed preview
+code-insights reanalyze start --from 2026-02-01 --to 2026-07-21 \
+  --model glm-5.2 --expected-count 499 --yes
+
+# Advance a bounded batch and inspect progress
+code-insights reanalyze run --batch-size 20
+code-insights reanalyze status
+
+# Pause or resume the campaign between model passes
+code-insights reanalyze pause
+code-insights reanalyze resume
+
+# Reset failed members with a fresh bounded retry budget, then continue
+code-insights reanalyze retry-failed --yes
+code-insights reanalyze run --batch-size 20
+
+# Permanently terminate the active/paused campaign; it cannot be resumed
+code-insights reanalyze cancel --yes
+```
+
+The campaign freezes its session membership, provider, model, endpoint
+fingerprint, analysis version, and pipeline revision. `run` stops with zero
+provider requests if the current configuration or analysis pipeline does not
+match. The `--model` option on preview/start must match the currently configured
+model; it does not switch models. Run `code-insights config llm` first when
+changing models.
+
+A pause is cooperative: an already in-flight request may finish, but another
+pass is not started after the pause is observed. `retry-failed --yes` explicitly
+resets failed members' attempt counters while preserving a completed first pass.
+`cancel --yes` is terminal; already-published members stay published and
+unfinished members keep their previous visible results.
+
+Each session has two logical analysis passes, so `N` sessions require at least
+`2N` provider requests. Long conversations can be split into several chunks;
+facet extraction and bounded retries also add requests. A process crash after a
+provider returns but before the local stage or publish commit creates another
+uncertain request that may need to be repeated.
+
+New results become visible only after both passes succeed. One transaction first
+snapshots the previous insights, facets, usage, and generated title, then replaces
+the visible results and marks the campaign item successful. A failed or paused
+item keeps its previous visible results.
+
+### Bounded Analysis Script
+
+From a source checkout, `throttled-analyze.sh` can preview or process one bounded
+batch:
+
+```bash
+# Inclusive local-date range; no model calls
+./throttled-analyze.sh --from 2026-07-01 --to 2026-07-21 \
+  --batch-size 20 --dry-run
+
+# Include already-complete sessions in this one batch
+./throttled-analyze.sh --from 2026-07-01 --to 2026-07-21 \
+  --batch-size 20 --force
+```
+
+`--force` does not keep cross-run progress and can select the same newest
+sessions again. Use a `reanalyze` campaign, not repeated forced batches, for a
+multi-day or full-history model migration.
+
+### macOS Scheduled Maintenance
+
+The source checkout includes a LaunchAgent installer. Its default daily window
+is 02:00–06:00 with batches of 20:
+
+```bash
+./automation/install-launchd.sh --install
+
+# Optional custom same-day window and batch size
+./automation/install-launchd.sh --install --start 01:30 --end 05:30 --batch-size 10
+
+./automation/install-launchd.sh --uninstall
+```
+
+Start must be earlier than end; cross-midnight windows are not supported. When a
+reanalysis campaign is active, scheduled maintenance advances the campaign
+instead of running legacy historical batches and delays weekly `reflect` until
+the campaign is complete.
+
 ### Auto-Sync & Auto-Analyze Hook
 
 ```bash
 # Install Claude Code hooks — auto-sync + auto-analyze when sessions end
 code-insights install-hook
 
-# Install only the sync hook (no analysis)
-code-insights install-hook --sync-only
-
-# Install only the analysis hook
-code-insights install-hook --analysis-only
-
 # Remove all hooks
 code-insights uninstall-hook
 ```
 
+The installed `SessionEnd` hook calls the internal `session-end` workflow. It
+syncs the completed session, enqueues it in SQLite, and starts a detached queue
+worker. The old `insights --hook` interface has been removed.
+
+### Analysis Queue
+
+The hook and dashboard share a durable SQLite analysis queue.
+
+Queue claims skip unfinished members of an active or paused reanalysis campaign.
+Those rows remain pending, preventing the ordinary queue and the campaign from
+paying to analyze the same session concurrently.
+
+For a claimed session, resume detection skips provider requests only when both
+the `session` and `prompt_quality` usage rows match the current message count,
+provider, model, exact input revision, and pipeline revision. A missing or
+different field—including `NULL` revision fields in older rows—makes the result
+stale and triggers a fresh two-pass analysis.
+
+```bash
+# Human-readable status; -q emits count-only JSON
+code-insights queue status
+code-insights queue status --quiet
+
+# Process a bounded foreground batch
+code-insights queue process --limit 5 --delay 2
+code-insights queue process --model sonnet
+
+# Retry one or all terminal failures
+code-insights queue retry <session_id>
+code-insights queue retry --all
+
+# Remove completed/failed rows older than a threshold
+code-insights queue prune --days 7
+```
+
 ### Telemetry
 
-Anonymous usage telemetry is opt-out. No PII is collected.
+Anonymous/pseudonymous aggregate usage telemetry is enabled by default and is
+restricted to an event/property allowlist. It does not intentionally collect
+session content, prompts, responses, file paths, API keys, or free-form errors.
 
 ```bash
 code-insights telemetry status   # Check current status
@@ -300,6 +438,8 @@ Alternatively, set the environment variable:
 ```bash
 CODE_INSIGHTS_TELEMETRY_DISABLED=1 code-insights sync
 ```
+
+`DO_NOT_TRACK=1` also disables telemetry.
 
 ## LLM Configuration
 
@@ -319,9 +459,16 @@ code-insights config llm
 | Anthropic | claude-opus-4-6, claude-sonnet-4-6, etc. | Yes |
 | OpenAI | gpt-4o, gpt-4o-mini, etc. | Yes |
 | Google Gemini | gemini-2.0-flash, gemini-2.0-pro, etc. | Yes |
-| Ollama | llama3.2, qwen2.5-coder, etc. | No (local) |
+| Ollama | llama3.2, qwen2.5-coder, etc. | No |
+| llama.cpp | Any model served by its OpenAI-compatible endpoint | No |
 
 API keys are stored in `~/.code-insights/config.json` (mode 0o600, readable only by you).
+Ollama and llama.cpp are local only when their configured endpoint is local;
+custom endpoints may be remote. Before any supported provider request, Code
+Insights applies a pattern-based credential guard to session content. This
+guard reduces accidental disclosure but is not a complete secret scanner.
+Claude Code `--native` analysis instead delegates the prompt to the locally
+installed Claude CLI and follows that tool's own data boundary.
 
 ## Development
 
@@ -332,10 +479,13 @@ This is a pnpm workspace monorepo with three packages: `cli`, `dashboard`, and `
 git clone https://github.com/melagiri/code-insights.git
 cd code-insights
 
-# Install all dependencies
-pnpm install
+# Node 20, 22, or 24+; install pinned pnpm 9.15.9 and dependencies
+corepack enable
+pnpm install --frozen-lockfile
 
-# Build all packages
+# Verify and build all packages
+pnpm typecheck
+pnpm test
 pnpm build
 
 # Link CLI for local testing
@@ -361,10 +511,26 @@ See [CONTRIBUTING.md](https://github.com/melagiri/code-insights/blob/master/CONT
 
 ## Privacy
 
-- All session data is stored in `~/.code-insights/data.db` (SQLite) on your machine
-- No cloud accounts required
-- No data is transmitted anywhere (unless you explicitly use an LLM provider with a remote API key)
-- Anonymous telemetry collects only aggregate usage counts — no session content, no file paths
+- Raw sessions and generated results are stored locally in
+  `~/.code-insights/data.db` (SQLite); there is no Code Insights account or
+  hosted database sync.
+- Configured cloud-provider analysis sends credential-pattern-redacted session
+  content directly to the provider or custom endpoint you select. Recognized
+  credential categories include common tokens, authorization/API-key headers,
+  credential assignments, private-key blocks, credential URLs, signed query
+  parameters, cookies, and npm credentials.
+- Ollama and llama.cpp keep analysis content on the machine only when pointed at
+  a local endpoint.
+- Anonymous/pseudonymous aggregate telemetry is enabled by default, allowlisted,
+  and opt-out. Disable it with `code-insights telemetry disable`,
+  `CODE_INSIGHTS_TELEMETRY_DISABLED=1`, or `DO_NOT_TRACK=1`.
+- Credential-pattern redaction can produce false positives or miss unknown
+  secret formats. Treat it as a safety guard, not as a full secret scanner or
+  data-loss-prevention system.
+
+See the repository
+[Security Model](https://github.com/melagiri/code-insights/blob/master/docs/SECURITY-MODEL.md)
+for local dashboard controls, endpoint boundaries, and threat assumptions.
 
 ## License
 

@@ -11,7 +11,15 @@
 
 **Architecture:** Single-repo pnpm workspace monorepo with three packages: CLI, dashboard (Vite + React SPA), and server (Hono API).
 
-**Privacy model:** Fully local-first. No cloud accounts, no sign-ups, no data leaves the machine. SQLite database at `~/.code-insights/data.db`.
+**Privacy model:** Local-first storage with no Code Insights account or hosted
+sync. Raw sessions and generated results are stored in SQLite at
+`~/.code-insights/data.db`. Configured-provider LLM requests receive session
+content only after the outbound credential-pattern guard runs;
+Ollama/llama.cpp remain local only when configured with a local endpoint.
+Claude Code native analysis delegates to the installed Claude CLI and follows
+that tool's own boundary. Aggregate allowlisted telemetry is enabled by default
+and can be disabled. See
+[docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).
 
 ---
 
@@ -53,8 +61,11 @@ This principle applies to planning, designing, AND implementation:
 | [docs/AGENTS.md](docs/AGENTS.md) | Agent suite, orchestrator role, development ceremony, team workflow, triple-layer code review, document ownership |
 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | Branch discipline, hookify rules, pre-action verification, version bump, configuration, dev notes |
 | [docs/PRODUCT.md](docs/PRODUCT.md) | Product description, features, source tools, insight categories, export, reflect/patterns |
+| [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md) | Assets, trust boundaries, local dashboard controls, LLM redaction, telemetry, and local storage threats |
+| [docs/QA.md](docs/QA.md) | Test strategy, migration expectations, test commands, and coverage targets |
 | [docs/VISION.md](docs/VISION.md) | Philosophy, core beliefs, phase history, non-goals |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phase milestones, version table, upcoming work |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Supported Node/pnpm versions and contributor workflow |
 
 ---
 
@@ -73,12 +84,15 @@ This principle applies to planning, designing, AND implementation:
 ## Commands
 
 ```bash
-cd cli
-pnpm install          # Install dependencies
-pnpm dev              # Watch mode (tsc --watch)
-pnpm build            # Compile TypeScript to dist/
+# From repository root. Supported Node: 20, 22, or 24+.
+corepack enable
+pnpm install --frozen-lockfile   # pnpm 9.15.9
+pnpm typecheck
+pnpm test
+pnpm build                      # CLI -> server -> dashboard
 
 # After building, link for local testing:
+cd cli
 npm link
 code-insights                          # Sync + open dashboard (zero-config)
 code-insights init                     # Optional: customize settings
@@ -92,23 +106,25 @@ code-insights open                     # Open dashboard in browser (no server st
 code-insights dashboard                # Start server + open dashboard (auto-syncs first)
 code-insights dashboard --no-sync      # Start server + open dashboard without syncing
 code-insights install-hook             # Auto-sync + auto-analysis on session end
-code-insights install-hook --sync-only # Install sync hook only (no analysis)
 code-insights uninstall-hook           # Remove all Code Insights hooks
+code-insights queue status             # Show durable queue state
+code-insights queue process --limit 5  # Process a bounded foreground batch
+code-insights queue retry --all        # Retry all terminal failures
 code-insights config                   # Show current configuration
 code-insights config llm               # Configure LLM provider interactively
 code-insights reset --confirm          # Delete all local data
 code-insights reflect                  # Cross-session LLM synthesis
 code-insights reflect --week 2026-W11  # Synthesis for a specific ISO week
+code-insights reflect --source cursor  # Scope synthesis to one source tool
 code-insights reflect backfill         # Backfill facets for legacy sessions
 code-insights sync prune               # Soft-delete trivial sessions (≤2 messages)
 code-insights telemetry                # Show telemetry status
-code-insights telemetry disable        # Opt out of anonymous telemetry
+code-insights telemetry disable        # Opt out of aggregate telemetry
 code-insights telemetry enable         # Opt back in
 
 # Insights — session analysis
 code-insights insights <session_id>              # Analyze using configured LLM
 code-insights insights <session_id> --native     # Analyze using claude -p (no API key needed)
-code-insights insights --hook --native -q        # Hook mode (reads stdin, used by SessionEnd hook)
 code-insights insights check                     # Check for unanalyzed sessions (last 7 days)
 
 # Stats — terminal analytics
@@ -132,13 +148,13 @@ code-insights stats patterns           # Cross-session patterns summary
 
 - **Runtime**: Node.js (ES2022, ES Modules)
 - **CLI Framework**: Commander.js
-- **Database**: SQLite (better-sqlite3) — WAL mode, local at `~/.code-insights/data.db`, Schema V9
+- **Database**: SQLite (better-sqlite3) — WAL mode, local at `~/.code-insights/data.db`, Schema V11
 - **Dashboard**: Vite + React 19 SPA
 - **Server**: Hono
 - **UI**: Tailwind CSS 4 + shadcn/ui (New York), Lucide icons
 - **Server State**: React Query (TanStack Query)
 - **Charts**: Recharts 3
-- **LLM**: OpenAI, Anthropic, Gemini, Ollama (multi-provider abstraction)
+- **LLM**: OpenAI, Anthropic, Gemini, Ollama, llama.cpp (multi-provider abstraction)
 - **Telemetry**: PostHog (opt-out model, enabled by default)
 - **Terminal UI**: Chalk (colors), Ora (spinners), Inquirer (prompts)
 - **Utilities**: date-fns
@@ -168,3 +184,28 @@ The CLI and dashboard support sessions from multiple AI coding tools via the `so
 **Supported sources:** `'claude-code'` (default), `'cursor'`, `'codex-cli'`, `'copilot-cli'`, `'copilot'`
 
 **Adding a new source tool:** See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the 6-step provider guide.
+
+### Analysis Core, Queue, and Reset Identity
+
+- Configured-provider session analysis has one shared `AnalysisEngine` in
+  `cli/src/analysis/analysis-engine.ts`. Both CLI and server entry points call
+  it; the server layer is a persistence adapter.
+- `analysis_usage` records provider/model, token/cache counts, cost, duration,
+  and the analyzed message count used for resume detection.
+- `analysis_queue` is a durable one-row-per-session FIFO queue. It coalesces a
+  request received while processing into `rerun_requested`, and uses
+  `next_attempt_at` for 30s/60s retry backoff before a third failure becomes
+  terminal. Processing claims have a ten-minute lease whose durable deadline
+  wakes a restarted queue pump before stale recovery.
+- `code_insights_metadata` gives the database a persistent ID and sync
+  generation. `reset` rotates the generation transactionally so a stale
+  `sync-state.json` checkpoint cannot silently suppress the next full sync.
+
+### Local Dashboard Boundary
+
+The server binds only to `127.0.0.1`. Middleware validates loopback
+`Host`/`Origin`, and all `/api` routes except `/api/health` and the
+`GET /api/session` bootstrap require a random in-memory session token.
+Static files and health are token-exempt but still pass the loopback checks.
+Restarting the server rotates the token. Full assumptions and limitations are
+documented in [docs/SECURITY-MODEL.md](docs/SECURITY-MODEL.md).

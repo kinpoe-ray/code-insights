@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { Copy, Download, Check, AlertTriangle } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { DispatchResponse } from '@/lib/api';
 
 interface PostPreviewProps {
@@ -12,6 +13,7 @@ interface PostPreviewProps {
 }
 
 export function PostPreview({ result }: PostPreviewProps) {
+  const { t } = useLocale();
   const [tab, setTab] = useState<'preview' | 'markdown'>('preview');
   const [copied, setCopied] = useState(false);
 
@@ -24,7 +26,7 @@ export function PostPreview({ result }: PostPreviewProps) {
     void navigator.clipboard.writeText(copyText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-      toast.success('Copied to clipboard');
+      toast.success(t('dispatch.preview.copiedToast'));
     });
   }
 
@@ -42,27 +44,27 @@ export function PostPreview({ result }: PostPreviewProps) {
     a.download = filename;
     a.click();
     URL.revokeObjectURL(url);
-    toast.success(`Downloaded ${filename}`);
+    toast.success(t('dispatch.preview.downloadedToast', { filename }));
   }
 
   // Blog: strip YAML frontmatter for clean prose in preview tab.
   const blogBodyOnly = result.markdown.replace(/^---[\s\S]*?---\n\n?/, '');
 
   const countLabel = isLinkedIn
-    ? `${result.characterCount} chars`
-    : `${result.wordCount} words`;
+    ? t('dispatch.preview.characterCount', { count: result.characterCount })
+    : t('dispatch.preview.wordCount', { count: result.wordCount });
 
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center justify-between gap-2 px-4 py-2 border-b shrink-0">
         {isLinkedIn ? (
           // LinkedIn: no Markdown tab — there is no .md artifact for LinkedIn posts
-          <span className="text-sm font-medium">Preview</span>
+          <span className="text-sm font-medium">{t('dispatch.preview.previewTab')}</span>
         ) : (
           <Tabs value={tab} onValueChange={(v) => setTab(v as 'preview' | 'markdown')}>
             <TabsList variant="default" className="h-8">
-              <TabsTrigger value="preview" className="text-xs px-3">Preview</TabsTrigger>
-              <TabsTrigger value="markdown" className="text-xs px-3">Markdown</TabsTrigger>
+              <TabsTrigger value="preview" className="text-xs px-3">{t('dispatch.preview.previewTab')}</TabsTrigger>
+              <TabsTrigger value="markdown" className="text-xs px-3">{t('dispatch.preview.markdownTab')}</TabsTrigger>
             </TabsList>
           </Tabs>
         )}
@@ -70,12 +72,12 @@ export function PostPreview({ result }: PostPreviewProps) {
           <span className="text-xs text-muted-foreground">{countLabel}</span>
           <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={handleCopy}>
             {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-            {copied ? 'Copied' : 'Copy'}
+            {copied ? t('dispatch.preview.copied') : t('dispatch.preview.copy')}
           </Button>
           {!isLinkedIn && (
             <Button variant="outline" size="sm" className="h-7 gap-1.5 text-xs" onClick={handleDownload}>
               <Download className="h-3.5 w-3.5" />
-              Download .md
+              {t('dispatch.preview.downloadMarkdown')}
             </Button>
           )}
         </div>
@@ -84,13 +86,13 @@ export function PostPreview({ result }: PostPreviewProps) {
       {result.degraded && (
         <div className="mx-4 mt-3 flex items-start gap-2 px-3 py-2.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-sm text-amber-700 dark:text-amber-400 shrink-0">
           <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
-          <span>The model returned unexpected formatting — post structure may be incomplete. Review before publishing.</span>
+          <span>{t('dispatch.preview.degraded')}</span>
         </div>
       )}
 
       {!isLinkedIn && result.frontmatter.tldr && (
         <div className="mx-4 mt-3 px-3 py-2 rounded-md bg-muted/50 border text-sm text-muted-foreground shrink-0">
-          <span className="font-medium text-foreground">TL;DR:</span> {result.frontmatter.tldr}
+          <span className="font-medium text-foreground">{t('dispatch.preview.tldr')}</span> {result.frontmatter.tldr}
         </div>
       )}
 

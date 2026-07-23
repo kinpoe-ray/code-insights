@@ -562,15 +562,12 @@ describe('parseAnalysisResponse', () => {
     expect(result.data.learnings).toEqual([]);
   });
 
-  it('coerces facet arrays to [] when LLM returns non-array facets', () => {
-    // LLM returned friction_points as a string instead of an array
+  it('removes invalid facets when LLM returns non-array facet fields', () => {
     const response = '<json>{ "summary": { "title": "Test", "content": "c", "bullets": [] }, "decisions": [], "learnings": [], "facets": { "friction_points": "none", "effective_patterns": null } }</json>';
     const result = parseAnalysisResponse(response);
     expect(result.success).toBe(true);
     if (!result.success) return;
-    // Both must be arrays — .some() calls on monitors must not throw
-    expect(Array.isArray(result.data.facets?.friction_points)).toBe(true);
-    expect(Array.isArray(result.data.facets?.effective_patterns)).toBe(true);
+    expect(result.data.facets).toBeUndefined();
   });
 });
 

@@ -3,6 +3,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Search, ChevronUp, ChevronDown, X, Loader2 } from 'lucide-react';
 import type { Message } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ConversationSearchProps {
   messages: Message[];
@@ -19,10 +20,11 @@ export function ConversationSearch({
   fetchAllMessages,
   isLoadingAll,
 }: ConversationSearchProps) {
+  const { t } = useLocale();
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(0);
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   const matches = useMemo(
     () =>
@@ -78,24 +80,26 @@ export function ConversationSearch({
     <div className="sticky top-0 z-10 bg-background/95 backdrop-blur border-b px-4 py-2 flex items-center gap-2">
       <Search className="h-4 w-4 text-muted-foreground shrink-0" />
       <Input
-        placeholder="Search conversation..."
+        placeholder={t('chat.search.placeholder')}
         value={query}
         onChange={(e) => handleInputChange(e.target.value)}
         className="h-8 text-sm"
       />
-      {isLoadingAll && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />}
+      {isLoadingAll && <Loader2 aria-label={t('chat.search.loading')} className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />}
       {debouncedQuery && (
         <>
           <span className="text-xs text-muted-foreground whitespace-nowrap shrink-0">
-            {matches.length > 0 ? `${matchIndex + 1} of ${matches.length}` : 'No matches'}
+            {matches.length > 0
+              ? t('chat.search.position', { current: matchIndex + 1, total: matches.length })
+              : t('chat.search.noMatches')}
           </span>
-          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={prev} disabled={matches.length === 0}>
+          <Button aria-label={t('chat.search.previous')} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={prev} disabled={matches.length === 0}>
             <ChevronUp className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={next} disabled={matches.length === 0}>
+          <Button aria-label={t('chat.search.next')} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={next} disabled={matches.length === 0}>
             <ChevronDown className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={clear}>
+          <Button aria-label={t('chat.search.clear')} variant="ghost" size="icon" className="h-7 w-7 shrink-0" onClick={clear}>
             <X className="h-4 w-4" />
           </Button>
         </>

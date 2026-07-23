@@ -8,6 +8,9 @@
 
 export interface AnalysisRunner {
   readonly name: string;
+  /** Public execution identity used for fail-closed freshness checks. */
+  readonly provider?: string;
+  readonly model?: string;
   runAnalysis(params: RunAnalysisParams): Promise<RunAnalysisResult>;
 }
 

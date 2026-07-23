@@ -3,6 +3,8 @@
 // No localStorage or browser APIs used here.
 
 import { loadConfig } from '@code-insights/cli/utils/config';
+import { guardOutboundCredentials } from '@code-insights/cli/privacy/outbound-credential-guard';
+import { validateProviderBaseUrl } from '@code-insights/cli/constants/llm-providers';
 import type { LLMClient } from './types.js';
 import type { LLMProviderConfig } from './types.js';
 import { createOpenAIClient } from './providers/openai.js';
@@ -46,20 +48,61 @@ export function createLLMClient(): LLMClient {
  * Create an LLM client from a specific config object (used for testing).
  */
 export function createClientFromConfig(config: LLMProviderConfig): LLMClient {
-  switch (config.provider) {
-    case 'openai':
-      return createOpenAIClient(config.apiKey ?? '', config.model);
-    case 'anthropic':
-      return createAnthropicClient(config.apiKey ?? '', config.model);
-    case 'gemini':
-      return createGeminiClient(config.apiKey ?? '', config.model);
-    case 'ollama':
-      return createOllamaClient(config.model, config.baseUrl);
-    case 'llamacpp':
-      return createLlamaCppClient(config.model, config.baseUrl);
-    default:
-      throw new Error(`Unknown LLM provider: ${config.provider}`);
+  const baseUrlValidation = validateProviderBaseUrl(config.provider, config.baseUrl);
+  if (!baseUrlValidation.ok) {
+    throw new Error(baseUrlValidation.message);
   }
+  const normalizedConfig = { ...config };
+  if (baseUrlValidation.value === undefined) {
+    delete normalizedConfig.baseUrl;
+  } else {
+    normalizedConfig.baseUrl = baseUrlValidation.value;
+  }
+
+  let adapter: LLMClient;
+  switch (normalizedConfig.provider) {
+    case 'openai':
+      adapter = createOpenAIClient(normalizedConfig.apiKey ?? '', normalizedConfig.model);
+      break;
+    case 'anthropic':
+      adapter = createAnthropicClient(
+        normalizedConfig.apiKey ?? '',
+        normalizedConfig.model,
+        normalizedConfig.baseUrl,
+      );
+      break;
+    case 'gemini':
+      adapter = createGeminiClient(normalizedConfig.apiKey ?? '', normalizedConfig.model);
+      break;
+    case 'ollama':
+      adapter = createOllamaClient(normalizedConfig.model, normalizedConfig.baseUrl);
+      break;
+    case 'llamacpp':
+      adapter = createLlamaCppClient(normalizedConfig.model, normalizedConfig.baseUrl);
+      break;
+    default:
+      throw new Error('Unknown LLM provider.');
+  }
+
+  const knownSecrets = normalizedConfig.apiKey ? [normalizedConfig.apiKey] : [];
+  return {
+    provider: adapter.provider,
+    model: adapter.model,
+    capabilities: adapter.capabilities,
+    prepareMessages(messages) {
+      const guarded = guardOutboundCredentials(messages, {
+        provider: normalizedConfig.provider,
+        knownSecrets,
+      });
+      return guarded.messages;
+    },
+    estimateTokens(text: string): number {
+      return adapter.estimateTokens(text);
+    },
+    async chat(messages, options) {
+      return adapter.chat(this.prepareMessages(messages), options);
+    },
+  };
 }
 
 /**

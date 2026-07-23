@@ -28,9 +28,15 @@
     "./analysis/prompt-quality-normalize": "./dist/analysis/prompt-quality-normalize.js",
     "./analysis/runner-types": "./dist/analysis/runner-types.js",
     "./analysis/native-runner": "./dist/analysis/native-runner.js",
+    "./analysis/llm-lock": "./dist/analysis/llm-lock.js",
     "./analysis/analysis-db": "./dist/analysis/analysis-db.js",
     "./analysis/analysis-usage-db": "./dist/analysis/analysis-usage-db.js",
+    "./analysis/analysis-engine": "./dist/analysis/analysis-engine.js",
+    "./analysis/analysis-language": "./dist/analysis/analysis-language.js",
+    "./analysis/analysis-pricing": "./dist/analysis/analysis-pricing.js",
+    "./analysis/llm-client": "./dist/analysis/llm-client.js",
     "./analysis/provider-runner": "./dist/analysis/provider-runner.js",
+    "./privacy/outbound-credential-guard": "./dist/privacy/outbound-credential-guard.js",
     "./analysis/schemas/session-analysis.json": "./dist/analysis/schemas/session-analysis.json",
     "./analysis/schemas/prompt-quality.json": "./dist/analysis/schemas/prompt-quality.json"
   },
@@ -38,12 +44,14 @@
     "code-insights": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc && node -e \"const{cpSync,mkdirSync}=require('fs');mkdirSync('dist/analysis/schemas',{recursive:true});cpSync('src/analysis/schemas/session-analysis.json','dist/analysis/schemas/session-analysis.json');cpSync('src/analysis/schemas/prompt-quality.json','dist/analysis/schemas/prompt-quality.json');\"",
+    "prebuild": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "tsc && node -e \"const{chmodSync,cpSync,mkdirSync}=require('fs');mkdirSync('dist/analysis/schemas',{recursive:true});cpSync('src/analysis/schemas/session-analysis.json','dist/analysis/schemas/session-analysis.json');cpSync('src/analysis/schemas/prompt-quality.json','dist/analysis/schemas/prompt-quality.json');chmodSync('dist/index.js',0o755);\"",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
     "prepublishOnly": "cd .. && pnpm -r build && cp -r dashboard/dist cli/dashboard-dist && cp -r server/dist cli/server-dist",
     "postpublish": "rm -rf dashboard-dist server-dist"
   },
@@ -56,7 +64,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0"
   },
   "keywords": [
     "claude",

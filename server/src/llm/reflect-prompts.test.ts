@@ -48,8 +48,23 @@ const sampleFrictionCategories = [
 const sampleEffectivePatterns = [
   { category: 'structured-planning', label: 'Structured Planning', frequency: 4, avg_confidence: 0.9, descriptions: ['desc 1'] },
 ];
+const chineseLanguageContext = {
+  preference: 'zh-CN' as const,
+  messages: [{ type: 'user', content: 'Aggregated analysis data' }],
+};
 
 describe('generateFrictionWinsPrompt', () => {
+  it('adds the selected analysis language', () => {
+    const result = generateFrictionWinsPrompt({
+      frictionCategories: sampleFrictionCategories,
+      effectivePatterns: sampleEffectivePatterns,
+      totalSessions: 10,
+      period: '30d',
+    }, chineseLanguageContext);
+
+    expect(result).toContain('Simplified Chinese (zh-CN)');
+  });
+
   it('includes session count and period in output', () => {
     const result = generateFrictionWinsPrompt({
       frictionCategories: sampleFrictionCategories,
@@ -164,6 +179,11 @@ describe('generateRulesSkillsPrompt', () => {
     targetTool: 'Claude Code',
   };
 
+  it('adds the selected analysis language', () => {
+    expect(generateRulesSkillsPrompt(sampleData, chineseLanguageContext))
+      .toContain('Simplified Chinese (zh-CN)');
+  });
+
   it('includes target tool name', () => {
     const result = generateRulesSkillsPrompt(sampleData);
     expect(result).toContain('Claude Code');
@@ -199,6 +219,11 @@ describe('generateWorkingStylePrompt', () => {
     period: '2026-W11',
     frictionFrequency: 12,
   };
+
+  it('adds the selected analysis language', () => {
+    expect(generateWorkingStylePrompt(sampleData, chineseLanguageContext))
+      .toContain('Simplified Chinese (zh-CN)');
+  });
 
   it('includes session count and period', () => {
     const result = generateWorkingStylePrompt(sampleData);

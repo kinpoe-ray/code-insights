@@ -37,7 +37,7 @@ Each normalizer contains 10–44 alias mappings. A typo in an alias silently cor
 
 **MUST TDD: Migrations (`cli/src/db/`)**
 
-Migrations apply irreversible schema changes to users' SQLite databases. A non-idempotent migration could duplicate rows or fail on re-run. Tests with in-memory SQLite verify the complete V1→V7 sequence applies cleanly and can be safely re-run.
+Migrations apply irreversible schema changes to users' SQLite databases. A non-idempotent migration could duplicate rows or fail on re-run. Tests with in-memory SQLite verify the complete V1→V11 sequence applies cleanly and can be safely re-run.
 
 **MUST TDD: Shared Utilities**
 
@@ -65,7 +65,7 @@ Commander.js command registration and argument parsing is integration-level beha
 |--------|---------|---------------|
 | Normalizers | 100% of canonical categories + all aliases | Every alias in the alias map |
 | Parsers | Happy path + empty + malformed + edge cases | All `null`-return conditions |
-| Migrations | V1→V7 sequential, double-apply idempotency | All added tables and columns |
+| Migrations | V1→V11 sequential, double-apply idempotency | All added tables, columns, indexes, and rebuilt keys |
 | Utilities | All exported functions | Happy path + boundary conditions |
 
 ---
@@ -155,6 +155,7 @@ Use `new Database(':memory:')` so tests are fully isolated with no on-disk state
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../migrate.js';
+import { CURRENT_SCHEMA_VERSION } from '../schema.js';
 
 function freshDb(): Database.Database {
   return new Database(':memory:');
@@ -165,7 +166,7 @@ describe('runMigrations', () => {
     const db = freshDb();
     runMigrations(db);
     const row = db.prepare('SELECT MAX(version) as v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(7); // update when schema version bumps
+    expect(row.v).toBe(CURRENT_SCHEMA_VERSION);
   });
 
   it('is idempotent — double apply leaves no duplicate rows', () => {
@@ -173,7 +174,7 @@ describe('runMigrations', () => {
     runMigrations(db);
     runMigrations(db); // second run must be a no-op
     const count = (db.prepare('SELECT COUNT(*) as n FROM schema_version').get() as { n: number }).n;
-    expect(count).toBe(7);
+    expect(count).toBe(CURRENT_SCHEMA_VERSION);
   });
 });
 ```
@@ -215,6 +216,12 @@ describe('parseIntParam', () => {
 # Run all tests (from repo root)
 pnpm test
 
+# Build current CLI declarations, then type-check server and dashboard
+pnpm typecheck
+
+# Build CLI, server, then dashboard
+pnpm build
+
 # Watch mode (re-runs on file changes)
 pnpm test:watch
 
@@ -222,10 +229,38 @@ pnpm test:watch
 pnpm test:coverage
 
 # Run a single test file
-pnpm test cli/src/db/__tests__/migrate.test.ts
+pnpm --filter @code-insights/cli test -- src/db/__tests__/migrate.test.ts
 ```
 
 Tests run via **vitest** with native ESM support. Configuration lives in the root `package.json`.
+
+The root typecheck builds `@code-insights/cli` before checking its workspace
+consumers. This is an intentional dependency build: server imports are resolved
+through the CLI package export map in `cli/package.json`, so clean-checkout
+verification must create the current declarations. The CLI prebuild first
+removes its generated `dist` directory, preventing declarations for deleted
+source files from surviving in a reused working tree. CI also asserts that
+package output directories are absent before this command.
+
+### Current Reliability and Security Regression Suites
+
+Schema V11 and the local security boundary have dedicated tests in addition to
+the domain suites above:
+
+- `cli/src/db/__tests__/migrate.test.ts` and `cli/src/db/queue.test.ts` cover
+  V1→V11 migration, FIFO claims, durable backoff, restart-visible ten-minute
+  leases, stale recovery, and rerun coalescing.
+- `cli/src/analysis/__tests__/analysis-engine.test.ts` and
+  `cli/src/privacy/outbound-credential-guard.test.ts` cover the shared engine
+  contract and outbound credential redaction.
+- `server/src/security/local-dashboard-security.test.ts` and
+  `dashboard/src/lib/dashboard-http.test.ts` cover loopback `Host`/`Origin`
+  checks, token bootstrap, authenticated API requests, and one-time
+  re-bootstrap after a token-rotation `401`.
+- `server/src/routes/analysis-queue.test.ts`,
+  `server/src/analysis/queue-pump.test.ts`, and
+  `cli/src/analysis/__tests__/queue-worker.test.ts` cover the POST batch
+  contract and process/SQLite scheduling boundary.
 
 ---
 

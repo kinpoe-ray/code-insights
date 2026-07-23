@@ -7,6 +7,7 @@ import { loadLLMConfig } from '../llm/client.js';
 import { analyzeSession, analyzePromptQuality, findRecurringInsights } from '../llm/analysis.js';
 import { getSessionAnalysisUsage } from '../llm/analysis-usage-db.js';
 import { calculateAnalysisCost } from '../llm/analysis-pricing.js';
+import { llmBusyPayload, runWithLlmLock } from '../llm/llm-lock.js';
 import {
   loadSessionForAnalysis,
   loadSessionMessages,
@@ -81,7 +82,9 @@ app.post('/session', requireLLM(), async (c) => {
   const messages = loadSessionMessages(db, body.sessionId);
 
   const startTime = Date.now();
-  const result = await analyzeSession(session, messages);
+  const locked = await runWithLlmLock(c, () => analyzeSession(session, messages));
+  if (!locked.acquired) return c.json(llmBusyPayload(), 409);
+  const result = locked.value;
   trackAnalysisResult('session', result, startTime, {
     onSuccess: () => {
       trackEvent('insight_generated', { type: 'session', count: result.insights.length });
@@ -145,7 +148,9 @@ app.post('/prompt-quality', requireLLM(), async (c) => {
   const messages = loadSessionMessages(db, body.sessionId);
 
   const startTime = Date.now();
-  const result = await analyzePromptQuality(session, messages);
+  const locked = await runWithLlmLock(c, () => analyzePromptQuality(session, messages));
+  if (!locked.acquired) return c.json(llmBusyPayload(), 409);
+  const result = locked.value;
   trackAnalysisResult('prompt-quality', result, startTime, {
     onSuccess: () => {
       trackEvent('insight_generated', { type: 'prompt_quality', count: result.insights.length });
@@ -219,7 +224,9 @@ app.post('/recurring', requireLLM(), async (c) => {
   }>;
 
   const startTime = Date.now();
-  const result = await findRecurringInsights(insights);
+  const locked = await runWithLlmLock(c, () => findRecurringInsights(insights));
+  if (!locked.acquired) return c.json(llmBusyPayload(), 409);
+  const result = locked.value;
   // recurring errors don't carry error_type/response_preview — pass them as undefined;
   // trackAnalysisResult handles undefined gracefully (omits from event properties).
   trackAnalysisResult('recurring', {

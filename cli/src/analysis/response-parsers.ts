@@ -3,6 +3,85 @@
 
 import { jsonrepair } from 'jsonrepair';
 import type { AnalysisResponse, ParseError, ParseResult, PromptQualityResponse, PromptQualityDimensionScores } from './prompt-types.js';
+import {
+  CANONICAL_FRICTION_CATEGORIES,
+  CANONICAL_PATTERN_CATEGORIES,
+} from './prompt-constants.js';
+import { normalizeFrictionCategory } from './friction-normalize.js';
+import { normalizePatternCategory } from './pattern-normalize.js';
+
+type AnalysisFacets = NonNullable<AnalysisResponse['facets']>;
+type FrictionPoint = AnalysisFacets['friction_points'][number];
+type EffectivePattern = AnalysisFacets['effective_patterns'][number];
+
+const FRICTION_CATEGORIES = new Set<string>(CANONICAL_FRICTION_CATEGORIES);
+const FRICTION_ATTRIBUTIONS = new Set([
+  'user-actionable',
+  'ai-capability',
+  'environmental',
+]);
+const FRICTION_SEVERITIES = new Set(['high', 'medium', 'low']);
+const EFFECTIVE_PATTERN_CATEGORIES = new Set<string>(CANONICAL_PATTERN_CATEGORIES);
+const EFFECTIVE_PATTERN_DRIVERS = new Set([
+  'user-driven',
+  'ai-driven',
+  'collaborative',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function normalizeFrictionPoint(value: unknown): FrictionPoint | undefined {
+  if (!isRecord(value) || typeof value.category !== 'string') return undefined;
+  const category = normalizeFrictionCategory(value.category);
+  if (
+    !FRICTION_CATEGORIES.has(category)
+    || typeof value.description !== 'string'
+    || typeof value.severity !== 'string'
+    || !FRICTION_SEVERITIES.has(value.severity)
+    || typeof value.resolution !== 'string'
+    || !isOptionalString(value._reasoning)
+    || (
+      value.attribution !== undefined
+      && (
+        typeof value.attribution !== 'string'
+        || !FRICTION_ATTRIBUTIONS.has(value.attribution)
+      )
+    )
+  ) {
+    return undefined;
+  }
+  return { ...value, category } as unknown as FrictionPoint;
+}
+
+function normalizeEffectivePattern(value: unknown): EffectivePattern | undefined {
+  if (!isRecord(value) || typeof value.category !== 'string') return undefined;
+  const category = normalizePatternCategory(value.category);
+  if (
+    !EFFECTIVE_PATTERN_CATEGORIES.has(category)
+    || typeof value.description !== 'string'
+    || typeof value.confidence !== 'number'
+    || !Number.isFinite(value.confidence)
+    || value.confidence < 0
+    || value.confidence > 100
+    || !isOptionalString(value._reasoning)
+    || (
+      value.driver !== undefined
+      && (
+        typeof value.driver !== 'string'
+        || !EFFECTIVE_PATTERN_DRIVERS.has(value.driver)
+      )
+    )
+  ) {
+    return undefined;
+  }
+  return { ...value, category } as unknown as EffectivePattern;
+}
 
 function buildResponsePreview(text: string, head = 200, tail = 200): string {
   if (text.length <= head + tail + 20) return text;
@@ -14,6 +93,49 @@ export function extractJsonPayload(response: string): string | null {
   if (tagged?.[1]) return tagged[1].trim();
   const jsonMatch = response.match(/\{[\s\S]*\}/);
   return jsonMatch ? jsonMatch[0] : null;
+}
+
+export function validateAnalysisFacets(value: unknown): AnalysisResponse['facets'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const facets = value as Record<string, unknown>;
+  if (typeof facets.outcome_satisfaction !== 'string' || facets.outcome_satisfaction.trim() === '') {
+    return undefined;
+  }
+  if (facets.workflow_pattern !== null && typeof facets.workflow_pattern !== 'string') {
+    return undefined;
+  }
+  if (typeof facets.had_course_correction !== 'boolean') {
+    return undefined;
+  }
+  if (facets.course_correction_reason !== null && typeof facets.course_correction_reason !== 'string') {
+    return undefined;
+  }
+  if (
+    typeof facets.iteration_count !== 'number'
+    || !Number.isInteger(facets.iteration_count)
+    || facets.iteration_count < 0
+  ) {
+    return undefined;
+  }
+  if (!Array.isArray(facets.friction_points) || !Array.isArray(facets.effective_patterns)) {
+    return undefined;
+  }
+
+  const frictionPoints = facets.friction_points
+    .map(normalizeFrictionPoint)
+    .filter((point): point is FrictionPoint => point !== undefined);
+  const effectivePatterns = facets.effective_patterns
+    .map(normalizeEffectivePattern)
+    .filter((pattern): pattern is EffectivePattern => pattern !== undefined);
+
+  return {
+    ...facets,
+    friction_points: frictionPoints,
+    effective_patterns: effectivePatterns,
+  } as unknown as AnalysisResponse['facets'];
 }
 
 /**
@@ -63,11 +185,15 @@ export function parseAnalysisResponse(response: string): ParseResult<AnalysisRes
   parsed.decisions = Array.isArray(parsed.decisions) ? parsed.decisions : [];
   parsed.learnings = Array.isArray(parsed.learnings) ? parsed.learnings : [];
 
-  // Normalize facet arrays before monitors access .some() — a non-array truthy value
-  // (e.g. LLM returns "friction_points": "none") would throw a TypeError on .some().
-  if (parsed.facets) {
-    if (!Array.isArray(parsed.facets.friction_points)) parsed.facets.friction_points = [];
-    if (!Array.isArray(parsed.facets.effective_patterns)) parsed.facets.effective_patterns = [];
+  // Invalid optional facets must not contaminate an otherwise usable analysis.
+  // The shared validator also preserves the existing friction-point cleanup.
+  if (parsed.facets !== undefined) {
+    const facets = validateAnalysisFacets(parsed.facets);
+    if (facets) {
+      parsed.facets = facets;
+    } else {
+      delete parsed.facets;
+    }
   }
 
   // Observability: two-tier tooling-limitation monitor.

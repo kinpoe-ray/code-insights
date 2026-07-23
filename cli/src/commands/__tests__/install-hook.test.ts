@@ -5,6 +5,36 @@ import * as os from 'os';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
+const fsMockState = vi.hoisted(() => ({
+  failRename: false,
+  mutateTargetAfterTempWrite: undefined as string | undefined,
+}));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof fs>();
+  return {
+    ...actual,
+    writeFileSync: vi.fn((...args: any[]) => {
+      const result = (actual.writeFileSync as any)(...args);
+      const writtenPath = String(args[0]);
+      if (
+        fsMockState.mutateTargetAfterTempWrite
+        && writtenPath.includes('.settings.json.')
+        && writtenPath.endsWith('.tmp')
+      ) {
+        const target = fsMockState.mutateTargetAfterTempWrite;
+        fsMockState.mutateTargetAfterTempWrite = undefined;
+        actual.writeFileSync(target, JSON.stringify({ concurrentEdit: true }));
+      }
+      return result;
+    }),
+    renameSync: vi.fn((oldPath: fs.PathLike, newPath: fs.PathLike) => {
+      if (fsMockState.failRename) throw new Error('simulated rename failure');
+      return actual.renameSync(oldPath, newPath);
+    }),
+  };
+});
+
 vi.mock('../../utils/telemetry.js', () => ({
   trackEvent: vi.fn(),
   captureError: vi.fn(),
@@ -32,6 +62,8 @@ beforeEach(() => {
   // Each test gets its own temp dir as home — never touches real ~/.claude/settings.json
   mockHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-hook-test-'));
   _mockOs.homeDir = mockHomeDir;
+  fsMockState.failRename = false;
+  fsMockState.mutateTargetAfterTempWrite = undefined;
   // Reset module cache so CLAUDE_SETTINGS_DIR / HOOKS_FILE pick up the new mockHomeDir
   vi.resetModules();
 });
@@ -55,6 +87,23 @@ function writeSettings(data: unknown): void {
   const dir = path.join(mockHomeDir, '.claude');
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(hooksFile(), JSON.stringify(data));
+}
+
+function writeRawSettings(content: string): void {
+  const dir = path.join(mockHomeDir, '.claude');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(hooksFile(), content);
+}
+
+function writeSymlinkedSettings(data: unknown): string {
+  const settingsDir = path.join(mockHomeDir, '.claude');
+  const targetDir = path.join(mockHomeDir, 'shared-claude-settings');
+  const target = path.join(targetDir, 'settings.json');
+  fs.mkdirSync(settingsDir, { recursive: true });
+  fs.mkdirSync(targetDir, { recursive: true });
+  fs.writeFileSync(target, JSON.stringify(data));
+  fs.symlinkSync(target, hooksFile());
+  return target;
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -86,9 +135,21 @@ describe('installHookCommand', () => {
       expect(sessionEndCmd.type).toBe('command');
       expect(sessionEndCmd.command).toContain('session-end --native -q');
       // Must use node + absolute path (not process.argv[1] which is unstable under npx)
-      expect(sessionEndCmd.command).toMatch(/^node .+index\.js session-end --native -q$/);
+      expect(sessionEndCmd.command).toMatch(/^node '.+index\.js' session-end --native -q$/);
       // 10s timeout — session-end exits immediately after spawning the worker
       expect(sessionEndCmd.timeout).toBe(10000);
+    });
+
+    it('can install a provider-backed SessionEnd hook for the configured LLM', async () => {
+      const { installHookCommand } = await import('../install-hook.js');
+      await installHookCommand({ native: false });
+
+      const settings = readSettings();
+      const hooks = settings.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+      const command = hooks.SessionEnd[0].hooks[0].command;
+
+      expect(command).toContain('session-end --provider -q');
+      expect(command).not.toContain(' --native ');
     });
 
     it('preserves existing settings.json content', async () => {
@@ -100,6 +161,16 @@ describe('installHookCommand', () => {
       const settings = readSettings();
       expect(settings.theme).toBe('dark');
       expect(settings.someOtherKey).toBe(42);
+    });
+
+    it('fails closed and preserves an unparseable settings.json', async () => {
+      const invalidSettings = '{"hooks":{"SessionEnd":[';
+      writeRawSettings(invalidSettings);
+
+      const { installHookCommand } = await import('../install-hook.js');
+
+      await expect(installHookCommand()).rejects.toThrow(/parse/i);
+      expect(fs.readFileSync(hooksFile(), 'utf-8')).toBe(invalidSettings);
     });
 
     it('preserves existing non-code-insights SessionEnd hooks', async () => {
@@ -129,6 +200,112 @@ describe('installHookCommand', () => {
       const hooks = settings.hooks as Record<string, unknown[]>;
       // Second install must be idempotent — still exactly one code-insights hook
       expect(hooks.SessionEnd).toHaveLength(1);
+    });
+
+    it('pins a custom Code Insights config directory into the hook command', async () => {
+      const previous = process.env.CODE_INSIGHTS_CONFIG_DIR;
+      process.env.CODE_INSIGHTS_CONFIG_DIR = path.join(mockHomeDir, 'custom config');
+      try {
+        const { installHookCommand } = await import('../install-hook.js');
+        await installHookCommand();
+      } finally {
+        if (previous === undefined) delete process.env.CODE_INSIGHTS_CONFIG_DIR;
+        else process.env.CODE_INSIGHTS_CONFIG_DIR = previous;
+      }
+
+      const settings = readSettings();
+      const hooks = settings.hooks as Record<string, Array<{ hooks: Array<{ command: string }> }>>;
+      expect(hooks.SessionEnd[0].hooks[0].command).toContain(
+        `CODE_INSIGHTS_CONFIG_DIR='${path.join(mockHomeDir, 'custom config')}'`,
+      );
+    });
+
+    it('atomically replaces settings.json through a same-directory rename', async () => {
+      writeSettings({ theme: 'dark' });
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await installHookCommand();
+
+      const renameSpy = vi.mocked(fs.renameSync);
+      expect(renameSpy).toHaveBeenCalledTimes(1);
+      const [temporaryPath, destinationPath] = renameSpy.mock.calls[0];
+      expect(path.dirname(String(temporaryPath))).toBe(path.dirname(hooksFile()));
+      expect(destinationPath).toBe(hooksFile());
+      expect(fs.existsSync(String(temporaryPath))).toBe(false);
+    });
+
+    it('writes settings.json with mode 0600', async () => {
+      writeSettings({ theme: 'dark' });
+      fs.chmodSync(hooksFile(), 0o644);
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await installHookCommand();
+
+      expect(fs.statSync(hooksFile()).mode & 0o777).toBe(0o600);
+    });
+
+    it('removes the temporary settings file when atomic replacement fails', async () => {
+      writeSettings({ theme: 'dark' });
+      fsMockState.failRename = true;
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await expect(installHookCommand()).rejects.toThrow('simulated rename failure');
+
+      const renameSpy = vi.mocked(fs.renameSync);
+      expect(renameSpy).toHaveBeenCalledTimes(1);
+      const [temporaryPath] = renameSpy.mock.calls[0];
+      expect(fs.existsSync(String(temporaryPath))).toBe(false);
+      expect(readSettings()).toEqual({ theme: 'dark' });
+    });
+
+    it('does not overwrite a concurrent settings edit made before atomic replacement', async () => {
+      writeSettings({ theme: 'dark' });
+      fsMockState.mutateTargetAfterTempWrite = hooksFile();
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await expect(installHookCommand()).rejects.toThrow(/changed/i);
+
+      expect(readSettings()).toEqual({ concurrentEdit: true });
+    });
+
+    it('rejects when settings.json cannot be written', async () => {
+      fs.writeFileSync(path.join(mockHomeDir, '.claude'), 'not a directory');
+
+      const { installHookCommand } = await import('../install-hook.js');
+
+      await expect(installHookCommand()).rejects.toThrow();
+    });
+
+    it('updates a symlink target atomically without replacing the settings.json symlink', async () => {
+      const target = writeSymlinkedSettings({ theme: 'dark' });
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await installHookCommand();
+
+      expect(fs.lstatSync(hooksFile()).isSymbolicLink()).toBe(true);
+      expect(fs.realpathSync(hooksFile())).toBe(fs.realpathSync(target));
+      const settings = JSON.parse(fs.readFileSync(target, 'utf-8')) as Record<string, unknown>;
+      expect(settings.theme).toBe('dark');
+      expect(settings.hooks).toBeDefined();
+
+      const renameSpy = vi.mocked(fs.renameSync);
+      const [temporaryPath, destinationPath] = renameSpy.mock.calls.at(-1)!;
+      expect(path.dirname(String(temporaryPath))).toBe(path.dirname(fs.realpathSync(target)));
+      expect(destinationPath).toBe(fs.realpathSync(target));
+    });
+
+    it('fails closed without replacing a dangling settings.json symlink', async () => {
+      const settingsDir = path.join(mockHomeDir, '.claude');
+      fs.mkdirSync(settingsDir, { recursive: true });
+      const linkTarget = path.join(mockHomeDir, 'missing', 'settings.json');
+      fs.symlinkSync(linkTarget, hooksFile());
+
+      const { installHookCommand } = await import('../install-hook.js');
+      await expect(installHookCommand()).rejects.toThrow(/symbolic link|symlink/i);
+
+      expect(fs.lstatSync(hooksFile()).isSymbolicLink()).toBe(true);
+      expect(fs.readlinkSync(hooksFile())).toBe(linkTarget);
+      expect(fs.existsSync(linkTarget)).toBe(false);
     });
   });
 
@@ -266,5 +443,67 @@ describe('uninstallHookCommand', () => {
 
     const settings = readSettings();
     expect(settings.hooks).toBeUndefined();
+  });
+
+  it('fails closed and preserves an unparseable settings.json', async () => {
+    const invalidSettings = '{"hooks":{"SessionEnd":[';
+    writeRawSettings(invalidSettings);
+
+    const { uninstallHookCommand } = await import('../install-hook.js');
+    await expect(uninstallHookCommand()).rejects.toThrow(/parse/i);
+
+    expect(fs.readFileSync(hooksFile(), 'utf-8')).toBe(invalidSettings);
+  });
+
+  it('atomically writes uninstall changes and propagates replacement failures', async () => {
+    writeSettings({
+      hooks: {
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'node /path/code-insights session-end -q' }] }],
+      },
+    });
+    fsMockState.failRename = true;
+
+    const { uninstallHookCommand } = await import('../install-hook.js');
+    await expect(uninstallHookCommand()).rejects.toThrow('simulated rename failure');
+
+    expect(readSettings()).toEqual({
+      hooks: {
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'node /path/code-insights session-end -q' }] }],
+      },
+    });
+    const renameSpy = vi.mocked(fs.renameSync);
+    expect(renameSpy).toHaveBeenCalledTimes(1);
+    const [temporaryPath] = renameSpy.mock.calls[0];
+    expect(fs.existsSync(String(temporaryPath))).toBe(false);
+  });
+
+  it('does not overwrite a concurrent edit while uninstalling hooks', async () => {
+    writeSettings({
+      hooks: {
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'node /path/code-insights session-end -q' }] }],
+      },
+    });
+    fsMockState.mutateTargetAfterTempWrite = hooksFile();
+
+    const { uninstallHookCommand } = await import('../install-hook.js');
+    await expect(uninstallHookCommand()).rejects.toThrow(/changed/i);
+
+    expect(readSettings()).toEqual({ concurrentEdit: true });
+  });
+
+  it('updates a symlink target while preserving the settings.json symlink', async () => {
+    const target = writeSymlinkedSettings({
+      theme: 'dark',
+      hooks: {
+        SessionEnd: [{ hooks: [{ type: 'command', command: 'node /path/code-insights session-end -q' }] }],
+      },
+    });
+
+    const { uninstallHookCommand } = await import('../install-hook.js');
+    await uninstallHookCommand();
+
+    expect(fs.lstatSync(hooksFile()).isSymbolicLink()).toBe(true);
+    expect(fs.realpathSync(hooksFile())).toBe(fs.realpathSync(target));
+    expect(JSON.parse(fs.readFileSync(target, 'utf-8'))).toEqual({ theme: 'dark' });
   });
 });

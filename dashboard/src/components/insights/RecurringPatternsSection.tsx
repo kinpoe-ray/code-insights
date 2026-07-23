@@ -1,11 +1,11 @@
 import { useMemo } from 'react';
 import { Link } from 'react-router';
-import { formatDistanceToNow } from 'date-fns';
 import { Badge } from '@/components/ui/badge';
 import { Repeat2 } from 'lucide-react';
-import { INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
+import { INSIGHT_TYPE_MESSAGE_KEYS } from '@/lib/constants/colors';
 import { buildPatternGroups } from '@/lib/pattern-grouping';
 import type { Insight, InsightType } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RecurringPatternsSectionProps {
   insights: Insight[];
@@ -22,6 +22,7 @@ interface PatternGroup {
 }
 
 export function RecurringPatternsSection({ insights }: RecurringPatternsSectionProps) {
+  const { t, formatRelativeDate } = useLocale();
   const patterns = useMemo((): PatternGroup[] => {
     const insightMap = new Map<string, Insight>();
     for (const insight of insights) {
@@ -74,7 +75,7 @@ export function RecurringPatternsSection({ insights }: RecurringPatternsSectionP
     <div>
       <div className="flex items-center gap-2 mb-3">
         <Repeat2 className="h-4 w-4 text-amber-500" />
-        <h2 className="text-sm font-medium">Recurring Patterns</h2>
+        <h2 className="text-sm font-medium">{t('insights.patterns.title')}</h2>
         <Badge variant="secondary" className="text-xs">
           {patterns.length}
         </Badge>
@@ -93,12 +94,14 @@ export function RecurringPatternsSection({ insights }: RecurringPatternsSectionP
               </Badge>
             </div>
             <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
-              <span>{INSIGHT_TYPE_LABELS[pattern.type as InsightType] || pattern.type}</span>
+              <span>{INSIGHT_TYPE_MESSAGE_KEYS[pattern.type as InsightType]
+                ? t(INSIGHT_TYPE_MESSAGE_KEYS[pattern.type as InsightType])
+                : pattern.type}</span>
               <span>--</span>
               <span className="truncate">{pattern.projects.join(', ')}</span>
             </div>
             <p className="text-xs text-muted-foreground">
-              Last seen {formatDistanceToNow(new Date(pattern.lastSeen), { addSuffix: true })}
+              {t('insights.patterns.lastSeen', { relative: formatRelativeDate(pattern.lastSeen) })}
             </p>
           </Link>
         ))}

@@ -9,10 +9,47 @@ import {
 } from '../../../utils/hooks-utils.js';
 import type { Check, CheckResult } from '../types.js';
 
-/** Extract the binary path from a hook command string like "node /path/to/index.js session-end ..." */
+/** Extract the CLI path after the `node` executable from a shell command. */
 function extractBinaryPath(command: string): string | null {
-  const match = command.match(/node\s+(\S+)/);
-  return match ? match[1] : null;
+  const tokens: string[] = [];
+  let token = '';
+  let quote: "'" | '"' | null = null;
+
+  for (let index = 0; index < command.length; index += 1) {
+    const character = command[index];
+
+    if (quote) {
+      if (character === quote) {
+        quote = null;
+      } else {
+        token += character;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+    } else if (/\s/.test(character)) {
+      if (token) {
+        tokens.push(token);
+        token = '';
+      }
+    } else if (character === '\\' && index + 1 < command.length) {
+      token += command[index + 1];
+      index += 1;
+    } else {
+      token += character;
+    }
+  }
+
+  if (quote) return null;
+  if (token) tokens.push(token);
+
+  const nodeIndex = tokens.findIndex((candidate) => {
+    const executable = candidate.replace(/\\/g, '/').split('/').pop()?.toLowerCase();
+    return executable === 'node' || executable === 'node.exe';
+  });
+  return nodeIndex >= 0 ? tokens[nodeIndex + 1] ?? null : null;
 }
 
 export function hooksChecks(): Check[] {

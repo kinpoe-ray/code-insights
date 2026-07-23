@@ -6,6 +6,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { SOURCE_TOOL_COLORS } from '@/lib/constants/colors';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 export const SOURCE_TOOLS = [
   { value: 'claude-code', label: 'Claude Code' },
@@ -32,13 +33,14 @@ interface SourceToolSelectProps {
 }
 
 export function SourceToolSelect({ value, onValueChange, className }: SourceToolSelectProps) {
+  const { t } = useLocale();
   return (
     <Select value={value} onValueChange={onValueChange}>
       <SelectTrigger className={className}>
-        <SelectValue placeholder="All Sources" />
+        <SelectValue placeholder={t('sessions.filters.allSources')} />
       </SelectTrigger>
       <SelectContent>
-        <SelectItem value="all">All Sources</SelectItem>
+        <SelectItem value="all">{t('sessions.filters.allSources')}</SelectItem>
         {SOURCE_TOOLS.map((tool) => (
           <SelectItem key={tool.value} value={tool.value}>
             <span className="flex items-center gap-1.5">

@@ -12,6 +12,7 @@ import { calculateAnalysisCost } from '../llm/analysis-pricing.js';
 import type { AnalysisResult, AnalysisOptions } from '../llm/analysis.js';
 import type { SessionData } from '../llm/analysis-db.js';
 import type { SQLiteMessageRow } from '../llm/prompt-types.js';
+import { acquireServerLlmLock, llmBusyPayload } from '../llm/llm-lock.js';
 
 /**
  * Load a session row for LLM analysis. Returns undefined if the session doesn't exist
@@ -164,6 +165,15 @@ export function streamSessionAnalysis(
 
   return streamSSE(c, async (stream) => {
     const streamStart = Date.now();
+    const lock = acquireServerLlmLock(c);
+    if (!lock) {
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify(llmBusyPayload()),
+      });
+      return;
+    }
+
     try {
       const abortSignal = c.req.raw.signal;
 
@@ -247,6 +257,8 @@ export function streamSessionAnalysis(
         event: 'error',
         data: JSON.stringify({ error: message }),
       }).catch(() => {});
+    } finally {
+      lock.release();
     }
   });
 }
@@ -294,59 +306,72 @@ export function streamBatchBackfill(
   const db = getDb();
 
   return streamSSE(c, async (stream) => {
+    const lock = acquireServerLlmLock(c);
+    if (!lock) {
+      await stream.writeSSE({
+        event: 'error',
+        data: JSON.stringify(llmBusyPayload()),
+      });
+      return;
+    }
+
     const abortSignal = c.req.raw.signal;
     let completed = 0;
     let failed = 0;
     const total = sessionIds.length;
 
-    for (const sessionId of sessionIds) {
-      if (abortSignal.aborted) break;
+    try {
+      for (const sessionId of sessionIds) {
+        if (abortSignal.aborted) break;
 
-      const session = loadSessionForAnalysis(db, sessionId);
+        const session = loadSessionForAnalysis(db, sessionId);
 
-      if (!session) {
-        failed++;
+        if (!session) {
+          failed++;
+          await stream.writeSSE({
+            event: 'progress',
+            data: JSON.stringify({ completed, failed, total, currentSessionId: sessionId }),
+          });
+          continue;
+        }
+
+        // Skip sessions that already have work done unless force=true.
+        if (!force && opts.shouldSkip(sessionId)) {
+          completed++;
+          await stream.writeSSE({
+            event: 'progress',
+            data: JSON.stringify({ completed, failed, total, currentSessionId: sessionId }),
+          });
+          continue;
+        }
+
+        const messages = loadSessionMessages(db, sessionId);
+        const result = await opts.analysisFn(session, messages, { signal: abortSignal });
+
+        if (result.success) {
+          completed++;
+        } else {
+          failed++;
+        }
+
         await stream.writeSSE({
           event: 'progress',
-          data: JSON.stringify({ completed, failed, total, currentSessionId: sessionId }),
+          data: JSON.stringify({
+            completed,
+            failed,
+            total,
+            currentSessionId: sessionId,
+            ...(result.success ? {} : { error: result.error }),
+          }),
         });
-        continue;
-      }
-
-      // Skip sessions that already have work done unless force=true.
-      if (!force && opts.shouldSkip(sessionId)) {
-        completed++;
-        await stream.writeSSE({
-          event: 'progress',
-          data: JSON.stringify({ completed, failed, total, currentSessionId: sessionId }),
-        });
-        continue;
-      }
-
-      const messages = loadSessionMessages(db, sessionId);
-      const result = await opts.analysisFn(session, messages, { signal: abortSignal });
-
-      if (result.success) {
-        completed++;
-      } else {
-        failed++;
       }
 
       await stream.writeSSE({
-        event: 'progress',
-        data: JSON.stringify({
-          completed,
-          failed,
-          total,
-          currentSessionId: sessionId,
-          ...(result.success ? {} : { error: result.error }),
-        }),
+        event: 'complete',
+        data: JSON.stringify({ completed, failed, total }),
       });
+    } finally {
+      lock.release();
     }
-
-    await stream.writeSSE({
-      event: 'complete',
-      data: JSON.stringify({ completed, failed, total }),
-    });
   });
 }

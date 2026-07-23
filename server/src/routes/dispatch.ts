@@ -1,6 +1,7 @@
 import { Hono } from 'hono';
 import { getDb } from '@code-insights/cli/db/client';
 import { createLLMClient } from '../llm/client.js';
+import { acquireServerLlmLock, llmBusyPayload } from '../llm/llm-lock.js';
 import { requireLLM } from './route-helpers.js';
 import {
   buildDispatchSystemPrompt,
@@ -161,48 +162,54 @@ app.post('/generate', requireLLM(), async (c) => {
 
   const systemPrompt = buildDispatchSystemPrompt(tone, format);
   const userMessage = buildDispatchContext({ userContext: contextText, insights: orderedInsights, sessionBackgrounds });
+  const lock = acquireServerLlmLock(c);
+  if (!lock) return c.json(llmBusyPayload(), 409);
 
-  const client = createLLMClient();
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: userMessage },
-  ];
+  try {
+    const client = createLLMClient();
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      { role: 'user' as const, content: userMessage },
+    ];
 
-  const chatOptions = { temperature: TEMPERATURES[format], responseFormat: 'text' as const };
-  let response = await client.chat(messages, chatOptions);
+    const chatOptions = { temperature: TEMPERATURES[format], responseFormat: 'text' as const };
+    let response = await client.chat(messages, chatOptions);
 
-  let parsed = parseDispatchOutput(response.content, format);
+    let parsed = parseDispatchOutput(response.content, format);
 
-  // Single retry on parse failure
-  if (!parsed.ok) {
-    response = await client.chat(messages, chatOptions);
-    parsed = parseDispatchOutput(response.content, format);
-
+    // Single retry on parse failure
     if (!parsed.ok) {
-      // Degrade gracefully — return the raw content with extracted title
-      parsed = buildDegradedResponse(response.content);
+      response = await client.chat(messages, chatOptions);
+      parsed = parseDispatchOutput(response.content, format);
+
+      if (!parsed.ok) {
+        // Degrade gracefully — return the raw content with extracted title
+        parsed = buildDegradedResponse(response.content);
+      }
     }
+
+    const markdown = parsed.markdown ?? response.content;
+    const bodyText = parsed.body ?? markdown;
+    const wordCount = bodyText.trim().split(/\s+/).filter(Boolean).length;
+    const characterCount = bodyText.length;
+
+    return c.json({
+      markdown,
+      body: bodyText,
+      format,
+      frontmatter: parsed.frontmatter ?? { title: 'Untitled', tags: [], tldr: '' },
+      wordCount,
+      characterCount,
+      degraded: parsed.degraded ?? false,
+      model: client.model,
+      tokensUsed: {
+        input: response.usage?.inputTokens ?? 0,
+        output: response.usage?.outputTokens ?? 0,
+      },
+    });
+  } finally {
+    lock.release();
   }
-
-  const markdown = parsed.markdown ?? response.content;
-  const bodyText = parsed.body ?? markdown;
-  const wordCount = bodyText.trim().split(/\s+/).filter(Boolean).length;
-  const characterCount = bodyText.length;
-
-  return c.json({
-    markdown,
-    body: bodyText,
-    format,
-    frontmatter: parsed.frontmatter ?? { title: 'Untitled', tags: [], tldr: '' },
-    wordCount,
-    characterCount,
-    degraded: parsed.degraded ?? false,
-    model: client.model,
-    tokensUsed: {
-      input: response.usage?.inputTokens ?? 0,
-      output: response.usage?.outputTokens ?? 0,
-    },
-  });
 });
 
 // POST /api/dispatch/image-prompt
@@ -234,28 +241,34 @@ app.post('/image-prompt', requireLLM(), async (c) => {
     tags,
     format: body.format as string,
   });
+  const lock = acquireServerLlmLock(c);
+  if (!lock) return c.json(llmBusyPayload(), 409);
 
-  const client = createLLMClient();
-  const messages = [
-    { role: 'system' as const, content: systemPrompt },
-    { role: 'user' as const, content: userMessage },
-  ];
+  try {
+    const client = createLLMClient();
+    const messages = [
+      { role: 'system' as const, content: systemPrompt },
+      { role: 'user' as const, content: userMessage },
+    ];
 
-  const response = await client.chat(messages, { temperature: 0.85, responseFormat: 'text' as const });
-  const parsed = parseImagePromptOutput(response.content);
+    const response = await client.chat(messages, { temperature: 0.85, responseFormat: 'text' as const });
+    const parsed = parseImagePromptOutput(response.content);
 
-  if (!parsed.ok) {
-    return c.json({ error: 'Failed to generate image prompt', detail: parsed.error }, 500);
+    if (!parsed.ok) {
+      return c.json({ error: 'Failed to generate image prompt', detail: parsed.error }, 500);
+    }
+
+    return c.json({
+      prompt: parsed.prompt,
+      model: client.model,
+      tokensUsed: {
+        input: response.usage?.inputTokens ?? 0,
+        output: response.usage?.outputTokens ?? 0,
+      },
+    });
+  } finally {
+    lock.release();
   }
-
-  return c.json({
-    prompt: parsed.prompt,
-    model: client.model,
-    tokensUsed: {
-      input: response.usage?.inputTokens ?? 0,
-      output: response.usage?.outputTokens ?? 0,
-    },
-  });
 });
 
 export default app;

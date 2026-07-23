@@ -3,6 +3,7 @@ import type { ToolCall, ToolResult } from '@/lib/types';
 import { parseToolInput } from '../utils';
 import { usePreviewText } from '../usePreview';
 import { CollapsibleToolPanel } from '../CollapsibleToolPanel';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface TerminalToolPanelProps {
   toolCall: ToolCall;
@@ -10,6 +11,7 @@ interface TerminalToolPanelProps {
 }
 
 export function TerminalToolPanel({ toolCall, result }: TerminalToolPanelProps) {
+  const { t } = useLocale();
   const input = parseToolInput(toolCall.input);
   const command = (input.command as string) || '';
   const description = (input.description as string) || '';
@@ -29,7 +31,7 @@ export function TerminalToolPanel({ toolCall, result }: TerminalToolPanelProps) 
   return (
     <CollapsibleToolPanel
       icon={<Terminal className="h-3.5 w-3.5 text-zinc-500 dark:text-zinc-400 shrink-0" />}
-      label="Terminal"
+      label={t('chat.tool.terminal')}
       summary={summary}
       className="border-zinc-200 dark:border-zinc-700/50"
       headerClassName="bg-zinc-100 dark:bg-zinc-900 hover:bg-zinc-200/80 dark:hover:bg-zinc-800/80"
@@ -56,7 +58,7 @@ export function TerminalToolPanel({ toolCall, result }: TerminalToolPanelProps) 
                 onClick={toggle}
                 className="text-xs text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-400 mt-1"
               >
-                {showFull ? 'Show less' : `Show full output (${resultLines.length} lines)`}
+                {showFull ? t('chat.showLess') : t('chat.output.showFull', { count: resultLines.length })}
               </button>
             )}
           </>

@@ -15,23 +15,20 @@ import type {
 } from '../types.js';
 import { generateTitle } from './titles.js';
 import { calculateCost, type UsageEntry } from '../utils/pricing.js';
+import {
+  classifyUserMessageText,
+  extractSlashCommandName,
+  type UserMessageClass,
+} from './user-message-classification.js';
+
+export { extractSlashCommandName } from './user-message-classification.js';
+export type { UserMessageClass } from './user-message-classification.js';
 
 // ──────────────────────────────────────────────────────
 // Message classification — distinguishes genuine human input from
 // the many non-conversational entry types that appear as type:'user' in JSONL.
 // Tool results make up ~80% of 'user' entries in typical sessions.
 // ──────────────────────────────────────────────────────
-
-export type UserMessageClass =
-  | 'human'            // Genuine human input — counts toward user_message_count
-  | 'tool-result'      // API protocol: tool call response
-  | 'task-notification' // System: agent task callbacks
-  | 'skill-load'       // System: skill/command injection
-  | 'auto-compact'     // Context window overflow: tool-initiated compaction summary
-  | 'user-compact'     // User-initiated /compact command
-  | 'slash-command'    // Any other slash command (caveat/stdout frames are 'command-frame')
-  | 'command-frame'    // Slash command wrapper: <local-command-caveat> or <local-command-stdout>
-  | 'exit-command';    // /exit or /quit — session end signal, excluded from everything
 
 /**
  * Tier 1 workflow commands: deliberate workflow decisions.
@@ -46,15 +43,6 @@ export const WORKFLOW_COMMANDS = new Set([
   '/add-dir', '/memory', '/init', '/fast', '/context', '/cost',
   '/rename', '/simplify', '/batch', '/debug', '/loop', '/claude-api',
 ]);
-
-/**
- * Extract the command name from a <command-name>/foo</command-name> XML fragment.
- * Returns the command string (e.g., "/compact") or null if not found.
- */
-export function extractSlashCommandName(text: string): string | null {
-  const match = text.match(/<command-name>(\/[^<]+)<\/command-name>/);
-  return match ? match[1].trim().split(' ')[0] : null;  // split to handle "/compact instructions" → "/compact"
-}
 
 /**
  * Classify a type:'user' JSONL entry to determine if it represents genuine
@@ -75,48 +63,7 @@ export function classifyUserMessage(msg: ClaudeMessage): UserMessageClass {
     ? content
     : content.filter(p => p.type === 'text' && p.text).map(p => p.text).join('');
 
-  // 2. Task/agent notifications
-  if (text.startsWith('<task-notification>')) {
-    return 'task-notification';
-  }
-
-  // 3. Skill loads (injected by Claude Code skill system)
-  if (text.startsWith('Base directory for this skill:')) {
-    return 'skill-load';
-  }
-
-  // 4. Auto-compact summary (context window overflow — tool-initiated)
-  if (text.startsWith('This session is being continued')) {
-    return 'auto-compact';
-  }
-
-  // 5. User /compact command (Tier 1 workflow command, tracked separately)
-  // Use extractSlashCommandName to handle "/compact focus on auth" → "/compact"
-  if (extractSlashCommandName(text) === '/compact') {
-    return 'user-compact';
-  }
-
-  // 6. Exit/quit commands — excluded from all counts and slash_commands[]
-  const cmdName = extractSlashCommandName(text);
-  if (cmdName === '/exit' || cmdName === '/quit') {
-    return 'exit-command';
-  }
-
-  // 7. Any other slash command (Tier 1 or Tier 2 — differentiated at count time)
-  if (cmdName !== null) {
-    return 'slash-command';
-  }
-
-  // 8. Command frame wrappers (caveat/stdout) — always excluded
-  if (
-    text.startsWith('<local-command-caveat>') ||
-    text.startsWith('<local-command-stdout>')
-  ) {
-    return 'command-frame';
-  }
-
-  // 9. Everything else is genuine human input
-  return 'human';
+  return classifyUserMessageText(text);
 }
 
 /**

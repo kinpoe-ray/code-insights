@@ -8,7 +8,12 @@
 // consistent structured JSON output at lower temperatures per LLM Expert guidance)
 
 import type { LLMClient, LLMMessage, LLMResponse, ChatOptions } from '../types.js';
-import { flattenContent } from '../types.js';
+import { defaultLLMCapabilities, flattenContent } from '../types.js';
+import {
+  invalidProviderResponse,
+  isProviderRecord,
+  parseProviderJson,
+} from './provider-response.js';
 
 const DEFAULT_LLAMACPP_URL = 'http://localhost:8080';
 
@@ -29,6 +34,8 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
   return {
     provider: 'llamacpp',
     model,
+    capabilities: defaultLLMCapabilities('llamacpp'),
+    prepareMessages: (messages) => messages,
 
     async chat(messages: LLMMessage[], options?: ChatOptions): Promise<LLMResponse> {
       // Inner helper — performs a single attempt at the llama-server completions endpoint.
@@ -56,22 +63,19 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
             }),
           });
         } catch (err) {
+          if (err instanceof Error && err.name === 'AbortError') throw err;
           // Network-level failure — llama-server is likely not running
           const cause = (err as { cause?: { code?: string } })?.cause;
           if (cause?.code === 'ECONNREFUSED' || (err instanceof TypeError && err.message.includes('fetch'))) {
-            throw new Error(
-              `Cannot connect to llama-server at ${url} — is it running? Start it with: llama-server -m <model.gguf>`
-            );
+            throw new Error('Cannot connect to the configured llama-server endpoint.');
           }
-          throw err;
+          throw new Error('llama-server request could not be completed.');
         }
 
         if (!res.ok) {
           const detail = await res.text().catch(() => '');
           if (res.status === 401 || res.status === 403) {
-            throw new Error(
-              `llama-server returned HTTP ${res.status} — check your server configuration.${detail ? ` (${detail})` : ''}`
-            );
+            throw new Error(`llama-server request was rejected (HTTP ${res.status}).`);
           }
           // Detect exceed_context_size_error: llama-server returns this when the request's
           // prompt + max_tokens exceeds the server's context window (-c flag at startup).
@@ -79,42 +83,40 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
             let errorBody: { error?: { type?: string; n_prompt_tokens?: number; n_ctx?: number } } = {};
             try { errorBody = JSON.parse(detail); } catch { /* not JSON */ }
             if (errorBody?.error?.type === 'exceed_context_size_error') {
-              const nPrompt = errorBody.error.n_prompt_tokens;
-              const nCtx = errorBody.error.n_ctx;
-              const tokenInfo = (nPrompt !== undefined && nCtx !== undefined)
-                ? ` (${nPrompt} tokens requested, server context is ${nCtx})`
-                : '';
-              throw new Error(
-                `Session too large for llama-server context window${tokenInfo}. ` +
-                `Start llama-server with a larger context: llama-server -m <model.gguf> -c 32768`
-              );
+              throw new Error('Session exceeds the configured llama-server context window.');
             }
           }
-          if (res.status >= 500) {
-            throw new Error(
-              `llama-server error (HTTP ${res.status}). Is the model loaded?${detail ? ` (${detail})` : ''}`
-            );
+          if (res.status === 429) {
+            throw new Error('llama-server request was rate limited (HTTP 429).');
           }
-          throw new Error(`llama-server API error (HTTP ${res.status})${detail ? ` - ${detail}` : ''}`);
+          throw new Error(`llama-server request failed (HTTP ${res.status}).`);
         }
 
-        let data: {
-          choices: Array<{ message: { content: string } }>;
-          usage?: { prompt_tokens: number; completion_tokens: number };
-        };
-        try {
-          data = await res.json() as typeof data;
-        } catch {
-          const preview = await res.text().catch(() => '');
-          throw new Error(
-            `llama-server returned a non-JSON response (HTTP ${res.status}).${preview ? ` Body starts with: ${preview.slice(0, 120)}` : ''}`
-          );
+        const data = await parseProviderJson(res, 'llama-server');
+        if (!isProviderRecord(data) || !Array.isArray(data.choices)) {
+          invalidProviderResponse('llama-server');
         }
+        const choice = data.choices[0];
+        if (
+          !isProviderRecord(choice)
+          || !isProviderRecord(choice.message)
+          || typeof choice.message.content !== 'string'
+        ) {
+          invalidProviderResponse('llama-server');
+        }
+        const usage = isProviderRecord(data.usage)
+          && typeof data.usage.prompt_tokens === 'number'
+          && typeof data.usage.completion_tokens === 'number'
+          ? {
+              prompt_tokens: data.usage.prompt_tokens,
+              completion_tokens: data.usage.completion_tokens,
+            }
+          : undefined;
 
         return {
-          content: data.choices[0]?.message?.content || '',
-          inputTokens: data.usage?.prompt_tokens ?? 0,
-          outputTokens: data.usage?.completion_tokens ?? 0,
+          content: choice.message.content,
+          inputTokens: usage?.prompt_tokens ?? 0,
+          outputTokens: usage?.completion_tokens ?? 0,
         };
       };
 
@@ -161,10 +163,7 @@ export function createLlamaCppClient(model: string, baseUrl?: string): LLMClient
         }
 
         if (!retryValid) {
-          throw new Error(
-            `llama-server returned invalid JSON on both attempts. ` +
-            `Response preview: ${retry.content.slice(0, 200)}`
-          );
+          throw new Error('llama-server returned invalid JSON on both attempts.');
         }
 
         return {

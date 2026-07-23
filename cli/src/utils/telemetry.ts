@@ -39,6 +39,102 @@ export type TelemetryEventName =
 // null when telemetry is disabled or init hasn't happened yet.
 let client: PostHog | null = null;
 
+// Only aggregate, product-owned fields may cross the telemetry boundary.
+// Free-form errors, responses, paths, prompts, and caller-defined context are
+// intentionally absent from this list.
+const TELEMETRY_PROPERTY_ALLOWLIST = new Set([
+  'success',
+  'duration_ms',
+  'sessions_synced',
+  'sessions_by_provider',
+  'errors',
+  'source_filter',
+  'subcommand',
+  'period',
+  'port',
+  'error_type',
+  'command',
+  'hook_types',
+  'sync_installed',
+  'analysis_installed',
+  'sessions_recalculated',
+  'insight_count',
+  'type',
+  'count',
+  'format',
+  'template',
+  'session_count',
+  'scope',
+  'depth',
+  'llm_provider',
+  'llm_model',
+  'input_tokens',
+  'output_tokens',
+  'cache_creation_tokens',
+  'cache_read_tokens',
+  'cost_usd',
+]);
+
+const SAFE_TELEMETRY_STRING = /^[A-Za-z0-9][A-Za-z0-9._:/ -]{0,119}$/;
+const SENSITIVE_TELEMETRY_STRING = [
+  /[^\s@]+@[^\s@]+\.[^\s@]+/i,
+  /(?:^|[\s("'`])\/(?:Users|home|private|tmp|var|Volumes|etc|opt)\//i,
+  /[A-Za-z]:\\(?:Users|Documents and Settings|Windows)\\/i,
+  /\bat\s+.+:\d+:\d+\)?/i,
+  /\b(?:bearer|password|passwd|api[_-]?key|access[_-]?token|secret)\s*[:=]/i,
+  /\b(?:sk|ghp|phc)_[A-Za-z0-9_-]{8,}\b/i,
+];
+
+function sanitizeTelemetryString(value: string): string | undefined {
+  if (!SAFE_TELEMETRY_STRING.test(value)) return undefined;
+  if (SENSITIVE_TELEMETRY_STRING.some((pattern) => pattern.test(value))) return undefined;
+  return value;
+}
+
+function sanitizeTelemetryProperties(
+  properties?: Record<string, unknown>,
+): Record<string, unknown> {
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(properties ?? {})) {
+    if (!TELEMETRY_PROPERTY_ALLOWLIST.has(key) || value === undefined) continue;
+
+    if (value === null || typeof value === 'boolean') {
+      sanitized[key] = value;
+      continue;
+    }
+
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      sanitized[key] = value;
+      continue;
+    }
+
+    if (typeof value === 'string') {
+      const safeValue = sanitizeTelemetryString(value);
+      if (safeValue !== undefined) sanitized[key] = safeValue;
+      continue;
+    }
+
+    if (
+      key === 'sessions_by_provider'
+      && typeof value === 'object'
+      && value !== null
+      && !Array.isArray(value)
+    ) {
+      const counts: Record<string, number> = {};
+      for (const [provider, count] of Object.entries(value)) {
+        const safeProvider = sanitizeTelemetryString(provider);
+        if (safeProvider !== undefined && typeof count === 'number' && Number.isFinite(count)) {
+          counts[safeProvider] = count;
+        }
+      }
+      sanitized[key] = counts;
+    }
+  }
+
+  return sanitized;
+}
+
 /**
  * Check if telemetry is enabled.
  *
@@ -152,41 +248,6 @@ export function classifyError(error: unknown): { error_type: string; error_messa
 }
 
 /**
- * Parse a Node.js Error.stack into PostHog-compatible stack frames.
- * Returns frames in caller-first order (PostHog/Sentry convention).
- */
-function parseStackFrames(stack: string): Array<{
-  filename: string;
-  lineno: number;
-  colno: number;
-  function: string;
-  in_app: boolean;
-}> {
-  const framePattern = /at\s+(?:(.+?)\s+\()?(.*?):(\d+):(\d+)\)?/g;
-  const frames: Array<{
-    filename: string;
-    lineno: number;
-    colno: number;
-    function: string;
-    in_app: boolean;
-  }> = [];
-
-  let match;
-  while ((match = framePattern.exec(stack)) !== null) {
-    const filename = match[2].replace(/^file:\/\//, '');
-    frames.push({
-      filename,
-      lineno: parseInt(match[3], 10),
-      colno: parseInt(match[4], 10),
-      function: match[1] || '<anonymous>',
-      in_app: !filename.includes('node_modules') && !filename.startsWith('node:'),
-    });
-  }
-
-  return frames;
-}
-
-/**
  * Capture an exception in PostHog. Never throws — telemetry must never break the CLI.
  * Respects the same opt-out as trackEvent.
  *
@@ -198,27 +259,16 @@ export function captureError(error: unknown, properties?: Record<string, unknown
   if (!ph) return;
 
   try {
-    const { error_type, error_message } = classifyError(error);
+    const { error_type } = classifyError(error);
     const exceptionType = error instanceof Error ? error.constructor.name : error_type;
-    const stack = error instanceof Error && error.stack ? error.stack : '';
-    const frames = stack ? parseStackFrames(stack) : [];
+    const safeExceptionType = sanitizeTelemetryString(exceptionType) ?? 'Error';
 
     ph.capture({
       distinctId: getStableMachineId(),
       event: '$exception',
       properties: {
-        $exception_message: error_message,
-        $exception_type: exceptionType,
-        $exception_stack_trace_raw: stack,
-        $exception_list: [
-          {
-            type: exceptionType,
-            value: error_message,
-            mechanism: { type: 'generic', handled: true },
-            ...(frames.length > 0 ? { stacktrace: { frames } } : {}),
-          },
-        ],
-        ...(properties ?? {}),
+        ...sanitizeTelemetryProperties({ ...properties, error_type }),
+        $exception_type: safeExceptionType,
       },
     });
   } catch {
@@ -240,7 +290,7 @@ export function trackEvent(event: TelemetryEventName, properties?: Record<string
     ph.capture({
       distinctId: getStableMachineId(),
       event,
-      properties: properties ?? {},
+      properties: sanitizeTelemetryProperties(properties),
     });
   } catch {
     // Swallow all errors — telemetry failures are silent

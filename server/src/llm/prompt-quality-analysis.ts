@@ -8,13 +8,15 @@ import type { SQLiteMessageRow } from './prompt-types.js';
 import { formatMessagesForAnalysis, classifyStoredUserMessage } from './message-format.js';
 import { parsePromptQualityResponse } from './response-parsers.js';
 import { SHARED_ANALYST_SYSTEM_PROMPT, buildCacheableConversationBlock, buildPromptQualityInstructions } from './prompts.js';
+import { prepareBoundedConversationRequest } from './types.js';
 import {
   convertPromptQualityToInsightRow,
   saveInsightsToDb,
   deleteSessionInsights,
   type SessionData,
 } from './analysis-db.js';
-import { getMaxInputTokens, buildSessionMeta, type AnalysisOptions, type AnalysisResult } from './analysis-internal.js';
+import { buildSessionMeta, type AnalysisOptions, type AnalysisResult } from './analysis-internal.js';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 
 /**
  * Analyze prompt quality for a session.
@@ -57,15 +59,7 @@ export async function analyzePromptQuality(
   try {
     const startTime = Date.now();
     const client = createLLMClient();
-    const maxInputTokens = getMaxInputTokens(client.provider);
     const formattedMessages = formatMessagesForAnalysis(messages);
-
-    let analysisInput = formattedMessages;
-    const estimatedTokens = client.estimateTokens(formattedMessages);
-    if (estimatedTokens > maxInputTokens) {
-      const targetLength = Math.floor((maxInputTokens / estimatedTokens) * formattedMessages.length * 0.8);
-      analysisInput = formattedMessages.slice(0, targetLength) + '\n\n[... conversation truncated for analysis ...]';
-    }
 
     // Change 3: Pass structured session shape instead of raw message count.
     // "Total messages: 51" misled the LLM when 43 of those were tool-result rows.
@@ -73,20 +67,36 @@ export async function analyzePromptQuality(
     const toolExchangeCount = messages.length - humanMessages.length - assistantMessages.length;
 
     const sessionMeta = buildSessionMeta(session);
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
     const sessionShape = {
       humanMessageCount: humanMessages.length,
       assistantMessageCount: assistantMessages.length,
       toolExchangeCount,
     };
 
-    options?.onProgress?.({ phase: 'analyzing' });
-    const response = await client.chat([
+    const preparedRequest = prepareBoundedConversationRequest(client, [
       { role: 'system', content: SHARED_ANALYST_SYSTEM_PROMPT },
       { role: 'user', content: [
-        buildCacheableConversationBlock(analysisInput),
-        { type: 'text' as const, text: buildPromptQualityInstructions(session.project_name, sessionShape, sessionMeta) },
+        buildCacheableConversationBlock(formattedMessages),
+        { type: 'text' as const, text: buildPromptQualityInstructions(
+          session.project_name,
+          sessionShape,
+          sessionMeta,
+          { preference: analysisLanguage, messages },
+        ) },
       ] },
-    ], { signal: options?.signal });
+    ]);
+    if (!preparedRequest) {
+      return {
+        success: false,
+        insights: [],
+        error: 'Prompt quality request exceeds the provider context window.',
+        error_type: 'context_limit',
+      };
+    }
+
+    options?.onProgress?.({ phase: 'analyzing' });
+    const response = await client.chat(preparedRequest.messages, { signal: options?.signal });
 
     const parsed = parsePromptQualityResponse(response.content);
     if (!parsed.success) {

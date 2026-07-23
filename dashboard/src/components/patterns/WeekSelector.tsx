@@ -3,6 +3,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { parseIsoWeekBounds } from '@/lib/date-utils';
 import type { WeekInfo } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface WeekSelectorProps {
   currentWeek: string;      // e.g., "2026-W10"
@@ -10,27 +11,25 @@ interface WeekSelectorProps {
   onWeekChange: (week: string) => void;
 }
 
-// Format a UTC date as "Mar 4" using UTC to avoid local timezone day shift.
-function formatUtcDate(d: Date): string {
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
-}
-
-// Format "Mar 4-10, 2026" from an ISO week string.
-// Cross-month weeks (e.g., Mar 30 - Apr 5) include the month on the end date.
-function formatWeekLabel(weekStr: string): string {
-  const bounds = parseIsoWeekBounds(weekStr);
-  if (!bounds) return weekStr;
-
-  const startLabel = formatUtcDate(bounds.start);
-  const year = bounds.end.getUTCFullYear();
-  const crossMonth = bounds.start.getUTCMonth() !== bounds.end.getUTCMonth();
-  const endLabel = crossMonth
-    ? formatUtcDate(bounds.end)           // "Apr 5"
-    : String(bounds.end.getUTCDate());    // "10"
-  return `${startLabel}\u2013${endLabel}, ${year}`;
-}
-
 export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorProps) {
+  const { t, formatDate, formatNumber } = useLocale();
+  const formatUtcDate = (date: Date) => formatDate(date, {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+  const formatWeekLabel = (weekStr: string): string => {
+    const range = parseIsoWeekBounds(weekStr);
+    if (!range) return weekStr;
+
+    const start = formatUtcDate(range.start);
+    const year = formatNumber(range.end.getUTCFullYear(), { useGrouping: false });
+    const crossMonth = range.start.getUTCMonth() !== range.end.getUTCMonth();
+    const end = crossMonth
+      ? formatUtcDate(range.end)
+      : formatNumber(range.end.getUTCDate(), { useGrouping: false });
+    return t(crossMonth ? 'patterns.weekCrossMonth' : 'patterns.weekSameMonth', { start, end, year });
+  };
   // Only navigate to weeks that have sessions (or the current selected week)
   const navigableWeeks = weeks.filter(w => w.sessionCount > 0 || w.week === currentWeek);
 
@@ -72,7 +71,7 @@ export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorP
       onKeyDown={handleKeyDown}
       tabIndex={0}
       role="navigation"
-      aria-label="Week selector"
+      aria-label={t('patterns.weekSelector')}
     >
       <div className="flex items-center gap-1">
         <Button
@@ -81,7 +80,7 @@ export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorP
           className="h-7 w-7"
           onClick={handlePrev}
           disabled={!canGoBack}
-          aria-label="Previous week"
+          aria-label={t('patterns.previousWeek')}
         >
           <ChevronLeft className="h-4 w-4" />
         </Button>
@@ -96,7 +95,7 @@ export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorP
           className="h-7 w-7"
           onClick={handleNext}
           disabled={!canGoForward}
-          aria-label="Next week"
+          aria-label={t('patterns.nextWeek')}
         >
           <ChevronRight className="h-4 w-4" />
         </Button>
@@ -116,7 +115,15 @@ export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorP
             const isCurrent = w.week === currentWeek;
             const dotBounds = parseIsoWeekBounds(w.week);
             const label = dotBounds
-              ? `${w.week}: ${w.sessionCount} session${w.sessionCount !== 1 ? 's' : ''}${w.hasSnapshot ? ', reflection generated' : w.sessionCount > 0 ? ', no reflection yet' : ''}`
+              ? t('patterns.weekSessions', {
+                  week: w.week,
+                  count: formatNumber(w.sessionCount),
+                  status: w.hasSnapshot
+                    ? t('patterns.reflectionGenerated')
+                    : w.sessionCount > 0
+                      ? t('patterns.noReflection')
+                      : '',
+                })
               : w.week;
 
             return (
@@ -147,7 +154,10 @@ export function WeekSelector({ currentWeek, weeks, onWeekChange }: WeekSelectorP
       {/* Current week date range for screen readers */}
       {bounds && (
         <span className="sr-only">
-          Week from {formatUtcDate(bounds.start)} to {formatUtcDate(bounds.end)}
+          {t('patterns.weekRange', {
+            start: formatUtcDate(bounds.start),
+            end: formatUtcDate(bounds.end),
+          })}
         </span>
       )}
     </div>

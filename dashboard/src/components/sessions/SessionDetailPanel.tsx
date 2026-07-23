@@ -1,13 +1,9 @@
 import { useState, useMemo, useEffect, useCallback } from 'react';
-import { useSession, useSessionMutation, useDeleteSession } from '@/hooks/useSessions';
+import { useSession, useDeleteSession } from '@/hooks/useSessions';
 import { useInsights } from '@/hooks/useInsights';
 import { useMessages } from '@/hooks/useMessages';
-import {
-  getSessionTitle,
-  formatDateRange,
-  cn,
-} from '@/lib/utils';
-import { SESSION_CHARACTER_COLORS, SESSION_CHARACTER_LABELS, SOURCE_TOOL_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
+import { cn } from '@/lib/utils';
+import { SESSION_CHARACTER_COLORS, SOURCE_TOOL_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
 import { parseJsonField } from '@/lib/types';
 import { getScoreTier, extractPQScore } from '@/lib/score-utils';
 import type { Insight, InsightMetadata, Session } from '@/lib/types';
@@ -65,6 +61,25 @@ import {
   Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
+
+const CHARACTER_LABEL_KEYS: Record<NonNullable<Session['session_character']>, MessageKey> = {
+  deep_focus: 'sessions.character.deepFocus',
+  bug_hunt: 'sessions.character.bugHunt',
+  feature_build: 'sessions.character.featureBuild',
+  exploration: 'sessions.character.exploration',
+  refactor: 'sessions.character.refactor',
+  learning: 'sessions.character.learning',
+  quick_task: 'sessions.character.quickTask',
+};
+
+const OUTCOME_LABEL_KEYS: Record<string, MessageKey> = {
+  success: 'sessions.outcome.success',
+  partial: 'sessions.outcome.partial',
+  abandoned: 'sessions.outcome.abandoned',
+  blocked: 'sessions.outcome.blocked',
+};
 
 interface SessionDetailPanelProps {
   sessionId: string;
@@ -72,10 +87,10 @@ interface SessionDetailPanelProps {
 }
 
 export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelProps) {
+  const { t, formatDate } = useLocale();
   const { data: session, isLoading: loading, error } = useSession(sessionId);
   const { data: insights = [] } = useInsights({ sessionId });
   const messagesQuery = useMessages(sessionId);
-  const sessionMutation = useSessionMutation();
   const deleteMutation = useDeleteSession();
   const [renameOpen, setRenameOpen] = useState(false);
   const [searchHighlightId, setSearchHighlightId] = useState<string | null>(null);
@@ -172,7 +187,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
     return (
       <div className="p-6">
         <ErrorCard
-          message={error instanceof Error ? error.message : 'Session not found'}
+          message={error instanceof Error ? error.message : t('sessions.detail.sessionNotFound')}
         />
       </div>
     );
@@ -209,22 +224,39 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
     summaryInsight?.title ||
     (session.summary
       ? session.summary.split('\n').find((l) => !l.startsWith('- '))?.trim() ||
-        'Session Summary'
-      : 'Session Summary');
+        t('sessions.detail.sessionSummary')
+      : t('sessions.detail.sessionSummary'));
 
   const startedAt = new Date(session.started_at);
   const endedAt = new Date(session.ended_at);
-  const durationMinutes = Math.round((endedAt.getTime() - startedAt.getTime()) / 60000);
   const characterColor = session.session_character
     ? SESSION_CHARACTER_COLORS[session.session_character]
     : null;
   const characterLabel = session.session_character
-    ? SESSION_CHARACTER_LABELS[session.session_character]
+    ? t(CHARACTER_LABEL_KEYS[session.session_character])
     : null;
+  const sessionTitle = session.custom_title
+    || session.generated_title
+    || session.summary
+    || t('sessions.untitled');
+  const sameDay =
+    startedAt.getFullYear() === endedAt.getFullYear()
+    && startedAt.getMonth() === endedAt.getMonth()
+    && startedAt.getDate() === endedAt.getDate();
+  const dateTimeOptions: Intl.DateTimeFormatOptions = {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  };
+  const dateRange = sameDay
+    ? `${formatDate(startedAt, dateTimeOptions)} – ${formatDate(endedAt, { hour: 'numeric', minute: '2-digit' })}`
+    : `${formatDate(startedAt, dateTimeOptions)} – ${formatDate(endedAt, dateTimeOptions)}`;
 
   function handleExport(format: 'plain' | 'obsidian' | 'notion') {
     exportSession(session!, insights, summaryText, format);
-    toast.success(`Exported as ${format === 'plain' ? 'Markdown' : format}`);
+    const formatLabel = format === 'plain' ? 'Markdown' : format === 'obsidian' ? 'Obsidian' : 'Notion';
+    toast.success(t('sessions.detail.exportedAs', { format: formatLabel }));
   }
 
   return (
@@ -232,13 +264,17 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
       {/* Header */}
       <div className="shrink-0 border-b px-6 py-3 space-y-2">
         <div className="flex items-center gap-2 flex-wrap">
-          <h1 className="text-lg font-semibold leading-tight">{getSessionTitle(session)}</h1>
+          <h1 className="text-lg font-semibold leading-tight">{sessionTitle}</h1>
           {sessionOutcome && OUTCOME_DOT[sessionOutcome] && (
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className={cn('w-2 h-2 rounded-full shrink-0', OUTCOME_DOT[sessionOutcome].color)} />
               </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs">{OUTCOME_DOT[sessionOutcome].label}</TooltipContent>
+              <TooltipContent side="bottom" className="text-xs">
+                {OUTCOME_LABEL_KEYS[sessionOutcome]
+                  ? t(OUTCOME_LABEL_KEYS[sessionOutcome])
+                  : OUTCOME_DOT[sessionOutcome].label}
+              </TooltipContent>
             </Tooltip>
           )}
           {characterLabel && characterColor && (
@@ -255,10 +291,10 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                 onClick={() => setRenameOpen(true)}
               >
                 <Pencil className="h-3.5 w-3.5" />
-                <span className="sr-only">Rename session</span>
+                <span className="sr-only">{t('sessions.detail.rename')}</span>
               </Button>
             </TooltipTrigger>
-            <TooltipContent side="bottom">Rename session</TooltipContent>
+            <TooltipContent side="bottom">{t('sessions.detail.rename')}</TooltipContent>
           </Tooltip>
           <div className="ml-auto flex items-center gap-1">
             <AnalyzeDropdown
@@ -273,21 +309,21 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                   <DropdownMenuTrigger asChild>
                     <Button variant="ghost" size="icon" className="h-7 w-7">
                       <Download className="h-3.5 w-3.5" />
-                      <span className="sr-only">Export session</span>
+                      <span className="sr-only">{t('sessions.detail.export')}</span>
                     </Button>
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">Export session</TooltipContent>
+                <TooltipContent side="bottom">{t('sessions.detail.export')}</TooltipContent>
               </Tooltip>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={() => handleExport('plain')}>
-                  Export as Markdown
+                  {t('sessions.detail.exportMarkdown')}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('obsidian')}>
-                  Export for Obsidian
+                  {t('sessions.detail.exportObsidian')}
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleExport('notion')}>
-                  Export for Notion
+                  {t('sessions.detail.exportNotion')}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -297,35 +333,35 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                   <AlertDialogTrigger asChild>
                     <Button variant="ghost" size="icon" className="h-7 w-7 text-muted-foreground hover:text-destructive">
                       <Trash2 className="h-3.5 w-3.5" />
-                      <span className="sr-only">Hide session</span>
+                      <span className="sr-only">{t('sessions.detail.hide')}</span>
                     </Button>
                   </AlertDialogTrigger>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">Hide session</TooltipContent>
+                <TooltipContent side="bottom">{t('sessions.detail.hide')}</TooltipContent>
               </Tooltip>
               <AlertDialogContent>
                 <AlertDialogHeader>
-                  <AlertDialogTitle>Hide this session?</AlertDialogTitle>
+                  <AlertDialogTitle>{t('sessions.detail.hideTitle')}</AlertDialogTitle>
                   <AlertDialogDescription>
-                    This session will no longer appear in your session list. You can restore it by running{' '}
+                    {t('sessions.detail.hideBeforeCommand')}{' '}
                     <code className="font-mono text-xs bg-muted px-1 py-0.5 rounded">code-insights sync --force</code>.
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogCancel>{t('sessions.detail.cancel')}</AlertDialogCancel>
                   <AlertDialogAction
                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
                     onClick={async () => {
                       try {
                         await deleteMutation.mutateAsync(session.id);
-                        toast.success('Session hidden');
+                        toast.success(t('sessions.detail.hiddenToast'));
                         onDelete?.();
                       } catch (err) {
-                        toast.error(err instanceof Error ? err.message : 'Failed to hide session');
+                        toast.error(err instanceof Error ? err.message : t('sessions.detail.hideFailed'));
                       }
                     }}
                   >
-                    Hide session
+                    {t('sessions.detail.hide')}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -335,7 +371,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
 
         <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
           <Clock className="h-3.5 w-3.5" />
-          <span>{formatDateRange(startedAt, endedAt)}</span>
+          <span>{dateRange}</span>
           <span>&middot;</span>
           {session.git_remote_url ? (
             <a
@@ -363,7 +399,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
               <span>&middot;</span>
               <span className="flex items-center gap-1">
                 <Wrench className="h-3 w-3" />
-                {session.tool_call_count} tools
+                {t('sessions.detail.tools', { count: session.tool_call_count })}
               </span>
             </>
           )}
@@ -388,11 +424,11 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
       <Tabs defaultValue="insights" className="flex flex-col flex-1 overflow-hidden pt-2">
         <TabsList variant="line" className="shrink-0 w-full justify-start gap-4 px-6 border-b">
           <TabsTrigger value="insights" className="px-0">
-            Insights{nonPromptInsights.length > 0 && ` (${nonPromptInsights.length})`}
+            {t('sessions.detail.tabs.insights')}{nonPromptInsights.length > 0 && ` (${nonPromptInsights.length})`}
           </TabsTrigger>
           <TabsTrigger value="prompt-quality" className="px-0">
-            <span className="flex items-center gap-1.5" aria-label={promptQualityScore != null ? `Prompt Quality, score ${promptQualityScore} out of 100` : 'Prompt Quality'}>
-              Prompt Quality
+            <span className="flex items-center gap-1.5" aria-label={promptQualityScore != null ? t('sessions.detail.promptQualityAria', { score: promptQualityScore }) : t('sessions.detail.tabs.promptQuality')}>
+              {t('sessions.detail.tabs.promptQuality')}
               {promptQualityScore != null && (
                 <span className={cn(
                   'inline-flex items-center justify-center rounded-full px-1.5 py-0.5 text-[10px] font-semibold leading-none',
@@ -404,7 +440,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             </span>
           </TabsTrigger>
           <TabsTrigger value="conversation" className="px-0">
-            Conversation ({session.message_count})
+            {t('sessions.detail.tabs.conversation', { count: session.message_count })}
           </TabsTrigger>
         </TabsList>
 
@@ -417,7 +453,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <div className="flex items-center gap-2 rounded-md border border-blue-500/30 bg-blue-500/5 px-4 py-2.5">
               <Loader2 className="h-4 w-4 text-blue-500 animate-spin shrink-0" />
               <p className="text-sm text-muted-foreground">
-                Analysis in progress — results will appear shortly
+                {t('sessions.detail.analysisInProgress')}
               </p>
             </div>
           )}
@@ -433,7 +469,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
               <div className="flex items-center gap-2 min-w-0">
                 <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
                 <p className="text-sm text-muted-foreground">
-                  Missing pattern data for this session
+                  {t('sessions.detail.missingPatterns')}
                 </p>
               </div>
               <Button
@@ -443,9 +479,9 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                 disabled={backfillMutation.isPending}
                 onClick={() => {
                   backfillMutation.mutate([sessionId], {
-                    onSuccess: () => toast.success('Facets extracted successfully'),
+                    onSuccess: () => toast.success(t('sessions.detail.facetsExtracted')),
                     onError: (err) => toast.error(
-                      err instanceof Error ? err.message : 'Failed to extract facets'
+                      err instanceof Error ? err.message : t('sessions.detail.facetsFailed')
                     ),
                   });
                 }}
@@ -453,10 +489,10 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                 {backfillMutation.isPending ? (
                   <>
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    Extracting...
+                    {t('sessions.detail.extracting')}
                   </>
                 ) : (
-                  'Extract Facets'
+                  t('sessions.detail.extractFacets')
                 )}
               </Button>
             </div>
@@ -467,7 +503,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <FileText className="h-4 w-4 text-purple-500 shrink-0" />
-                <h3 className="text-sm font-medium">Summary</h3>
+                <h3 className="text-sm font-medium">{t('sessions.detail.summary')}</h3>
               </div>
               <div className="rounded-md bg-muted/20 px-4 py-3">
                 <p className="font-medium text-sm mb-1.5">{summaryTitle}</p>
@@ -489,7 +525,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <div>
               <div className="flex items-center gap-2 mb-2">
                 <GitPullRequest className="h-4 w-4 text-muted-foreground" />
-                <h3 className="text-sm font-medium">Pull Requests</h3>
+                <h3 className="text-sm font-medium">{t('sessions.detail.pullRequests')}</h3>
               </div>
               <div className="flex flex-wrap gap-2">
                 {prLinks.map((url) => {
@@ -513,9 +549,9 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <div className="rounded-lg border border-dashed">
               <div className="flex flex-col items-center justify-center py-12 text-center space-y-3">
                 <BarChart2 className="h-8 w-8 text-muted-foreground" />
-                <p className="font-medium text-sm">This session hasn't been analyzed yet</p>
+                <p className="font-medium text-sm">{t('sessions.detail.notAnalyzed')}</p>
                 <p className="text-xs text-muted-foreground">
-                  Generate AI insights to extract learnings, decisions, and a session summary.
+                  {t('sessions.detail.notAnalyzedDescription')}
                 </p>
                 <div className="pt-2">
                   <AnalyzeButton
@@ -537,7 +573,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                   <div>
                     <div className="flex items-center gap-2 mb-3">
                       <BookOpen className="h-4 w-4 text-green-500" />
-                      <h3 className="text-sm font-medium">Learnings</h3>
+                      <h3 className="text-sm font-medium">{t('sessions.detail.learnings')}</h3>
                       <Badge variant="secondary" className="text-xs">
                         {learningInsights.length}
                       </Badge>
@@ -558,7 +594,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                   <div>
                     <div className="flex items-center gap-2 mb-3">
                       <GitCommit className="h-4 w-4 text-blue-500" />
-                      <h3 className="text-sm font-medium">Decisions</h3>
+                      <h3 className="text-sm font-medium">{t('sessions.detail.decisions')}</h3>
                       <Badge variant="secondary" className="text-xs">
                         {decisionInsights.length}
                       </Badge>
@@ -583,9 +619,9 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <div className="rounded-lg border border-dashed">
               <div className="flex flex-col items-center justify-center py-16 text-center space-y-3">
                 <Target className="h-8 w-8 text-muted-foreground" />
-                <p className="font-medium text-sm">No Prompt Quality Analysis</p>
+                <p className="font-medium text-sm">{t('sessions.detail.noPromptQuality')}</p>
                 <p className="text-xs text-muted-foreground max-w-[280px]">
-                  Analyze your prompting patterns to improve efficiency.
+                  {t('sessions.detail.noPromptQualityDescription')}
                 </p>
                 <div className="pt-2">
                   <PromptQualityAnalyzeButton session={session} />
@@ -614,7 +650,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
               loadingMore={loadingMore}
               hasMore={hasMore}
               onLoadMore={() => messagesQuery.fetchNextPage()}
-              sourceTool={session.source_tool}
+              sourceTool={session.source_tool ?? undefined}
               highlightMessageId={searchHighlightId}
               searchQuery={searchQuery}
             />
@@ -627,7 +663,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
         open={renameOpen}
         onOpenChange={setRenameOpen}
         sessionId={session.id}
-        currentTitle={getSessionTitle(session)}
+        currentTitle={sessionTitle}
       />
     </div>
   );

@@ -1,14 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
-import { formatDistanceToNow } from 'date-fns';
 import { ChevronDown, ChevronRight, ExternalLink } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
-import { INSIGHT_TYPE_COLORS, INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
+import { INSIGHT_TYPE_COLORS, INSIGHT_TYPE_MESSAGE_KEYS } from '@/lib/constants/colors';
 import { cn } from '@/lib/utils';
 import { getScoreTier, extractPQScore } from '@/lib/score-utils';
 import type { Insight, InsightType, InsightMetadata } from '@/lib/types';
 import { parseJsonField } from '@/lib/types';
 import { OutcomeBadge, renderTypeContent } from './insight-metadata';
 import { PromptQualityContent } from './PromptQualityCard';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 const SCORE_BADGE_COLORS: Record<string, string> = {
   excellent: 'bg-green-500/15 text-green-600',
@@ -42,6 +42,7 @@ interface InsightListItemProps {
 }
 
 export function InsightListItem({ insight, showProject = false, allInsightIds, highlighted = false, defaultExpanded = false }: InsightListItemProps) {
+  const { t, formatRelativeDate } = useLocale();
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [showRing, setShowRing] = useState(highlighted);
   const itemRef = useRef<HTMLDivElement>(null);
@@ -101,7 +102,7 @@ export function InsightListItem({ insight, showProject = false, allInsightIds, h
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-0.5 flex-wrap">
               <span className={cn('text-xs font-medium', iconColorClass)}>
-                {INSIGHT_TYPE_LABELS[insight.type]}
+                {t(INSIGHT_TYPE_MESSAGE_KEYS[insight.type])}
               </span>
               {pqScore != null && (
                 <span className={cn(
@@ -113,7 +114,7 @@ export function InsightListItem({ insight, showProject = false, allInsightIds, h
               )}
               {recurringCount > 0 && (
                 <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-amber-500/20 text-xs py-0">
-                  Recurring {recurringCount + 1}x
+                  {t('insights.card.recurring', { count: recurringCount + 1 })}
                 </Badge>
               )}
             </div>
@@ -123,7 +124,7 @@ export function InsightListItem({ insight, showProject = false, allInsightIds, h
                 <span className="text-xs text-muted-foreground">{insight.project_name}</span>
               )}
               <span className="text-xs text-muted-foreground ml-auto">
-                {formatDistanceToNow(new Date(insight.timestamp), { addSuffix: true })}
+                {formatRelativeDate(insight.timestamp)}
               </span>
             </div>
           </div>
@@ -175,7 +176,7 @@ export function InsightListItem({ insight, showProject = false, allInsightIds, h
               onClick={(e) => e.stopPropagation()}
             >
               <ExternalLink className="h-3 w-3" />
-              View session
+              {t('insights.card.viewSession')}
             </a>
           </div>
         </div>

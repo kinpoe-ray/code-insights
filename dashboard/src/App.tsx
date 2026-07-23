@@ -12,20 +12,23 @@ import SettingsPage from '@/pages/SettingsPage';
 import ExportPage from '@/pages/ExportPage';
 import JournalPage from '@/pages/JournalPage';
 import PatternsPage from '@/pages/PatternsPage';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
-const ROUTE_TITLES: Record<string, string> = {
-  '/dashboard': 'Dashboard',
-  '/sessions': 'Sessions',
-  '/insights': 'Insights',
-  '/analytics': 'Analytics',
-  '/patterns': 'Patterns',
-  '/export': 'Export',
-  '/journal': 'Journal',
-  '/settings': 'Settings',
+const ROUTE_TITLES: Record<string, MessageKey> = {
+  '/dashboard': 'nav.dashboard',
+  '/sessions': 'nav.sessions',
+  '/insights': 'nav.insights',
+  '/analytics': 'nav.analytics',
+  '/patterns': 'nav.patterns',
+  '/export': 'nav.export',
+  '/journal': 'nav.journal',
+  '/settings': 'nav.settings',
 };
 
 function RouteEffects() {
   const { pathname } = useLocation();
+  const { t } = useLocale();
   const [searchParams] = useSearchParams();
   const insightParam = searchParams.get('insight');
   const navStartRef = useRef<number>(Date.now());
@@ -41,20 +44,20 @@ function RouteEffects() {
   // Update document.title per route, track page views, and capture dashboard_loaded
   useEffect(() => {
     const segment = '/' + pathname.split('/')[1];
-    const page = ROUTE_TITLES[segment];
-    document.title = page ? `${page} — Code Insights` : 'Code Insights';
+    const titleKey = ROUTE_TITLES[segment];
+    document.title = titleKey ? `${t(titleKey)} — Code Insights` : 'Code Insights';
 
     // Track page view on every route change
     capturePageView(pathname);
 
     // Capture dashboard_loaded with time since navigation started
-    if (page) {
+    if (titleKey) {
       const loadTimeMs = Date.now() - navStartRef.current;
-      captureDashboardLoaded(page.toLowerCase(), loadTimeMs);
+      captureDashboardLoaded(segment.slice(1), loadTimeMs);
     }
     // Reset nav start for next navigation
     navStartRef.current = Date.now();
-  }, [pathname]);
+  }, [pathname, t]);
 
   return null;
 }

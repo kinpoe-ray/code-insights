@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { format } from 'date-fns';
 import { BellRing, MessageSquare, ChevronDown, ChevronRight } from 'lucide-react';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { cn } from '@/lib/utils';
 import { TEAMMATE_BORDER_COLORS, TEAMMATE_DEFAULT_COLORS } from '@/lib/constants/colors';
 import { AssistantMarkdown } from './markdown/AssistantMarkdown';
 import type { ParsedAgentMessage, ParsedTaskNotification, ParsedTeammateMessage } from './preprocess';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface AgentMessageBubbleProps {
   parsed: ParsedAgentMessage;
@@ -40,14 +40,15 @@ function TaskNotificationCard({
   parsed: ParsedTaskNotification;
   timestamp: string;
 }) {
+  const { t, formatDate } = useLocale();
   const [expanded, setExpanded] = useState(false);
   const hasResult = Boolean(parsed.result);
   const hasUsage = Boolean(parsed.usage?.tokens || parsed.usage?.duration || parsed.usage?.toolUses);
 
   const usageParts: string[] = [];
-  if (parsed.usage?.tokens) usageParts.push(`${parsed.usage.tokens} tokens`);
+  if (parsed.usage?.tokens) usageParts.push(t('chat.usage.tokens', { count: parsed.usage.tokens }));
   if (parsed.usage?.duration) usageParts.push(parsed.usage.duration);
-  if (parsed.usage?.toolUses) usageParts.push(`${parsed.usage.toolUses} tool uses`);
+  if (parsed.usage?.toolUses) usageParts.push(t('chat.usage.toolUses', { count: parsed.usage.toolUses }));
 
   return (
     <div className="border-l-4 border-amber-500/40 bg-amber-500/5 rounded-lg p-3 mx-4 my-2">
@@ -55,7 +56,7 @@ function TaskNotificationCard({
       <div className="flex items-center gap-2">
         <BellRing className="h-4 w-4 text-amber-500 shrink-0" />
         <span className="text-sm font-medium flex-1 min-w-0 truncate">
-          {parsed.summary ?? 'Task notification'}
+          {parsed.summary ?? t('chat.task.notification')}
         </span>
         {parsed.status && (
           <span
@@ -68,7 +69,7 @@ function TaskNotificationCard({
           </span>
         )}
         <span className="shrink-0 text-xs text-muted-foreground">
-          {format(new Date(timestamp), 'h:mm a')}
+          {formatDate(timestamp, { hour: 'numeric', minute: '2-digit' })}
         </span>
       </div>
 
@@ -85,7 +86,7 @@ function TaskNotificationCard({
             ) : (
               <ChevronRight className="h-3 w-3" />
             )}
-            {expanded ? 'Hide result' : 'Show result'}
+            {expanded ? t('chat.result.hide') : t('chat.result.show')}
           </button>
           {expanded && parsed.result && (
             <div className="mt-2">
@@ -114,13 +115,14 @@ function TeammateMessageCard({
   parsed: ParsedTeammateMessage;
   timestamp: string;
 }) {
+  const { t, formatDate } = useLocale();
   // Resolve color tokens from the color attribute, fallback to gray
   const colors =
     parsed.color && parsed.color in TEAMMATE_BORDER_COLORS
       ? TEAMMATE_BORDER_COLORS[parsed.color]
       : TEAMMATE_DEFAULT_COLORS;
 
-  const displayName = parsed.from ?? parsed.teammateId ?? 'Agent';
+  const displayName = parsed.from ?? parsed.teammateId ?? t('chat.agent');
 
   return (
     <div className={cn('border-l-4 rounded-lg p-3 mx-4 my-2', colors.border, colors.bg)}>
@@ -134,7 +136,7 @@ function TeammateMessageCard({
           </span>
         )}
         <span className="shrink-0 text-xs text-muted-foreground">
-          {format(new Date(timestamp), 'h:mm a')}
+          {formatDate(timestamp, { hour: 'numeric', minute: '2-digit' })}
         </span>
       </div>
 

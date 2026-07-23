@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Sparkles, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { captureDispatchCalloutDismissed } from '@/lib/telemetry';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface DispatchDiscoveryCalloutProps {
   onTryIt: () => void;
@@ -9,6 +10,7 @@ interface DispatchDiscoveryCalloutProps {
 }
 
 export function DispatchDiscoveryCallout({ onTryIt, onDismiss }: DispatchDiscoveryCalloutProps) {
+  const { t } = useLocale();
   const [fading, setFading] = useState(false);
 
   function dismiss(via: 'x' | 'not_now') {
@@ -32,16 +34,16 @@ export function DispatchDiscoveryCallout({ onTryIt, onDismiss }: DispatchDiscove
       <div className="flex items-start gap-3">
         <Sparkles className="h-4 w-4 text-primary mt-0.5 shrink-0" />
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium">Turn this session into a writeup</p>
+          <p className="text-sm font-medium">{t('insights.callout.title')}</p>
           <p className="text-xs text-muted-foreground mt-0.5">
-            Your patterns and friction points are ready — generate a blog post or LinkedIn writeup in one click.
+            {t('insights.callout.description')}
           </p>
           <div className="flex items-center gap-2 mt-2">
             <Button size="sm" onClick={handleTryIt}>
-              Try it
+              {t('insights.callout.tryIt')}
             </Button>
             <Button size="sm" variant="ghost" onClick={() => dismiss('not_now')}>
-              Not now
+              {t('insights.callout.notNow')}
             </Button>
           </div>
 
@@ -49,7 +51,7 @@ export function DispatchDiscoveryCallout({ onTryIt, onDismiss }: DispatchDiscove
         <button
           className="shrink-0 text-muted-foreground hover:text-foreground transition-colors"
           onClick={() => dismiss('x')}
-          aria-label="Dismiss callout"
+          aria-label={t('insights.callout.dismiss')}
         >
           <X className="h-4 w-4" />
         </button>

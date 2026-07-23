@@ -2,7 +2,9 @@
 // Base URL is relative in production (SPA served by the same server).
 // In Vite dev mode, the proxy forwards /api -> localhost:7890.
 
-import type { Project, Session, Message, Insight, DashboardStats, LLMConfig, ExportTemplate, FacetRow } from '@/lib/types';
+import type { Project, Session, Message, Insight, DashboardStats, LLMConfig, ExportTemplate, FacetRow, AnalysisLanguage } from '@/lib/types';
+import { dashboardFetch } from '@/lib/dashboard-http';
+import { parseSSEStream } from '@/lib/sse';
 
 const BASE = '/api';
 
@@ -13,7 +15,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body) {
     headers['Content-Type'] = 'application/json';
   }
-  const res = await fetch(`${BASE}${path}`, { ...init, headers });
+  const res = await dashboardFetch(`${BASE}${path}`, { ...init, headers });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`API ${res.status}: ${text}`);
@@ -162,6 +164,7 @@ export function saveLlmConfig(body: {
   model?: string;
   apiKey?: string;
   baseUrl?: string;
+  analysisLanguage?: AnalysisLanguage;
 }) {
   return request<{ ok: boolean }>('/config/llm', {
     method: 'PUT',
@@ -209,7 +212,7 @@ export async function exportMarkdown(body: {
   projectId?: string;
   template?: ExportTemplate;
 }): Promise<string> {
-  const res = await fetch(`${BASE}/export/markdown`, {
+  const res = await dashboardFetch(`${BASE}/export/markdown`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -258,7 +261,7 @@ export async function exportGenerateStream(
   q.set('format', params.format);
   if (params.depth) q.set('depth', params.depth);
 
-  const res = await fetch(`${BASE}/export/generate/stream?${q.toString()}`, { signal });
+  const res = await dashboardFetch(`${BASE}/export/generate/stream?${q.toString()}`, { signal });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
     throw new Error(`Export stream failed ${res.status}: ${text}`);
@@ -363,13 +366,17 @@ export function fetchMissingFacetSessionIds(params?: {
   return request<{ sessionIds: string[]; count: number }>(`/facets/missing${qs}`);
 }
 
-export async function backfillFacets(sessionIds: string[]): Promise<{ completed: number; failed: number }> {
+export async function backfillFacets(
+  sessionIds: string[],
+  signal?: AbortSignal,
+): Promise<{ completed: number; failed: number }> {
   // The /api/facets/backfill endpoint returns an SSE stream, not JSON.
   // Using raw fetch here instead of request() which calls res.json() and would crash.
-  const res = await fetch(`${BASE}/facets/backfill`, {
+  const res = await dashboardFetch(`${BASE}/facets/backfill`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sessionIds }),
+    signal,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
@@ -377,38 +384,30 @@ export async function backfillFacets(sessionIds: string[]): Promise<{ completed:
   }
   if (!res.body) throw new Error('No response body');
 
-  const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
-  let buffer = '';
-  let currentEvent = '';
-  let currentData = '';
-  let result = { completed: 0, failed: 0 };
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += value;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        if (line.startsWith('event: ')) {
-          currentEvent = line.slice(7).trim();
-        } else if (line.startsWith('data: ')) {
-          currentData = line.slice(6);
-        } else if (line === '' && currentEvent && currentData) {
-          if (currentEvent === 'complete') {
-            const data = JSON.parse(currentData) as { completed: number; failed: number };
-            result = { completed: data.completed, failed: data.failed };
-          }
-          currentEvent = '';
-          currentData = '';
-        }
-      }
+  let result: { completed: number; failed: number } | null = null;
+  for await (const event of parseSSEStream(res.body, signal)) {
+    if (event.event === 'error') {
+      const data = JSON.parse(event.data) as { error?: unknown };
+      throw new Error(
+        typeof data.error === 'string' && data.error.trim()
+          ? data.error
+          : 'Backfill failed',
+      );
     }
-  } finally {
-    reader.releaseLock();
+    if (event.event !== 'complete') continue;
+    const data = JSON.parse(event.data) as {
+      completed: number;
+      failed: number;
+    };
+    result = { completed: data.completed, failed: data.failed };
   }
 
+  if (signal?.aborted) {
+    throw signal.reason ?? new DOMException('Backfill aborted', 'AbortError');
+  }
+  if (!result) {
+    throw new Error('Backfill SSE stream ended without a complete event');
+  }
   return result;
 }
 
@@ -457,7 +456,7 @@ export async function reflectGenerateStream(
   },
   signal?: AbortSignal
 ): Promise<Response> {
-  const res = await fetch(`${BASE}/reflect/generate`, {
+  const res = await dashboardFetch(`${BASE}/reflect/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -535,13 +534,15 @@ export function generateDispatchImagePrompt(body: DispatchImagePromptRequest): P
 export interface AnalysisQueueItem {
   session_id: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
-  runner_type: string;
+  runner_type: 'native' | 'provider';
   enqueued_at: string;
   started_at: string | null;
   completed_at: string | null;
   error_message: string | null;
   attempt_count: number;
   max_attempts: number;
+  rerun_requested: 0 | 1;
+  next_attempt_at: string | null;
 }
 
 export interface AnalysisQueueStatus {
@@ -549,10 +550,24 @@ export interface AnalysisQueueStatus {
   processing: number;
   completed: number;
   failed: number;
+  nextAttemptAt: string | null;
   items: AnalysisQueueItem[];
+}
+
+export interface AnalysisBatchReceipt {
+  sessionIds: string[];
+  queued: number;
+  alreadyActive: number;
+  enqueuedAt: string;
 }
 
 export function fetchAnalysisQueue() {
   return request<AnalysisQueueStatus>('/analysis/queue');
 }
 
+export function enqueueAnalysisBatch(sessionIds: string[]) {
+  return request<{ batch: AnalysisBatchReceipt }>('/analysis/queue', {
+    method: 'POST',
+    body: JSON.stringify({ sessionIds }),
+  });
+}

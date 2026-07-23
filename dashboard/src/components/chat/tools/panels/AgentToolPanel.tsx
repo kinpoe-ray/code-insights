@@ -8,14 +8,15 @@ import type { ToolCall, ToolResult } from '@/lib/types';
 import { parseToolInput } from '../utils';
 import { usePreviewText } from '../usePreview';
 import { CollapsibleToolPanel } from '../CollapsibleToolPanel';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface AgentToolPanelProps {
   toolCall: ToolCall;
   result?: ToolResult;
 }
 
-function getAgentDisplayName(input: Record<string, unknown>): string {
-  return (input.name as string) || (input.subagent_type as string) || 'Agent';
+function getAgentDisplayName(input: Record<string, unknown>, fallback: string): string {
+  return (input.name as string) || (input.subagent_type as string) || fallback;
 }
 
 function getAgentInitials(name: string): string {
@@ -27,6 +28,7 @@ function getAgentInitials(name: string): string {
 }
 
 export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
+  const { t, formatNumber } = useLocale();
   const [showPrompt, setShowPrompt] = useState(false);
   const input = parseToolInput(toolCall.input);
 
@@ -34,7 +36,7 @@ export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
   const subagentType = (input.subagent_type as string) || '';
   const model = (input.model as string) || '';
   const prompt = (input.prompt as string) || '';
-  const agentName = getAgentDisplayName(input);
+  const agentName = getAgentDisplayName(input, t('chat.agent'));
   const initials = getAgentInitials(agentName);
   const avatarColor = AGENT_PARTICIPANT_COLORS[subagentType] || AGENT_DEFAULT_COLOR;
 
@@ -61,7 +63,7 @@ export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
     <div className="my-3">
       <CollapsibleToolPanel
         icon={<Users className="h-3.5 w-3.5 text-purple-500 shrink-0" />}
-        label="Agent"
+        label={t('chat.tool.agent')}
         summary={summary}
         className="border-purple-500/20"
       >
@@ -85,7 +87,7 @@ export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
                 className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
               >
                 {showPrompt ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                <span>Prompt ({prompt.length.toLocaleString()} chars)</span>
+                <span>{t('chat.prompt.characters', { count: formatNumber(prompt.length) })}</span>
               </button>
               {showPrompt && (
                 <pre className="mt-1 px-3 py-2 bg-muted/40 rounded text-xs font-mono text-muted-foreground whitespace-pre-wrap overflow-x-auto max-h-64">
@@ -104,7 +106,7 @@ export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
               {initials}
             </div>
             <span className="font-medium text-xs text-foreground">{agentName}</span>
-            <span className="text-[10px] text-muted-foreground">responded</span>
+            <span className="text-[10px] text-muted-foreground">{t('chat.agent.responded')}</span>
           </div>
 
           <div className="prose prose-sm dark:prose-invert max-w-none [&_p]:my-1">
@@ -114,7 +116,7 @@ export function AgentToolPanel({ toolCall, result }: AgentToolPanelProps) {
                 onClick={toggle}
                 className="text-xs text-purple-500 hover:text-purple-600 mt-1 not-prose"
               >
-                {showFull ? 'Show less' : `Show full response (${resultLines.length} lines)`}
+                {showFull ? t('chat.showLess') : t('chat.response.showFull', { count: resultLines.length })}
               </button>
             )}
           </div>

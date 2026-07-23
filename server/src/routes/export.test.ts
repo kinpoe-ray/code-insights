@@ -1,5 +1,8 @@
 import { randomUUID } from 'crypto';
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
@@ -8,6 +11,13 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -94,6 +104,8 @@ function parseSSEEvents(text: string): Array<{ event: string; data: string }> {
 
 describe('Export routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockChat.mockReset();
@@ -103,6 +115,8 @@ describe('Export routes', () => {
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   describe('POST /api/export/markdown', () => {
@@ -426,6 +440,23 @@ describe('Export routes', () => {
       const body = await res.json();
       expect(body.content).toBe('');
     });
+
+    it('returns a recognizable busy response without calling the LLM', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({ content: '# should not run' });
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/export/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope: 'all', format: 'knowledge-brief' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'LLM_BUSY' });
+      expect(mockChat).not.toHaveBeenCalled();
+    });
   });
 
   describe('GET /api/export/generate/stream', () => {
@@ -509,6 +540,22 @@ describe('Export routes', () => {
       expect(completeData.content).toBe('# Streamed Export');
       expect(completeData.metadata).toBeDefined();
       expect(completeData.metadata.scope).toBe('all');
+    });
+
+    it('emits a recognizable busy SSE error without calling the LLM', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedInsight('sess-1', 'proj-1', 'decision', 'Use SQLite', 'SQLite is local-first.');
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({ content: '# should not run' });
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/export/generate/stream?scope=all&format=knowledge-brief');
+      const text = await res.text();
+
+      expect(text).toContain('event: error');
+      expect(text).toContain('LLM_BUSY');
+      expect(mockChat).not.toHaveBeenCalled();
     });
   });
 });

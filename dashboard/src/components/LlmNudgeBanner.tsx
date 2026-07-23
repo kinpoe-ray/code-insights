@@ -3,21 +3,18 @@ import { Link } from 'react-router';
 import { X, Sparkles, Terminal } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useLlmConfig } from '@/hooks/useConfig';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface LlmNudgeBannerProps {
   context: 'insights' | 'patterns';
 }
-
-const TITLES: Record<LlmNudgeBannerProps['context'], string> = {
-  insights: 'Get AI-powered insights',
-  patterns: 'Enable cross-session pattern detection',
-};
 
 function localStorageKey(context: LlmNudgeBannerProps['context']): string {
   return `code-insights:llm-nudge-dismissed-${context}`;
 }
 
 export function LlmNudgeBanner({ context }: LlmNudgeBannerProps) {
+  const { t } = useLocale();
   const { data: llmConfig, isLoading: configLoading } = useLlmConfig();
   const [dismissed, setDismissed] = useState<boolean>(() => {
     try {
@@ -43,7 +40,9 @@ export function LlmNudgeBanner({ context }: LlmNudgeBannerProps) {
     setDismissed(true);
   }
 
-  const title = TITLES[context];
+  const title = context === 'insights'
+    ? t('llmNudge.insightsTitle')
+    : t('llmNudge.patternsTitle');
 
   return (
     <div role="status" className="rounded-lg border bg-muted/40 px-4 py-3 text-sm">
@@ -57,9 +56,9 @@ export function LlmNudgeBanner({ context }: LlmNudgeBannerProps) {
             <div className="flex items-start gap-2">
               <Terminal className="h-3.5 w-3.5 mt-0.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
-                <p className="font-medium text-foreground text-xs">Using Claude Code?</p>
+                <p className="font-medium text-foreground text-xs">{t('llmNudge.usingClaudeCode')}</p>
                 <p className="text-muted-foreground text-xs mt-0.5">
-                  Analyze sessions automatically with your Claude subscription — no API key needed.
+                  {t('llmNudge.claudeHelp')}
                 </p>
                 <code className="inline-block mt-1.5 rounded bg-muted px-2 py-0.5 text-[11px] font-mono text-foreground">
                   code-insights install-hook
@@ -71,13 +70,13 @@ export function LlmNudgeBanner({ context }: LlmNudgeBannerProps) {
           {/* Divider */}
           <div className="flex items-center gap-2 my-2.5">
             <div className="flex-1 border-t" />
-            <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">or</span>
+            <span className="text-[10px] text-muted-foreground/60 uppercase tracking-wide">{t('llmNudge.or')}</span>
             <div className="flex-1 border-t" />
           </div>
 
           {/* Secondary path: configure a provider */}
           <p className="text-muted-foreground text-xs">
-            Configure a provider for manual analysis. Install{' '}
+            {t('llmNudge.configurePrefix')}{' '}
             <a
               href="https://ollama.com"
               target="_blank"
@@ -86,20 +85,20 @@ export function LlmNudgeBanner({ context }: LlmNudgeBannerProps) {
             >
               Ollama
             </a>{' '}
-            for free local analysis, or set up any provider in Settings.
+            {t('llmNudge.configureSuffix')}
           </p>
         </div>
 
         <div className="flex items-center gap-2 shrink-0 ml-2">
           <Button variant="outline" size="sm" className="h-7 text-xs" asChild>
-            <Link to="/settings">Configure AI Provider</Link>
+            <Link to="/settings">{t('llmNudge.configure')}</Link>
           </Button>
           <Button
             variant="ghost"
             size="icon"
             className="h-7 w-7"
             onClick={handleDismiss}
-            aria-label="Dismiss"
+            aria-label={t('llmNudge.dismiss')}
           >
             <X className="h-3.5 w-3.5" />
           </Button>

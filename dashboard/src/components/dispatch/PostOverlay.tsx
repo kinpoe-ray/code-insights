@@ -2,6 +2,7 @@ import { X } from 'lucide-react';
 import { Dialog as DialogPrimitive } from 'radix-ui';
 import { PostPreview } from './PostPreview';
 import { CoverImagePromptSection } from './CoverImagePromptSection';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { DispatchResponse } from '@/lib/api';
 
 interface PostOverlayProps {
@@ -11,6 +12,7 @@ interface PostOverlayProps {
 }
 
 export function PostOverlay({ open, onClose, result }: PostOverlayProps) {
+  const { t } = useLocale();
   const { title, tags, tldr } = result.frontmatter;
 
   return (
@@ -24,18 +26,18 @@ export function PostOverlay({ open, onClose, result }: PostOverlayProps) {
           aria-describedby="post-overlay-desc"
           className="fixed inset-0 z-[61] flex flex-col bg-background outline-none data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0"
         >
-          <DialogPrimitive.Title className="sr-only">{title || 'Post preview'}</DialogPrimitive.Title>
+          <DialogPrimitive.Title className="sr-only">{title || t('dispatch.preview.title')}</DialogPrimitive.Title>
           <p id="post-overlay-desc" className="sr-only">
-            Full-screen preview of the generated post. Use Escape or the close button to dismiss.
+            {t('dispatch.preview.description')}
           </p>
 
           {/* Header */}
           <div className="shrink-0 flex items-center justify-between border-b px-4 py-3">
-            <p className="text-sm font-medium truncate max-w-[80%]">{title || 'Generated post'}</p>
+            <p className="text-sm font-medium truncate max-w-[80%]">{title || t('dispatch.preview.generatedPost')}</p>
             <button
               type="button"
               onClick={onClose}
-              aria-label="Close preview"
+              aria-label={t('dispatch.preview.closeAria')}
               className="rounded-xs text-muted-foreground hover:text-foreground opacity-70 hover:opacity-100 transition-opacity focus:outline-hidden focus:ring-2 focus:ring-ring focus:ring-offset-2 ring-offset-background"
             >
               <X className="h-5 w-5" />

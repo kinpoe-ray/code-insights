@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { dashboardFetch } from '@/lib/dashboard-http';
 
 export interface AnalysisUsageRow {
   session_id: string;
@@ -30,7 +31,7 @@ export function useAnalysisCost(sessionId: string | null | undefined) {
   return useQuery<AnalysisCostData>({
     queryKey: ['analysis-cost', sessionId],
     queryFn: async () => {
-      const res = await fetch(`/api/analysis/usage?sessionId=${encodeURIComponent(sessionId!)}`);
+      const res = await dashboardFetch(`/api/analysis/usage?sessionId=${encodeURIComponent(sessionId!)}`);
       if (!res.ok) {
         throw new Error(`Failed to fetch analysis cost: ${res.status}`);
       }

@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import type { SyntaxHighlighterProps } from 'react-syntax-highlighter';
@@ -20,21 +20,21 @@ export function AssistantMarkdown({ content, codeStyle, searchQuery }: Assistant
     return (children: React.ReactNode) => highlightText(children, searchQuery);
   }, [searchQuery]);
 
-  const components = useMemo(() => ({
-    p({ children }: { children?: React.ReactNode }) {
+  const components = useMemo<Components>(() => ({
+    p({ children }) {
       return <p>{hl(children)}</p>;
     },
-    li({ children }: { children?: React.ReactNode }) {
+    li({ children }) {
       return <li>{hl(children)}</li>;
     },
-    blockquote({ children }: { children?: React.ReactNode }) {
+    blockquote({ children }) {
       return (
         <div className="my-3 rounded-lg border border-purple-500/20 bg-purple-500/5 px-4 py-3 not-prose">
           {children}
         </div>
       );
     },
-    table({ children }: { children?: React.ReactNode }) {
+    table({ children }) {
       return (
         <div className="my-3 overflow-x-auto">
           <table className="min-w-full text-sm border-collapse border border-border">
@@ -43,22 +43,21 @@ export function AssistantMarkdown({ content, codeStyle, searchQuery }: Assistant
         </div>
       );
     },
-    th({ children }: { children?: React.ReactNode }) {
+    th({ children }) {
       return (
         <th className="border border-border bg-muted/50 px-3 py-1.5 text-left text-xs font-medium">
           {hl(children)}
         </th>
       );
     },
-    td({ children }: { children?: React.ReactNode }) {
+    td({ children }) {
       return (
         <td className="border border-border px-3 py-1.5 text-sm">
           {hl(children)}
         </td>
       );
     },
-    code(props: { children?: React.ReactNode; className?: string; [key: string]: unknown }) {
-      const { children, className, ...rest } = props;
+    code({ children, className, node: _node, ...rest }) {
       const langMatch = /language-(\w+)/.exec(className || '');
       const isBlock = !!langMatch;
       const codeString = String(children).replace(/\n$/, '');

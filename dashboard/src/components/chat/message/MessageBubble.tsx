@@ -1,5 +1,4 @@
 import { useMemo } from 'react';
-import { format } from 'date-fns';
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { User, Bot } from 'lucide-react';
 import { ToolPanel } from '../tools/ToolPanel';
@@ -14,6 +13,7 @@ import { AgentMessageBubble } from './AgentMessageBubble';
 import { RawMessageBlock } from './RawMessageBlock';
 import { ContextBreakDivider } from '../conversation/ContextBreakDivider';
 import { InlineEventChip } from '../conversation/InlineEventChip';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface MessageBubbleProps {
   message: Message;
@@ -41,6 +41,7 @@ function getAssistantConfig(sourceTool?: string): { name: string; avatarColor: s
 }
 
 export function MessageBubble({ message, showHeader = true, nextToolResults = [], sourceTool, searchQuery, showRawMessages = false }: MessageBubbleProps) {
+  const { t, formatDate } = useLocale();
   const isUser = message.type === 'user';
   const isSystem = message.type === 'system';
   const hasContent = message.content?.trim();
@@ -102,15 +103,15 @@ export function MessageBubble({ message, showHeader = true, nextToolResults = []
 
       case 'exit-command':
         if (!showRawMessages) return null;
-        return <RawMessageBlock label="Exit Command" content={message.content} />;
+        return <RawMessageBlock label={t('chat.raw.exitCommand')} content={message.content} />;
 
       case 'skill-load':
         if (!showRawMessages) return null;
-        return <RawMessageBlock label="Skill Load" content={message.content} />;
+        return <RawMessageBlock label={t('chat.raw.skillLoad')} content={message.content} />;
 
       case 'command-frame':
         if (!showRawMessages) return null;
-        return <RawMessageBlock label="Command Output" content={message.content} />;
+        return <RawMessageBlock label={t('chat.raw.commandOutput')} content={message.content} />;
 
       case 'human':
       default:
@@ -119,8 +120,8 @@ export function MessageBubble({ message, showHeader = true, nextToolResults = []
             <div className="max-w-[80%]">
               {showHeader && (
                 <div className="flex items-center justify-end gap-2 mb-1">
-                  <span className="text-xs text-muted-foreground">{format(new Date(message.timestamp), 'h:mm a')}</span>
-                  <span className="font-medium text-sm">You</span>
+                  <span className="text-xs text-muted-foreground">{formatDate(message.timestamp, { hour: 'numeric', minute: '2-digit' })}</span>
+                  <span className="font-medium text-sm">{t('chat.you')}</span>
                   <div className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center bg-blue-500">
                     <User className="h-3.5 w-3.5 text-white" />
                   </div>
@@ -146,7 +147,7 @@ export function MessageBubble({ message, showHeader = true, nextToolResults = []
               <Bot className="h-3.5 w-3.5 text-white" />
             </div>
             <span className="font-medium text-sm">{assistantName}</span>
-            <span className="text-xs text-muted-foreground">{format(new Date(message.timestamp), 'h:mm a')}</span>
+            <span className="text-xs text-muted-foreground">{formatDate(message.timestamp, { hour: 'numeric', minute: '2-digit' })}</span>
           </div>
         )}
 

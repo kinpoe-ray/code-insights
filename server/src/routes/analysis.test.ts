@@ -1,4 +1,7 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
@@ -7,6 +10,13 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -71,6 +81,8 @@ function seedInsight(sessionId: string, projectId: string, type: string, title: 
 
 describe('Analysis routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockAnalyzeSession.mockReset();
@@ -83,6 +95,8 @@ describe('Analysis routes', () => {
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   describe('POST /api/analysis/session', () => {
@@ -181,6 +195,24 @@ describe('Analysis routes', () => {
       expect(body.success).toBe(false);
       expect(mockCaptureError).not.toHaveBeenCalled();
     });
+
+    it('returns a recognizable busy response without calling the LLM', async () => {
+      seedProject('proj-1', 'myproject');
+      seedSession('sess-1', 'proj-1');
+      mockIsLLMConfigured.mockReturnValue(true);
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/analysis/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: 'sess-1' }),
+      });
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'LLM_BUSY' });
+      expect(mockAnalyzeSession).not.toHaveBeenCalled();
+    });
   });
 
   describe('GET /api/analysis/session/stream', () => {
@@ -200,6 +232,22 @@ describe('Analysis routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toMatch(/sessionId/);
+    });
+
+    it('sends a recognizable busy SSE error without calling the LLM', async () => {
+      seedProject('proj-1', 'myproject');
+      seedSession('sess-1', 'proj-1');
+      mockIsLLMConfigured.mockReturnValue(true);
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/analysis/session/stream?sessionId=sess-1');
+      const body = await res.text();
+
+      expect(res.status).toBe(200);
+      expect(body).toContain('event: error');
+      expect(body).toContain('LLM_BUSY');
+      expect(mockAnalyzeSession).not.toHaveBeenCalled();
     });
   });
 

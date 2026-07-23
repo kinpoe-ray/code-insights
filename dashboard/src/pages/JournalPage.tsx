@@ -11,6 +11,7 @@ import { Link } from 'react-router';
 import { ErrorCard } from '@/components/ErrorCard';
 import { SourceToolSelect } from '@/components/filters/SourceToolSelect';
 import type { Insight } from '@/lib/types';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 function getWeekKey(dateStr: string): string {
   const date = new Date(dateStr);
@@ -18,23 +19,8 @@ function getWeekKey(dateStr: string): string {
   return format(start, 'yyyy-MM-dd');
 }
 
-function getWeekLabel(weekKey: string): string {
-  const start = new Date(weekKey + 'T00:00:00');
-  const end = endOfWeek(start, { weekStartsOn: 1 });
-  const now = new Date();
-  const thisWeekStart = startOfWeek(now, { weekStartsOn: 1 });
-  const lastWeekStart = startOfWeek(subWeeks(now, 1), { weekStartsOn: 1 });
-
-  if (weekKey === format(thisWeekStart, 'yyyy-MM-dd')) {
-    return `This Week (${format(start, 'MMM d')} - ${format(end, 'MMM d')})`;
-  }
-  if (weekKey === format(lastWeekStart, 'yyyy-MM-dd')) {
-    return `Last Week (${format(start, 'MMM d')} - ${format(end, 'MMM d')})`;
-  }
-  return `Week of ${format(start, 'MMMM d, yyyy')}`;
-}
-
 export default function JournalPage() {
+  const { t, formatDate } = useLocale();
   const [source, setSource] = useState<string>('all');
   const { data: insights = [], isLoading, isError, refetch } = useInsights();
   // limit: 500 matches Analytics page pattern; server default is 50 which would silently miss sessions
@@ -76,13 +62,32 @@ export default function JournalPage() {
     [insightsByWeek]
   );
 
+  const getWeekLabel = (weekKey: string): string => {
+    const start = new Date(`${weekKey}T00:00:00`);
+    const end = endOfWeek(start, { weekStartsOn: 1 });
+    const now = new Date();
+    const thisWeekStart = startOfWeek(now, { weekStartsOn: 1 });
+    const lastWeekStart = startOfWeek(subWeeks(now, 1), { weekStartsOn: 1 });
+    const range = `${formatDate(start, { month: 'short', day: 'numeric' })} – ${formatDate(end, { month: 'short', day: 'numeric' })}`;
+
+    if (weekKey === format(thisWeekStart, 'yyyy-MM-dd')) {
+      return t('journal.thisWeek', { range });
+    }
+    if (weekKey === format(lastWeekStart, 'yyyy-MM-dd')) {
+      return t('journal.lastWeek', { range });
+    }
+    return t('journal.weekOf', {
+      date: formatDate(start, { year: 'numeric', month: 'long', day: 'numeric' }),
+    });
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-2xl font-bold">Knowledge Journal</h1>
+          <h1 className="text-2xl font-bold">{t('journal.title')}</h1>
           <p className="text-muted-foreground">
-            A chronological timeline of your learnings and decisions
+            {t('journal.subtitle')}
           </p>
         </div>
         <SourceToolSelect
@@ -93,28 +98,28 @@ export default function JournalPage() {
       </div>
 
       {isError && (
-        <ErrorCard message="Failed to load journal data" onRetry={refetch} />
+        <ErrorCard message={t('journal.loadFailed')} onRetry={refetch} />
       )}
 
       <Tabs defaultValue="timeline">
         <TabsList>
           <TabsTrigger value="timeline" className="gap-2">
             <Clock className="h-4 w-4" />
-            Timeline
+            {t('journal.timeline')}
           </TabsTrigger>
           <TabsTrigger value="patterns" className="gap-2">
             <GitBranch className="h-4 w-4" />
-            Patterns
+            {t('journal.patterns')}
           </TabsTrigger>
         </TabsList>
 
         {/* Timeline tab */}
         <TabsContent value="timeline" className="space-y-2 mt-4">
           {isLoading ? (
-            <div className="text-center py-12 text-muted-foreground">Loading journal...</div>
+            <div className="text-center py-12 text-muted-foreground">{t('journal.loading')}</div>
           ) : sortedWeeks.length === 0 ? (
             <div className="text-center py-12 text-muted-foreground">
-              No learnings or decisions recorded yet. They appear here as you analyze sessions.
+              {t('journal.empty')}
             </div>
           ) : (
             <div className="space-y-8">
@@ -136,15 +141,13 @@ export default function JournalPage() {
                         {weekLearnings.length > 0 && (
                           <Badge variant="secondary" className="text-xs gap-1">
                             <Lightbulb className="h-3 w-3" />
-                            {weekLearnings.length} learning
-                            {weekLearnings.length !== 1 ? 's' : ''}
+                            {t('journal.learningCount', { count: weekLearnings.length })}
                           </Badge>
                         )}
                         {weekDecisions.length > 0 && (
                           <Badge variant="secondary" className="text-xs gap-1">
                             <Target className="h-3 w-3" />
-                            {weekDecisions.length} decision
-                            {weekDecisions.length !== 1 ? 's' : ''}
+                            {t('journal.decisionCount', { count: weekDecisions.length })}
                           </Badge>
                         )}
                       </div>
@@ -186,7 +189,7 @@ export default function JournalPage() {
                                   )}
                                   <p className="text-xs text-muted-foreground mt-1">
                                     {insight.project_name} &middot;{' '}
-                                    {format(new Date(insight.timestamp), 'MMM d')}
+                                    {formatDate(new Date(insight.timestamp), { month: 'short', day: 'numeric' })}
                                   </p>
                                 </div>
                                 <Badge
@@ -197,7 +200,11 @@ export default function JournalPage() {
                                       : 'text-blue-700 border-blue-300 dark:text-blue-400 dark:border-blue-700'
                                   }`}
                                 >
-                                  {insight.type === 'technique' ? 'technique' : insight.type}
+                                  {insight.type === 'technique'
+                                    ? t('journal.type.technique')
+                                    : insight.type === 'learning'
+                                      ? t('journal.type.learning')
+                                      : t('journal.type.decision')}
                                 </Badge>
                               </div>
                             </div>
@@ -219,10 +226,10 @@ export default function JournalPage() {
                 <div>
                   <CardTitle className="flex items-center gap-2 text-base">
                     <Sparkles className="h-4 w-4 text-purple-500" />
-                    AI Pattern Analysis
+                    {t('journal.ai.title')}
                   </CardTitle>
                   <CardDescription>
-                    Discover recurring patterns in your work using your configured AI provider
+                    {t('journal.ai.description')}
                   </CardDescription>
                 </div>
               </div>
@@ -230,33 +237,34 @@ export default function JournalPage() {
             <CardContent>
               {!llmConfigured ? (
                 <div className="text-center py-8 text-muted-foreground">
-                  <p>Configure an AI provider in Settings to use this feature.</p>
+                  <p>{t('journal.ai.configure')}</p>
                   <Link
                     to="/settings"
                     className="text-primary text-sm underline hover:text-primary/80 mt-2 inline-block"
                   >
-                    Go to Settings
+                    {t('journal.ai.goSettings')}
                   </Link>
                 </div>
               ) : insights.length === 0 ? (
                 <div className="text-center py-8 text-muted-foreground">
-                  Analyze some sessions first to see patterns here.
+                  {t('journal.ai.analyzeFirst')}
                 </div>
               ) : (
                 <div className="text-center py-8 text-muted-foreground space-y-3">
                   <p>
-                    You have {insights.length} insight{insights.length !== 1 ? 's' : ''} across{' '}
-                    {sortedWeeks.length} week{sortedWeeks.length !== 1 ? 's' : ''}.
+                    {t('journal.ai.summary', {
+                      insights: insights.length,
+                      weeks: sortedWeeks.length,
+                    })}
                   </p>
                   <p className="text-sm">
-                    Pattern analysis uses the session analysis feature. Go to a session and click
-                    "Analyze" to generate insights, then check back here for timeline trends.
+                    {t('journal.ai.help')}
                   </p>
                   <Link
                     to="/sessions"
                     className="text-primary text-sm underline hover:text-primary/80 inline-block"
                   >
-                    View Sessions
+                    {t('journal.ai.viewSessions')}
                   </Link>
                 </div>
               )}

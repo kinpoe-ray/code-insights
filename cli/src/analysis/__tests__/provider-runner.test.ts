@@ -35,6 +35,24 @@ function makeFetchResponse(body: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
+function makeMalformedJsonResponse(secret: string): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.reject(new SyntaxError(`malformed provider body: ${secret}`)),
+    text: () => Promise.resolve(secret),
+  } as unknown as Response;
+}
+
+function makeAbortedJsonResponse(error: Error): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.reject(error),
+    text: () => Promise.resolve(''),
+  } as unknown as Response;
+}
+
 describe('ProviderRunner.fromConfig()', () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -65,6 +83,93 @@ describe('ProviderRunner.fromConfig()', () => {
     } as ReturnType<typeof loadConfig>);
     const runner = ProviderRunner.fromConfig();
     expect(runner.name).toBe('ollama');
+  });
+
+  it('revalidates a manually edited config before constructing the transport', () => {
+    const secret = 'manual-config-secret';
+    mockLoadConfig.mockReturnValue({
+      dashboard: {
+        llm: makeConfig({
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          apiKey: 'anthropic-key',
+          baseUrl: `https://user:${secret}@gateway.example.test`,
+        }),
+      },
+    } as ReturnType<typeof loadConfig>);
+
+    expect(() => ProviderRunner.fromConfig())
+      .toThrow('Base URL must not include a username or password.');
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProviderRunner runtime base URL policy', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it.each([
+    [
+      'remote Anthropic HTTP',
+      makeConfig({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'anthropic-key',
+        baseUrl: 'http://gateway.example.test/anthropic',
+      }),
+      'Anthropic base URL must use HTTPS unless it targets the local machine.',
+    ],
+    [
+      'embedded credentials',
+      makeConfig({
+        provider: 'anthropic',
+        model: 'claude-sonnet-4-20250514',
+        apiKey: 'anthropic-key',
+        baseUrl: 'https://private-user:runtime-url-secret@gateway.example.test',
+      }),
+      'Base URL must not include a username or password.',
+    ],
+    [
+      'file protocol',
+      makeConfig({
+        provider: 'ollama',
+        model: 'llama3',
+        apiKey: undefined,
+        baseUrl: 'file:///tmp/ollama.sock',
+      }),
+      'Base URL must use the HTTP or HTTPS protocol.',
+    ],
+    [
+      'unsupported provider override',
+      makeConfig({
+        provider: 'openai',
+        model: 'gpt-4o',
+        apiKey: 'openai-key',
+        baseUrl: 'https://gateway.example.test',
+      }),
+      'OpenAI does not support a custom base URL.',
+    ],
+  ])('rejects %s before fetch', (_label, config, expectedMessage) => {
+    expect(() => new ProviderRunner(config)).toThrow(expectedMessage);
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['http://localhost:8080/anthropic/', 'http://localhost:8080/anthropic/v1/messages'],
+    ['https://gateway.example.test/anthropic/', 'https://gateway.example.test/anthropic/v1/messages'],
+  ])('uses an accepted normalized Anthropic endpoint %s', async (baseUrl, expectedUrl) => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      content: [{ text: '{}' }],
+    }));
+    const runner = new ProviderRunner(makeConfig({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      apiKey: 'anthropic-key',
+      baseUrl: `  ${baseUrl}  `,
+    }));
+
+    await runner.chat([{ role: 'user', content: 'hello' }]);
+
+    expect(mockFetch.mock.calls[0][0]).toBe(expectedUrl);
   });
 });
 
@@ -115,14 +220,38 @@ describe('ProviderRunner.runAnalysis() — OpenAI', () => {
   });
 
   it('throws on non-2xx response', async () => {
+    const secret = 'remote-openai-error-secret';
     mockFetch.mockResolvedValueOnce(makeFetchResponse(
-      { error: { message: 'Invalid API key.' } },
+      { error: { message: `Invalid API key: ${secret}` } },
       401
     ));
 
     const runner = new ProviderRunner(makeConfig());
-    await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
-      .rejects.toThrow('Invalid API key.');
+    const request = runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' });
+    await expect(request).rejects.toThrow('OpenAI request was rejected (HTTP 401).');
+    await expect(request).rejects.not.toThrow(secret);
+  });
+
+  it('redacts configured and detected credentials before sending prompts', async () => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      choices: [{ message: { content: '{}' } }],
+    }));
+    const apiKey = 'company-config-secret-value';
+    const githubToken = ['gh', 'p_abcdefghijklmnopqrstuvwxyz0123456789'].join('');
+    const runner = new ProviderRunner(makeConfig({ apiKey }));
+
+    await runner.runAnalysis({
+      systemPrompt: `configured=${apiKey}`,
+      userPrompt: `token=${githubToken}`,
+    });
+
+    const [, init] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = init.body as string;
+    expect((init.headers as Record<string, string>).Authorization).toBe(`Bearer ${apiKey}`);
+    expect(body).not.toContain(apiKey);
+    expect(body).not.toContain(githubToken);
+    expect(body).toContain('[REDACTED:known-secret]');
+    expect(body).toContain('[REDACTED:credential-assignment]');
   });
 });
 
@@ -171,6 +300,70 @@ describe('ProviderRunner.runAnalysis() — Anthropic message shaping', () => {
     expect(body.system).toBe('BE HELPFUL');
     expect(body.messages).toEqual([{ role: 'user', content: 'analyze' }]);
   });
+
+  it('replaces isolated UTF-16 surrogates while preserving valid emoji', async () => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      content: [{ text: '{}' }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }));
+
+    const runner = new ProviderRunner(makeConfig({ provider: 'anthropic', model: 'glm-4.7', apiKey: 'ak' }));
+    await runner.runAnalysis({
+      systemPrompt: 'system \ud800 prompt',
+      userPrompt: 'valid 🧪 and isolated \udc00 text',
+    });
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.system).toBe('system � prompt');
+    expect(body.messages[0].content).toBe('valid 🧪 and isolated � text');
+  });
+});
+
+describe('ProviderRunner as shared LLMClient', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('preserves Anthropic content blocks and exposes context capabilities', async () => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      content: [{ text: '{}' }],
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }));
+    const runner = new ProviderRunner(makeConfig({
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-20250514',
+      apiKey: 'ak',
+    }));
+
+    await runner.chat([
+      { role: 'system', content: 'system' },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'conversation', cache_control: { type: 'ephemeral' } },
+          { type: 'text', text: 'instructions' },
+        ],
+      },
+    ]);
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.messages[0].content).toEqual([
+      { type: 'text', text: 'conversation', cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: 'instructions' },
+    ]);
+    expect(runner.provider).toBe('anthropic');
+    expect(runner.model).toBe('claude-sonnet-4-20250514');
+    expect(runner.capabilities).toEqual({
+      contextWindowTokens: 100_000,
+      reservedOutputTokens: 8_192,
+      safetyMarginTokens: 11_808,
+      supportsContentBlocks: true,
+      requestOverhead: {
+        baseTokens: 3,
+        perMessageTokens: 4,
+        perContentBlockTokens: 2,
+      },
+    });
+    expect(runner.estimateTokens('12345')).toBe(2);
+  });
 });
 
 describe('ProviderRunner.runAnalysis() — missing usage', () => {
@@ -212,8 +405,9 @@ describe('ProviderRunner.runAnalysis() — Gemini', () => {
 
     const [url, init] = mockFetch.mock.calls[0] as [string, RequestInit];
     expect(url).toContain('generativelanguage.googleapis.com');
-    expect(url).toContain('gk-test');
+    expect(url).not.toContain('gk-test');
     expect(url).toContain('gemini-1.5-flash');
+    expect((init.headers as Record<string, string>)['x-goog-api-key']).toBe('gk-test');
 
     const body = JSON.parse(init.body as string);
     // System message routed to systemInstruction, not contents
@@ -227,14 +421,16 @@ describe('ProviderRunner.runAnalysis() — Gemini', () => {
   });
 
   it('throws on Gemini API error', async () => {
+    const secret = 'remote-gemini-error-secret';
     mockFetch.mockResolvedValueOnce(makeFetchResponse(
-      { error: { message: 'API key not valid.' } },
+      { error: { message: `API key not valid: ${secret}` } },
       400
     ));
 
     const runner = new ProviderRunner(makeConfig({ provider: 'gemini', model: 'gemini-1.5-flash', apiKey: 'bad' }));
-    await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
-      .rejects.toThrow('API key not valid.');
+    const request = runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' });
+    await expect(request).rejects.toThrow('Gemini request failed (HTTP 400).');
+    await expect(request).rejects.not.toThrow(secret);
   });
 });
 
@@ -280,6 +476,34 @@ describe('ProviderRunner.runAnalysis() — Ollama', () => {
 
     const [url] = mockFetch.mock.calls[0] as [string];
     expect(url).toBe('http://my-ollama:11434/api/chat');
+  });
+
+  it('uses a conservative local context budget by default', () => {
+    const runner = new ProviderRunner(makeConfig({
+      provider: 'ollama',
+      model: 'llama3',
+      apiKey: undefined,
+    }));
+
+    expect(runner.capabilities).toMatchObject({
+      contextWindowTokens: 16_384,
+      reservedOutputTokens: 4_096,
+      safetyMarginTokens: 1_024,
+    });
+  });
+
+  it('does not expose an Ollama response body in errors', async () => {
+    const secret = 'remote-ollama-error-secret';
+    mockFetch.mockResolvedValueOnce(makeFetchResponse(secret, 500));
+    const runner = new ProviderRunner(makeConfig({
+      provider: 'ollama',
+      model: 'llama3',
+      apiKey: undefined,
+    }));
+
+    const request = runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' });
+    await expect(request).rejects.toThrow('Ollama request failed (HTTP 500).');
+    await expect(request).rejects.not.toThrow(secret);
   });
 });
 
@@ -350,6 +574,24 @@ describe('ProviderRunner.runAnalysis() — llamacpp', () => {
     await expect(runner.runAnalysis({ systemPrompt: 's', userPrompt: 'u' }))
       .rejects.toThrow(/llama-server/);
   });
+
+  it('does not echo a configured llama-server URL rejected at construction', () => {
+    const secret = 'configured-url-secret';
+    const construct = () => new ProviderRunner(makeConfig({
+        provider: 'llamacpp',
+        model: 'gemma-4-12b',
+        apiKey: undefined,
+        baseUrl: `http://user:${secret}@localhost:8080`,
+      }));
+
+    expect(construct).toThrow('Base URL must not include a username or password.');
+    try {
+      construct();
+    } catch (error) {
+      expect(String(error)).not.toContain(secret);
+    }
+    expect(mockFetch).not.toHaveBeenCalled();
+  });
 });
 
 describe('ProviderRunner — jsonSchema param', () => {
@@ -372,5 +614,42 @@ describe('ProviderRunner — jsonSchema param', () => {
     // jsonSchema must NOT appear in the request body to the LLM provider
     expect(body).not.toHaveProperty('json_schema');
     expect(body).not.toHaveProperty('jsonSchema');
+  });
+});
+
+describe('ProviderRunner successful-response validation', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const providers = [
+    [makeConfig({ provider: 'openai', model: 'gpt-4o' }), 'OpenAI'],
+    [makeConfig({ provider: 'anthropic', model: 'claude-sonnet-4-20250514' }), 'Anthropic'],
+    [makeConfig({ provider: 'gemini', model: 'gemini-1.5-flash' }), 'Gemini'],
+    [makeConfig({ provider: 'ollama', model: 'llama3', apiKey: undefined }), 'Ollama'],
+    [makeConfig({ provider: 'llamacpp', model: 'gemma-4-12b', apiKey: undefined }), 'llama-server'],
+  ] as const;
+
+  it.each(providers)('normalizes malformed 200 JSON from $1', async (config, provider) => {
+    const secret = `malformed-${config.provider}-body-secret`;
+    mockFetch.mockResolvedValueOnce(makeMalformedJsonResponse(secret));
+    const request = new ProviderRunner(config).chat([{ role: 'user', content: 'hello' }]);
+
+    await expect(request).rejects.toThrow(`${provider} returned an invalid response.`);
+    await expect(request).rejects.not.toThrow(secret);
+  });
+
+  it.each(providers)('rejects an invalid 200 response shape from $1', async (config, provider) => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({}));
+    const request = new ProviderRunner(config).chat([{ role: 'user', content: 'hello' }]);
+
+    await expect(request).rejects.toThrow(`${provider} returned an invalid response.`);
+  });
+
+  it.each(providers)('preserves AbortError while parsing a $1 response', async (config) => {
+    const abort = new Error('cancelled');
+    abort.name = 'AbortError';
+    mockFetch.mockResolvedValueOnce(makeAbortedJsonResponse(abort));
+    const request = new ProviderRunner(config).chat([{ role: 'user', content: 'hello' }]);
+
+    await expect(request).rejects.toBe(abort);
   });
 });

@@ -1,4 +1,7 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
@@ -7,6 +10,13 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -161,6 +171,8 @@ function parseSSEEvents(text: string): Array<{ event: string; data: string }> {
 
 describe('Facets routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockExtractFacetsOnly.mockReset();
@@ -169,6 +181,8 @@ describe('Facets routes', () => {
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   // ────────────────────────────────────────────────
@@ -565,6 +579,27 @@ describe('Facets routes', () => {
   // POST /api/facets/backfill (SSE streaming)
   // ────────────────────────────────────────────────
   describe('POST /api/facets/backfill (SSE)', () => {
+    it('sends a recognizable busy error without starting a backfill', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-1', 'proj-1');
+      seedMessage('sess-1');
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockExtractFacetsOnly.mockResolvedValue({ success: true });
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/facets/backfill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionIds: ['sess-1'] }),
+      });
+      const text = await res.text();
+
+      expect(text).toContain('event: error');
+      expect(text).toContain('LLM_BUSY');
+      expect(mockExtractFacetsOnly).not.toHaveBeenCalled();
+    });
+
     it('streams progress and complete events for a valid session', async () => {
       seedProject('proj-1', 'alpha');
       seedSession('sess-1', 'proj-1');

@@ -1,4 +1,7 @@
 import Database from 'better-sqlite3';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
@@ -7,6 +10,13 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -20,6 +30,15 @@ vi.mock('@code-insights/cli/utils/telemetry', () => ({
   getStableMachineId: () => 'test-id',
 }));
 
+const mockLoadConfiguredAnalysisLanguage = vi.hoisted(() => vi.fn(
+  (): 'auto' | 'zh-CN' | 'en-US' => 'zh-CN',
+));
+
+vi.mock('@code-insights/cli/analysis/analysis-language', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@code-insights/cli/analysis/analysis-language')>(),
+  loadConfiguredAnalysisLanguage: mockLoadConfiguredAnalysisLanguage,
+}));
+
 const mockIsLLMConfigured = vi.fn(() => false);
 const mockChat = vi.fn();
 
@@ -30,6 +49,7 @@ vi.mock('../llm/client.js', () => ({
 }));
 
 const { createApp } = await import('../index.js');
+const { formatIsoWeek } = await import('./shared-aggregation.js');
 
 // ──────────────────────────────────────────────────────
 // Helpers
@@ -125,13 +145,19 @@ function parseSSEEvents(text: string): Array<{ event: string; data: string }> {
 
 describe('Reflect routes', () => {
   beforeEach(() => {
+    lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+    process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(false);
     mockChat.mockReset();
+    mockLoadConfiguredAnalysisLanguage.mockReset();
+    mockLoadConfiguredAnalysisLanguage.mockReturnValue('zh-CN');
   });
 
   afterEach(() => {
     testDb.close();
+    delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+    rmSync(lockTestDir, { recursive: true, force: true });
   });
 
   // ──────────────────────────────────────────────────────
@@ -210,6 +236,29 @@ describe('Reflect routes', () => {
       );
       expect(scopeCreep).toBeUndefined();
     });
+
+    it('filters aggregate counts by source query param', async () => {
+      seedSessionWithFacets('sess-claude-source', {
+        sourceTool: 'claude-code',
+      });
+      seedSessionWithFacets('sess-codex-source-1', {
+        sourceTool: 'codex-cli',
+      });
+      seedSessionWithFacets('sess-codex-source-2', {
+        sourceTool: 'codex-cli',
+      });
+
+      const app = createApp();
+      const res = await app.request(
+        '/api/reflect/results?period=all&source=codex-cli',
+      );
+      const body = await res.json();
+
+      expect(res.status).toBe(200);
+      expect(body.totalSessions).toBe(2);
+      expect(body.totalAllSessions).toBe(2);
+      expect(body.sourceTools).toEqual(['codex-cli']);
+    });
   });
 
   // ──────────────────────────────────────────────────────
@@ -254,6 +303,54 @@ describe('Reflect routes', () => {
       expect(body.snapshot.facetCount).toBe(12);
       expect(body.snapshot.generatedAt).toBe('2026-03-10T12:00:00Z');
       expect(body.snapshot.results).toEqual(snapshotResults);
+    });
+
+    it('keeps snapshots for different source scopes independent', async () => {
+      const insertSnapshot = testDb.prepare(`
+        INSERT INTO reflect_snapshots (
+          period, project_id, source_scope, results_json, generated_at,
+          window_start, window_end, session_count, facet_count
+        ) VALUES (?, '__all__', ?, ?, ?, NULL, ?, ?, ?)
+      `);
+      insertSnapshot.run(
+        '2026-W10',
+        'claude-code',
+        JSON.stringify({ marker: 'claude' }),
+        '2026-03-10T12:00:00Z',
+        '2026-03-09T00:00:00Z',
+        4,
+        2,
+      );
+      insertSnapshot.run(
+        '2026-W10',
+        'codex-cli',
+        JSON.stringify({ marker: 'codex' }),
+        '2026-03-10T13:00:00Z',
+        '2026-03-09T00:00:00Z',
+        7,
+        3,
+      );
+
+      const app = createApp();
+      const claudeRes = await app.request(
+        '/api/reflect/snapshot?period=2026-W10&source=claude-code',
+      );
+      const codexRes = await app.request(
+        '/api/reflect/snapshot?period=2026-W10&source=codex-cli',
+      );
+      const unscopedRes = await app.request('/api/reflect/snapshot?period=2026-W10');
+
+      expect((await claudeRes.json()).snapshot).toMatchObject({
+        sourceScope: 'claude-code',
+        results: { marker: 'claude' },
+        sessionCount: 4,
+      });
+      expect((await codexRes.json()).snapshot).toMatchObject({
+        sourceScope: 'codex-cli',
+        results: { marker: 'codex' },
+        sessionCount: 7,
+      });
+      expect((await unscopedRes.json()).snapshot).toBeNull();
     });
 
     it('returns null for corrupted snapshot JSON', async () => {
@@ -380,6 +477,79 @@ describe('Reflect routes', () => {
       const currentWeekEntry = body.weeks[0];
       expect(currentWeekEntry.sessionCount).toBeGreaterThanOrEqual(2);
     });
+
+    it('counts a Sunday session in the previous ISO week', async () => {
+      const now = new Date();
+      const nowDay = now.getUTCDay();
+      const daysToMonday = nowDay === 0 ? 6 : nowDay - 1;
+      const thisMondayMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+        - daysToMonday * 86400000;
+      const thisMonday = new Date(thisMondayMs);
+      const previousMonday = new Date(thisMondayMs - 7 * 86400000);
+      const previousSundayNoon = new Date(thisMondayMs - 12 * 3600000);
+
+      seedSessionWithFacets('sess-previous-sunday', { startedAt: previousSundayNoon.toISOString() });
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/weeks');
+      const body = await res.json();
+      const currentWeek = body.weeks.find((w: { week: string }) => w.week === formatIsoWeek(thisMonday));
+      const previousWeek = body.weeks.find((w: { week: string }) => w.week === formatIsoWeek(previousMonday));
+
+      expect(previousWeek.sessionCount).toBe(1);
+      expect(currentWeek.sessionCount).toBe(0);
+    });
+
+    it('filters week range, session counts, and snapshot status by source', async () => {
+      const now = new Date();
+      const nowDay = now.getUTCDay();
+      const daysToMonday = nowDay === 0 ? 6 : nowDay - 1;
+      const thisMondayMs = Date.UTC(
+        now.getUTCFullYear(),
+        now.getUTCMonth(),
+        now.getUTCDate(),
+      ) - daysToMonday * 86400000;
+      const thisMonday = new Date(thisMondayMs);
+      const currentWeek = formatIsoWeek(thisMonday);
+
+      seedSessionWithFacets('sess-codex-current', {
+        sourceTool: 'codex-cli',
+        startedAt: new Date(thisMondayMs + 3600000).toISOString(),
+      });
+      seedSessionWithFacets('sess-claude-current', {
+        sourceTool: 'claude-code',
+        startedAt: new Date(thisMondayMs + 7200000).toISOString(),
+      });
+      seedSessionWithFacets('sess-claude-old', {
+        sourceTool: 'claude-code',
+        startedAt: new Date(thisMondayMs - 21 * 86400000).toISOString(),
+      });
+
+      testDb.prepare(`
+        INSERT INTO reflect_snapshots (
+          period, project_id, source_scope, results_json, generated_at,
+          window_start, window_end, session_count, facet_count
+        ) VALUES (?, '__all__', 'claude-code', '{}', ?, ?, ?, 2, 0)
+      `).run(
+        currentWeek,
+        '2026-07-18T00:00:00Z',
+        thisMonday.toISOString(),
+        new Date(thisMondayMs + 7 * 86400000).toISOString(),
+      );
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/weeks?source=codex-cli');
+      const body = await response.json();
+
+      expect(response.status).toBe(200);
+      expect(body.weeks).toHaveLength(1);
+      expect(body.weeks[0]).toMatchObject({
+        week: currentWeek,
+        sessionCount: 1,
+        hasSnapshot: false,
+        generatedAt: null,
+      });
+    });
   });
 
   // ──────────────────────────────────────────────────────
@@ -493,6 +663,25 @@ describe('Reflect routes', () => {
       expect(errorData.required).toBe(8);
     });
 
+    it('sends a recognizable busy error without calling the LLM', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({ content: '<json>{}</json>' });
+      seedMultipleSessions(8);
+      occupyLlmLock();
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      const text = await res.text();
+
+      expect(text).toContain('event: error');
+      expect(text).toContain('LLM_BUSY');
+      expect(mockChat).not.toHaveBeenCalled();
+    });
+
     it('streams progress and complete events for friction-wins section', async () => {
       mockIsLLMConfigured.mockReturnValue(true);
       mockChat.mockResolvedValue({ content: '<json>{"narrative":"test","topFriction":[],"topWins":[]}</json>' });
@@ -517,6 +706,44 @@ describe('Reflect routes', () => {
       const completeData = JSON.parse(completeEvent!.data);
       expect(completeData.results).toHaveProperty('friction-wins');
       expect(completeData.results['friction-wins'].section).toBe('friction-wins');
+      expect(JSON.stringify(mockChat.mock.calls[0][0]))
+        .toContain('Simplified Chinese (zh-CN)');
+    });
+
+    it('ignores stored system artifacts when Reflect resolves auto language', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockLoadConfiguredAnalysisLanguage.mockReturnValue('auto');
+      mockChat.mockResolvedValue({ content: '<json>{"narrative":"test","topFriction":[],"topWins":[]}</json>' });
+      seedMultipleSessions(8);
+      const insertMessage = testDb.prepare(`
+        INSERT INTO messages (id, session_id, type, content, timestamp)
+        VALUES (?, 'sess-gen-0', 'user', ?, ?)
+      `);
+      [
+        'Please analyze these sessions.',
+        'Keep the result concise.',
+        '<task-notification>大量中文任务通知</task-notification>',
+        'Base directory for this skill: /大量/中文/路径',
+        '<local-command-caveat>大量中文提示</local-command-caveat>',
+        '<local-command-stdout>大量中文输出</local-command-stdout>',
+        '<command-name>/plan 大量中文参数</command-name>',
+      ].forEach((content, index) => {
+        insertMessage.run(
+          `reflect-language-${index}`,
+          content,
+          `2025-06-15T10:${String(index).padStart(2, '0')}:00Z`,
+        );
+      });
+
+      const app = createApp();
+      const res = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ period: 'all', sections: ['friction-wins'] }),
+      });
+      await res.text();
+
+      expect(JSON.stringify(mockChat.mock.calls[0][0])).toContain('English (en-US)');
     });
 
     it('streams complete event for working-style section', async () => {
@@ -604,6 +831,135 @@ describe('Reflect routes', () => {
       expect(snapshotBody.snapshot).not.toBeNull();
       expect(snapshotBody.snapshot.period).toBe('all');
       expect(snapshotBody.snapshot.results).toHaveProperty('friction-wins');
+    });
+
+    it('stores generated snapshots independently for each source scope', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat
+        .mockResolvedValueOnce({ content: '<json>{"narrative":"claude result"}</json>' })
+        .mockResolvedValueOnce({ content: '<json>{"narrative":"codex result"}</json>' });
+
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-claude-scope-${i}`, {
+          sourceTool: 'claude-code',
+        });
+        seedSessionWithFacets(`sess-codex-scope-${i}`, {
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      for (const source of ['claude-code', 'codex-cli']) {
+        const response = await app.request('/api/reflect/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            period: 'all',
+            source,
+            sections: ['friction-wins'],
+          }),
+        });
+        const events = parseSSEEvents(await response.text());
+        expect(events.some(event => event.event === 'complete')).toBe(true);
+      }
+
+      const claudeSnapshot = await (
+        await app.request('/api/reflect/snapshot?period=all&source=claude-code')
+      ).json();
+      const codexSnapshot = await (
+        await app.request('/api/reflect/snapshot?period=all&source=codex-cli')
+      ).json();
+
+      expect(claudeSnapshot.snapshot).toMatchObject({
+        sourceScope: 'claude-code',
+        sessionCount: 8,
+        results: {
+          'friction-wins': { narrative: 'claude result' },
+        },
+      });
+      expect(codexSnapshot.snapshot).toMatchObject({
+        sourceScope: 'codex-cli',
+        sessionCount: 8,
+        results: {
+          'friction-wins': { narrative: 'codex result' },
+        },
+      });
+    });
+
+    it('targets the requested source tool when generating rules', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({
+        content: '<json>{"claudeMdRules":[],"hookConfigs":[]}</json>',
+      });
+
+      for (let i = 0; i < 10; i++) {
+        seedSessionWithFacets(`sess-global-majority-${i}`, {
+          sourceTool: 'claude-code',
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-filtered-source-${i}`, {
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          period: 'all',
+          source: 'codex-cli',
+          sections: ['rules-skills'],
+        }),
+      });
+      const events = parseSSEEvents(await response.text());
+      const complete = events.find(event => event.event === 'complete');
+
+      expect(complete).toBeDefined();
+      expect(JSON.parse(complete!.data).results['rules-skills'].targetTool).toBe(
+        'codex-cli',
+      );
+    });
+
+    it('detects the target tool inside the selected project scope', async () => {
+      mockIsLLMConfigured.mockReturnValue(true);
+      mockChat.mockResolvedValue({
+        content: '<json>{"claudeMdRules":[],"hookConfigs":[]}</json>',
+      });
+
+      for (let i = 0; i < 10; i++) {
+        seedSessionWithFacets(`sess-other-project-${i}`, {
+          projectId: 'proj-other',
+          projectName: 'other',
+          sourceTool: 'claude-code',
+        });
+      }
+      for (let i = 0; i < 8; i++) {
+        seedSessionWithFacets(`sess-selected-project-${i}`, {
+          projectId: 'proj-selected',
+          projectName: 'selected',
+          sourceTool: 'codex-cli',
+        });
+      }
+
+      const app = createApp();
+      const response = await app.request('/api/reflect/generate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          period: 'all',
+          project: 'proj-selected',
+          sections: ['rules-skills'],
+        }),
+      });
+      const events = parseSSEEvents(await response.text());
+      const complete = events.find(event => event.event === 'complete');
+
+      expect(complete).toBeDefined();
+      expect(JSON.parse(complete!.data).results['rules-skills'].targetTool).toBe(
+        'codex-cli',
+      );
     });
   });
 });

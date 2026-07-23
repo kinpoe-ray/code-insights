@@ -1,16 +1,10 @@
 import { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Brain, ChevronRight, ChevronDown } from 'lucide-react';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface ThinkingBlockProps {
   thinking: string;
-}
-
-function formatCharCount(count: number): string {
-  if (count >= 1000) {
-    return `${(count / 1000).toFixed(1)}K chars`;
-  }
-  return `${count} chars`;
 }
 
 /**
@@ -18,6 +12,7 @@ function formatCharCount(count: number): string {
  * Shows a compact header with char count when collapsed.
  */
 export function ThinkingBlock({ thinking }: ThinkingBlockProps) {
+  const { t, formatNumber } = useLocale();
   const [expanded, setExpanded] = useState(false);
 
   return (
@@ -29,10 +24,10 @@ export function ThinkingBlock({ thinking }: ThinkingBlockProps) {
         aria-expanded={expanded}
       >
         <Brain className="h-3 w-3 text-amber-600 dark:text-amber-400 shrink-0" />
-        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">Thinking</span>
+        <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">{t('chat.thinking')}</span>
         {!expanded && (
           <span className="text-xs text-amber-600/60 dark:text-amber-400/60">
-            &middot; {formatCharCount(thinking.length)}
+            &middot; {t('chat.characterCount', { count: formatNumber(thinking.length, { notation: 'compact', maximumFractionDigits: 1 }) })}
           </span>
         )}
         <div className="ml-auto shrink-0 text-amber-600/60 dark:text-amber-400/60">

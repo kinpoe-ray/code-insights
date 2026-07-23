@@ -6,6 +6,7 @@ import { AnalysisProvider } from '@/components/analysis/AnalysisContext';
 import App from './App';
 import './styles/globals.css';
 import { initTelemetry } from '@/lib/telemetry';
+import { LocaleProvider } from '@/i18n/LocaleProvider';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -25,11 +26,13 @@ if (!root) throw new Error('Root element not found');
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <ThemeProvider defaultTheme="system">
-        <AnalysisProvider>
-          <App />
-        </AnalysisProvider>
-      </ThemeProvider>
+      <LocaleProvider>
+        <ThemeProvider defaultTheme="system">
+          <AnalysisProvider>
+            <App />
+          </AnalysisProvider>
+        </ThemeProvider>
+      </LocaleProvider>
     </QueryClientProvider>
   </StrictMode>,
 );

@@ -109,7 +109,9 @@ Step 12:  Founder merges PR
 ### CI Simulation Gate (Step 8 — BLOCKING)
 
 ```bash
-pnpm build    # Must pass across the workspace
+pnpm typecheck
+pnpm build
+pnpm test
 ```
 
 **If ANY check fails:** Fix before creating PR. Never rely on CI.

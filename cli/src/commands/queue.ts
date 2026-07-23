@@ -59,16 +59,64 @@ export async function queueStatusCommand(opts: { quiet?: boolean } = {}): Promis
 
 // ── queue process ─────────────────────────────────────────────────────────────
 
-export async function queueProcessCommand(opts: { quiet?: boolean; model?: string } = {}): Promise<void> {
+export interface QueueProcessCommandOptions {
+  quiet?: boolean;
+  model?: string;
+  /** Maximum number of items to attempt. */
+  limit?: number;
+  /** Delay between items, in seconds. */
+  delay?: number;
+}
+
+export async function queueProcessCommand(opts: QueueProcessCommandOptions = {}): Promise<void> {
   const { quiet = false } = opts;
   const log = quiet ? () => {} : console.log.bind(console);
 
   try {
-    const count = await processQueue({ quiet, model: opts.model });
-    if (count === 0) {
+    const result = await processQueue({
+      quiet,
+      model: opts.model,
+      maxItems: opts.limit,
+      delayMs: opts.delay === undefined ? undefined : opts.delay * 1_000,
+    });
+    if (result.status === 'busy') {
+      log(chalk.yellow('[Code Insights] Queue worker is busy; pending items were retained'));
+      process.exitCode = 75;
+      return;
+    }
+    if (result.status === 'paused') {
+      log(chalk.yellow(
+        `[Code Insights] Automatic analysis is paused; ${result.completedCount} item(s) completed before stopping`,
+      ));
+      return;
+    }
+    if (result.status === 'deadline') {
+      log(chalk.yellow(
+        `[Code Insights] Maintenance deadline reached; ${result.completedCount} item(s) completed before stopping`,
+      ));
+      return;
+    }
+    if (result.status === 'deferred') {
+      log(chalk.yellow(
+        `[Code Insights] Queue work is deferred until ${result.nextAttemptAt} UTC`,
+      ));
+      process.exitCode = 75;
+      return;
+    }
+    if (result.status === 'failed') {
+      log(chalk.red('[Code Insights] Queue processing stopped after an analysis failure'));
+      process.exitCode = 1;
+      return;
+    }
+    if (result.completedCount === 0) {
       log(chalk.dim('[Code Insights] No pending items in queue'));
     } else {
-      log(chalk.green(`[Code Insights] Processed ${count} item(s)`));
+      log(chalk.green(`[Code Insights] Processed ${result.completedCount} item(s)`));
+      if (result.rerunPendingCount > 0) {
+        log(chalk.yellow(
+          `[Code Insights] ${result.rerunPendingCount} changed item(s) remain queued for another pass`,
+        ));
+      }
     }
   } catch (error) {
     if (!quiet) {
@@ -129,10 +177,17 @@ export function buildQueueCommand(): Command {
 
   queueCmd
     .command('process')
-    .description('Process pending queue items (foreground)')
+    .description('Process a bounded number of pending queue items (foreground)')
     .option('-q, --quiet', 'Suppress output')
     .option('--model <model>', 'Model for native analysis (default: sonnet)')
-    .action((opts) => queueProcessCommand({ quiet: opts.quiet, model: opts.model }));
+    .option('--limit <n>', 'Maximum items to attempt', '1')
+    .option('--delay <seconds>', 'Delay between items in seconds', '0')
+    .action((opts) => queueProcessCommand({
+      quiet: opts.quiet,
+      model: opts.model,
+      limit: parseInt(opts.limit, 10),
+      delay: parseInt(opts.delay, 10),
+    }));
 
   queueCmd
     .command('retry [session_id]')

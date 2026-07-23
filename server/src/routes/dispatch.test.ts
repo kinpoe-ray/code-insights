@@ -1,5 +1,8 @@
 import Database from 'better-sqlite3';
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { runMigrations } from '@code-insights/cli/db/schema';
 
 // ──────────────────────────────────────────────────────
@@ -7,6 +10,23 @@ import { runMigrations } from '@code-insights/cli/db/schema';
 // ──────────────────────────────────────────────────────
 
 let testDb: Database.Database;
+let lockTestDir: string;
+
+function setupLlmLockTest(): void {
+  lockTestDir = mkdtempSync(join(tmpdir(), 'code-insights-server-lock-'));
+  process.env.CODE_INSIGHTS_LLM_LOCK_DIR = join(lockTestDir, 'llm.lock');
+}
+
+function occupyLlmLock(): void {
+  const lockPath = process.env.CODE_INSIGHTS_LLM_LOCK_DIR!;
+  mkdirSync(lockPath, { recursive: true });
+  writeFileSync(join(lockPath, 'pid'), `${process.pid}\n`);
+}
+
+function cleanupLlmLockTest(): void {
+  delete process.env.CODE_INSIGHTS_LLM_LOCK_DIR;
+  rmSync(lockTestDir, { recursive: true, force: true });
+}
 
 vi.mock('@code-insights/cli/db/client', () => ({
   getDb: () => testDb,
@@ -135,9 +155,15 @@ const BASE_BODY = {
 
 describe('POST /api/dispatch/generate', () => {
   beforeEach(() => {
+    setupLlmLockTest();
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(true);
     mockCreateLLMClient.mockReset();
+  });
+
+  afterEach(() => {
+    testDb.close();
+    cleanupLlmLockTest();
   });
 
   it('returns 400 when LLM is not configured', async () => {
@@ -287,6 +313,26 @@ describe('POST /api/dispatch/generate', () => {
     // Verify system prompt is included in messages
     const callArgs = mockClient.chat.mock.calls[0][0] as Array<{ role: string }>;
     expect(callArgs[0].role).toBe('system');
+  });
+
+  it('returns a recognizable busy response without calling the LLM', async () => {
+    seedPrerequisites();
+    seedInsight('ins-1', 'learning', 'Summary one', 'Content one');
+    seedInsight('ins-2', 'decision', 'Summary two', 'Content two');
+    seedInsight('ins-3', 'technique', 'Summary three', 'Content three');
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient(VALID_MARKDOWN));
+    occupyLlmLock();
+
+    const app = createApp();
+    const res = await app.request('/api/dispatch/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(BASE_BODY),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'LLM_BUSY' });
+    expect(mockCreateLLMClient).not.toHaveBeenCalled();
   });
 
   it('handles null bullets without crashing', async () => {
@@ -640,9 +686,15 @@ const IMAGE_PROMPT_BODY = {
 
 describe('POST /api/dispatch/image-prompt', () => {
   beforeEach(() => {
+    setupLlmLockTest();
     testDb = initTestDb();
     mockIsLLMConfigured.mockReturnValue(true);
     mockCreateLLMClient.mockReset();
+  });
+
+  afterEach(() => {
+    testDb.close();
+    cleanupLlmLockTest();
   });
 
   it('returns 400 when LLM is not configured', async () => {
@@ -714,6 +766,22 @@ describe('POST /api/dispatch/image-prompt', () => {
     expect(json.model).toBe('gpt-4o');
     expect(json.tokensUsed.input).toBe(500);
     expect(json.tokensUsed.output).toBe(800);
+  });
+
+  it('returns a recognizable busy response without calling the LLM', async () => {
+    mockCreateLLMClient.mockReturnValue(makeMockLLMClient('A prompt.'));
+    occupyLlmLock();
+
+    const app = createApp();
+    const res = await app.request('/api/dispatch/image-prompt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(IMAGE_PROMPT_BODY),
+    });
+
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'LLM_BUSY' });
+    expect(mockCreateLLMClient).not.toHaveBeenCalled();
   });
 
   it('passes responseFormat text to prevent JSON mode', async () => {

@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
-import type { SaveAnalysisUsageData, AnalysisUsageRow } from '../analysis-usage-db.js';
+import {
+  saveAnalysisUsage,
+  type SaveAnalysisUsageData,
+  type AnalysisUsageRow,
+} from '../analysis-usage-db.js';
 
 // ── In-memory DB helper ───────────────────────────────────────────────────────
 
@@ -26,6 +30,8 @@ function createTestDb() {
       duration_ms INTEGER,
       chunk_count INTEGER NOT NULL DEFAULT 1,
       session_message_count INTEGER,
+      input_revision TEXT,
+      pipeline_revision TEXT,
       analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
       PRIMARY KEY (session_id, analysis_type)
     );
@@ -64,6 +70,49 @@ describe('SaveAnalysisUsageData', () => {
 // ── saveAnalysisUsage SQL logic ───────────────────────────────────────────────
 
 describe('saveAnalysisUsage SQL logic', () => {
+  it('records input and pipeline revisions and clears them when an unversioned writer replaces the row', () => {
+    const db = createTestDb();
+    saveAnalysisUsage({
+      session_id: 'sess-1',
+      analysis_type: 'session',
+      provider: 'anthropic',
+      model: 'model-a',
+      input_tokens: 100,
+      output_tokens: 20,
+      estimated_cost_usd: 0.01,
+      session_message_count: 7,
+      input_revision: 'sha256:abc',
+      pipeline_revision: 'analysis-3.0.0/two-pass-v1',
+    }, db);
+
+    expect(db.prepare(`
+      SELECT input_revision, pipeline_revision
+      FROM analysis_usage WHERE session_id = 'sess-1' AND analysis_type = 'session'
+    `).get()).toEqual({
+      input_revision: 'sha256:abc',
+      pipeline_revision: 'analysis-3.0.0/two-pass-v1',
+    });
+
+    saveAnalysisUsage({
+      session_id: 'sess-1',
+      analysis_type: 'session',
+      provider: 'server',
+      model: 'server-model',
+      input_tokens: 1,
+      output_tokens: 1,
+      estimated_cost_usd: 0,
+    }, db);
+
+    expect(db.prepare(`
+      SELECT session_message_count, input_revision, pipeline_revision
+      FROM analysis_usage WHERE session_id = 'sess-1' AND analysis_type = 'session'
+    `).get()).toEqual({
+      session_message_count: 7,
+      input_revision: null,
+      pipeline_revision: null,
+    });
+  });
+
   it('inserts a new row with session_message_count', () => {
     const db = createTestDb();
     const data: SaveAnalysisUsageData = {
@@ -144,6 +193,32 @@ describe('saveAnalysisUsage SQL logic', () => {
     const row = db.prepare('SELECT * FROM analysis_usage WHERE session_id = ?').get('sess-1') as AnalysisUsageRow & { session_message_count: number | null };
     expect(row.input_tokens).toBe(200);
     expect(row.session_message_count).toBe(15);
+  });
+
+  it('refreshes analyzed_at when an existing usage row is replaced', () => {
+    const db = createTestDb();
+    db.prepare(`
+      INSERT INTO analysis_usage (
+        session_id, analysis_type, provider, model, analyzed_at
+      ) VALUES ('sess-1', 'session', 'old-provider', 'old-model', '2000-01-01 00:00:00')
+    `).run();
+
+    db.prepare(`
+      INSERT INTO analysis_usage
+        (session_id, analysis_type, provider, model,
+         input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
+         estimated_cost_usd, duration_ms, chunk_count, session_message_count)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(session_id, analysis_type) DO UPDATE SET
+        provider = excluded.provider,
+        analyzed_at = datetime('now')
+    `).run('sess-1', 'session', 'new-provider', 'new-model', 1, 1, 0, 0, 0, null, 1, 1);
+
+    const row = db.prepare(`
+      SELECT provider, analyzed_at FROM analysis_usage WHERE session_id = 'sess-1'
+    `).get() as { provider: string; analyzed_at: string };
+    expect(row.provider).toBe('new-provider');
+    expect(row.analyzed_at).not.toBe('2000-01-01 00:00:00');
   });
 
   it('preserves existing session_message_count when upsert omits it (COALESCE guard)', () => {

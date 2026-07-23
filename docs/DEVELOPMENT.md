@@ -4,6 +4,25 @@
 
 ---
 
+## Toolchain
+
+- Node.js 20.x, 22.x, or 24 and later (`^20 || ^22 || >=24`); odd-numbered
+  releases such as 21 and 23 are not supported
+- pnpm 9.15.9, as pinned by the workspace
+
+Use `corepack enable` and `pnpm install --frozen-lockfile` from the repository
+root before running `pnpm typecheck`, `pnpm test`, or `pnpm build`.
+
+The root `pnpm typecheck` deliberately builds the CLI first. The server imports
+the CLI through its published package exports, whose declarations live in
+`cli/dist`; the CLI prebuild removes that generated directory before recreating
+it, so deleted declarations cannot survive from an older build. CI also asserts
+that no package `dist` directory exists before typecheck. Together these checks
+make clean checkouts and reused working trees validate the same export contract.
+The server and dashboard typecheck steps remain no-emit checks.
+
+---
+
 ## Pre-Action Verification (CRITICAL)
 
 Before any state-modifying command (git checkout, git push, git tag, file edits), run a **read-only check** to verify current state:
@@ -118,8 +137,14 @@ When changing a MUST TDD domain:
 ### Running Tests
 
 ```bash
-# From repo root — runs all packages
+# From repo root — automation tests, then all package tests
 pnpm test
+
+# Build current CLI declarations, then type-check server and dashboard
+pnpm typecheck
+
+# Build in dependency order: CLI, server, dashboard
+pnpm build
 
 # Watch mode for active development
 pnpm test:watch
@@ -156,8 +181,11 @@ Files touched: `cli/package.json` + `cli/CHANGELOG.md` (minimum). Optionally upd
 
 ### Hook Integration
 
-- `install-hook` modifies `~/.claude/settings.json` to add a Stop hook
-- Hook runs `code-insights sync -q` automatically when Claude Code sessions end
+- `install-hook` modifies `~/.claude/settings.json` to add one `SessionEnd` hook
+- The hook calls the internal `session-end` command: foreground sync of the
+  completed file, durable queue enqueue, then a detached queue worker
+- The former `insights --hook` command path has been removed; it is not a
+  supported integration contract
 
 ---
 

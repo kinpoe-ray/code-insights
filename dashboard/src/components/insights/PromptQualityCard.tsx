@@ -4,8 +4,9 @@ import { ProgressRing } from '@/components/shared/ProgressRing';
 import { Target, AlertTriangle, Lightbulb, TrendingDown, Compass, ArrowRight, BarChart3 } from 'lucide-react';
 import type { Insight } from '@/lib/types';
 import { parseJsonField } from '@/lib/types';
-import { getPQCategoryLabel, getPQCategoryType } from '@/lib/prompt-quality-utils';
+import { getPQCategoryLabel, getPQCategoryMessageKey, getPQCategoryType } from '@/lib/prompt-quality-utils';
 import { extractPQScore } from '@/lib/score-utils';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface PromptQualityCardProps {
   insight: Insight;
@@ -74,7 +75,7 @@ interface SessionTrait {
 
 // ── Score styling ─────────────────────────────────────────────────────────────
 
-import { getScoreTier, getScoreLabel } from '@/lib/score-utils';
+import { getScoreTier } from '@/lib/score-utils';
 
 const SCORE_COLORS: Record<string, string> = {
   excellent: 'text-green-500',
@@ -83,6 +84,13 @@ const SCORE_COLORS: Record<string, string> = {
   poor: 'text-red-500',
 };
 
+const SCORE_LABEL_KEYS = {
+  excellent: 'insights.pq.score.excellent',
+  good: 'insights.pq.score.good',
+  fair: 'insights.pq.score.fair',
+  poor: 'insights.pq.score.poor',
+} as const;
+
 function getScoreColor(score: number): string {
   return SCORE_COLORS[getScoreTier(score)];
 }
@@ -90,9 +98,11 @@ function getScoreColor(score: number): string {
 // ── Category badges ───────────────────────────────────────────────────────────
 
 function CategoryBadge({ category, type: typeProp }: { category: string; type?: 'deficit' | 'strength' }) {
+  const { t } = useLocale();
   // Use the finding's own type field as truth; fall back to category-based lookup for novel categories
   const type = typeProp ?? getPQCategoryType(category);
-  const label = getPQCategoryLabel(category);
+  const messageKey = getPQCategoryMessageKey(category);
+  const label = messageKey ? t(messageKey) : getPQCategoryLabel(category);
   const className = type === 'strength'
     ? 'text-green-500 bg-green-500/10 border-green-500/20'
     : 'text-red-500 bg-red-500/10 border-red-500/20';
@@ -105,28 +115,29 @@ function CategoryBadge({ category, type: typeProp }: { category: string; type?: 
 
 // ── Dimension scores bar ──────────────────────────────────────────────────────
 
-const DIMENSION_LABELS: Record<string, string> = {
-  context_provision: 'Context Provision',
-  request_specificity: 'Request Specificity',
-  scope_management: 'Scope Management',
-  information_timing: 'Information Timing',
-  correction_quality: 'Correction Quality',
-};
+const DIMENSION_LABEL_KEYS = {
+  context_provision: 'insights.pq.dimension.contextProvision',
+  request_specificity: 'insights.pq.dimension.requestSpecificity',
+  scope_management: 'insights.pq.dimension.scopeManagement',
+  information_timing: 'insights.pq.dimension.informationTiming',
+  correction_quality: 'insights.pq.dimension.correctionQuality',
+} as const;
 
 function DimensionScores({ scores }: { scores: PQDimensionScores }) {
+  const { t } = useLocale();
   const entries = Object.entries(scores) as [keyof PQDimensionScores, number][];
 
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5 text-sm font-medium">
         <BarChart3 className="h-3.5 w-3.5 text-muted-foreground" />
-        Dimension Scores
+        {t('insights.pq.dimensionScores')}
       </div>
       <div className="space-y-2">
         {entries.map(([key, value]) => (
           <div key={key} className="space-y-1">
             <div className="flex items-center justify-between text-xs">
-              <span className="text-muted-foreground">{DIMENSION_LABELS[key] ?? key}</span>
+              <span className="text-muted-foreground">{t(DIMENSION_LABEL_KEYS[key])}</span>
               <span className={`font-medium ${getScoreColor(value)}`}>{value}</span>
             </div>
             <div className="h-1.5 rounded-full bg-muted overflow-hidden">
@@ -163,6 +174,7 @@ function NewSchemaContent({
   dimensionScores: PQDimensionScores | null;
   content: string;
 }) {
+  const { t } = useLocale();
   return (
     <div className="space-y-4">
       {/* Score + assessment */}
@@ -173,7 +185,7 @@ function NewSchemaContent({
         </div>
         <div>
           <p className={`text-sm font-medium ${getScoreColor(score)}`}>
-            {getScoreLabel(score)}
+            {t(SCORE_LABEL_KEYS[getScoreTier(score)])}
           </p>
           <p className="text-sm text-muted-foreground">
             {content}
@@ -184,9 +196,7 @@ function NewSchemaContent({
       {overhead > 0 && (
         <div className="flex items-center gap-2 text-sm rounded-md bg-muted/50 p-2">
           <TrendingDown className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span>
-            Could have been done in <strong>{overhead} fewer</strong> messages
-          </span>
+          <span>{t('insights.pq.overhead', { count: overhead })}</span>
         </div>
       )}
 
@@ -195,52 +205,52 @@ function NewSchemaContent({
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Lightbulb className="h-3.5 w-3.5 text-yellow-500" />
-            Takeaways
+            {t('insights.pq.takeaways')}
           </div>
           <div className="space-y-2">
-            {takeaways.map((t, i) => (
+            {takeaways.map((takeaway, i) => (
               <div key={i} className="text-sm rounded-md border p-3 space-y-2">
                 <div className="flex items-start justify-between gap-2">
-                  <span className="font-medium leading-tight">{t.label}</span>
+                  <span className="font-medium leading-tight">{takeaway.label}</span>
                   <div className="flex items-center gap-1.5 shrink-0">
                     <Badge variant="outline" className="text-xs text-muted-foreground">
-                      {t.message_ref}
+                      {takeaway.message_ref}
                     </Badge>
-                    <CategoryBadge category={t.category} />
+                    <CategoryBadge category={takeaway.category} />
                   </div>
                 </div>
 
-                {t.type === 'improve' && (
+                {takeaway.type === 'improve' && (
                   <>
-                    {t.original && (
+                    {takeaway.original && (
                       <p className="text-xs text-muted-foreground italic line-clamp-2">
-                        &ldquo;{t.original}&rdquo;
+                        &ldquo;{takeaway.original}&rdquo;
                       </p>
                     )}
-                    {t.why && (
-                      <p className="text-xs text-muted-foreground">{t.why}</p>
+                    {takeaway.why && (
+                      <p className="text-xs text-muted-foreground">{takeaway.why}</p>
                     )}
-                    {t.better_prompt && (
+                    {takeaway.better_prompt && (
                       <details className="text-xs">
                         <summary className="cursor-pointer text-muted-foreground hover:text-foreground flex items-center gap-1">
                           <ArrowRight className="h-3 w-3" />
-                          Better prompt
+                          {t('insights.pq.betterPrompt')}
                         </summary>
                         <p className="mt-1.5 bg-muted/50 rounded p-2 font-mono text-xs leading-relaxed">
-                          {t.better_prompt}
+                          {takeaway.better_prompt}
                         </p>
                       </details>
                     )}
                   </>
                 )}
 
-                {t.type === 'reinforce' && (
+                {takeaway.type === 'reinforce' && (
                   <>
-                    {t.what_worked && (
-                      <p className="text-xs text-green-600 dark:text-green-400">{t.what_worked}</p>
+                    {takeaway.what_worked && (
+                      <p className="text-xs text-green-600 dark:text-green-400">{takeaway.what_worked}</p>
                     )}
-                    {t.why_effective && (
-                      <p className="text-xs text-muted-foreground">{t.why_effective}</p>
+                    {takeaway.why_effective && (
+                      <p className="text-xs text-muted-foreground">{takeaway.why_effective}</p>
                     )}
                   </>
                 )}
@@ -255,7 +265,7 @@ function NewSchemaContent({
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <AlertTriangle className="h-3.5 w-3.5 text-orange-500" />
-            Findings ({findings.length})
+            {t('insights.pq.findings', { count: findings.length })}
           </div>
           <div className="space-y-1.5">
             {findings.map((f, i) => (
@@ -267,13 +277,13 @@ function NewSchemaContent({
                     f.impact === 'medium' ? 'text-orange-500 bg-orange-500/10 border-orange-500/20' :
                     'text-yellow-500 bg-yellow-500/10 border-yellow-500/20'
                   }`}>
-                    {f.impact}
+                    {t(`insights.pq.impact.${f.impact}`)}
                   </Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">{f.description}</p>
                 {f.suggested_improvement && (
                   <p className="text-xs text-green-600 dark:text-green-400">
-                    Improve: {f.suggested_improvement}
+                    {t('insights.pq.improve', { text: f.suggested_improvement })}
                   </p>
                 )}
               </div>
@@ -292,13 +302,19 @@ function NewSchemaContent({
 
 // ── Legacy schema rendering ───────────────────────────────────────────────────
 
-const TRAIT_LABELS: Record<string, string> = {
-  context_drift: 'Context Drift',
-  objective_bloat: 'Objective Bloat',
-  late_context: 'Late Context',
-  no_planning: 'No Planning',
-  good_structure: 'Well Structured',
-};
+const TRAIT_LABEL_KEYS = {
+  context_drift: 'insights.pq.trait.contextDrift',
+  objective_bloat: 'insights.pq.trait.objectiveBloat',
+  late_context: 'insights.pq.trait.lateContext',
+  no_planning: 'insights.pq.trait.noPlanning',
+  good_structure: 'insights.pq.trait.goodStructure',
+} as const;
+
+const SEVERITY_LABEL_KEYS = {
+  high: 'insights.pq.impact.high',
+  medium: 'insights.pq.impact.medium',
+  low: 'insights.pq.impact.low',
+} as const;
 
 const SEVERITY_COLORS: Record<string, string> = {
   high: 'text-red-500 bg-red-500/10 border-red-500/20',
@@ -323,6 +339,7 @@ function LegacyContent({
   bullets: (string | { tip?: string; example?: string })[];
   content: string;
 }) {
+  const { t } = useLocale();
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-4">
@@ -332,7 +349,7 @@ function LegacyContent({
         </div>
         <div>
           <p className={`text-sm font-medium ${getScoreColor(score)}`}>
-            {getScoreLabel(score)}
+            {t(SCORE_LABEL_KEYS[getScoreTier(score)])}
           </p>
           <p className="text-sm text-muted-foreground">{content}</p>
         </div>
@@ -341,9 +358,7 @@ function LegacyContent({
       {reduction > 0 && (
         <div className="flex items-center gap-2 text-sm rounded-md bg-muted/50 p-2">
           <TrendingDown className="h-4 w-4 text-muted-foreground shrink-0" />
-          <span>
-            Could have been done in <strong>{reduction} fewer</strong> messages
-          </span>
+          <span>{t('insights.pq.overhead', { count: reduction })}</span>
         </div>
       )}
 
@@ -351,7 +366,7 @@ function LegacyContent({
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <AlertTriangle className="h-3.5 w-3.5 text-orange-500" />
-            Anti-Patterns Detected
+            {t('insights.pq.antiPatterns')}
           </div>
           <div className="space-y-1.5">
             {antiPatterns.map((pattern, i) => (
@@ -367,11 +382,11 @@ function LegacyContent({
                 )}
                 {pattern.examples.length > 0 && (
                   <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
-                    e.g. &ldquo;{pattern.examples[0]}&rdquo;
+                    {t('insights.pq.example', { text: pattern.examples[0] })}
                   </p>
                 )}
                 {pattern.fix && (
-                  <p className="text-xs text-green-600 mt-1">Fix: {pattern.fix}</p>
+                  <p className="text-xs text-green-600 mt-1">{t('insights.pq.fix', { text: pattern.fix })}</p>
                 )}
               </div>
             ))}
@@ -383,27 +398,31 @@ function LegacyContent({
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Compass className="h-3.5 w-3.5 text-blue-500" />
-            Session Traits
+            {t('insights.pq.sessionTraits')}
           </div>
           <div className="space-y-1.5">
-            {sessionTraits.map((t, i) => (
+            {sessionTraits.map((trait, i) => (
               <div key={i} className="text-sm rounded-md border p-2 space-y-1">
                 <div className="flex items-center justify-between">
-                  <span className="font-medium">{TRAIT_LABELS[t.trait] || t.trait}</span>
+                  <span className="font-medium">{TRAIT_LABEL_KEYS[trait.trait as keyof typeof TRAIT_LABEL_KEYS]
+                    ? t(TRAIT_LABEL_KEYS[trait.trait as keyof typeof TRAIT_LABEL_KEYS])
+                    : trait.trait}</span>
                   <Badge variant="outline" className={`text-xs ${
-                    t.trait === 'good_structure'
+                    trait.trait === 'good_structure'
                       ? 'text-green-500 bg-green-500/10 border-green-500/20'
-                      : SEVERITY_COLORS[t.severity] || ''
+                      : SEVERITY_COLORS[trait.severity] || ''
                   }`}>
-                    {t.trait === 'good_structure' ? 'positive' : t.severity}
+                    {trait.trait === 'good_structure'
+                      ? t('insights.pq.positive')
+                      : t(SEVERITY_LABEL_KEYS[trait.severity])}
                   </Badge>
                 </div>
-                <p className="text-xs text-muted-foreground">{t.description}</p>
-                {t.evidence && (
-                  <p className="text-xs text-muted-foreground italic">{t.evidence}</p>
+                <p className="text-xs text-muted-foreground">{trait.description}</p>
+                {trait.evidence && (
+                  <p className="text-xs text-muted-foreground italic">{trait.evidence}</p>
                 )}
-                {t.suggestion && (
-                  <p className="text-xs text-green-600">Suggestion: {t.suggestion}</p>
+                {trait.suggestion && (
+                  <p className="text-xs text-green-600">{t('insights.pq.suggestion', { text: trait.suggestion })}</p>
                 )}
               </div>
             ))}
@@ -414,15 +433,17 @@ function LegacyContent({
       {wastedTurns.length > 0 && (
         <div className="space-y-2">
           <p className="text-sm font-medium">
-            Wasted Turns ({wastedTurns.length})
+            {t('insights.pq.wastedTurns', { count: wastedTurns.length })}
           </p>
           <div className="space-y-2 max-h-48 overflow-y-auto">
             {wastedTurns.slice(0, 5).map((turn, i) => (
               <div key={i} className="text-sm rounded-md border p-2 space-y-1">
                 <div className="flex items-center gap-2">
                   <Badge variant="outline" className="text-xs shrink-0">
-                    Msg #{turn.messageIndex + 1}
-                    {turn.turnsWasted && turn.turnsWasted > 1 ? ` (${turn.turnsWasted} turns)` : ''}
+                    {t('insights.pq.message', { number: turn.messageIndex + 1 })}
+                    {turn.turnsWasted && turn.turnsWasted > 1
+                      ? ` ${t('insights.pq.turns', { count: turn.turnsWasted })}`
+                      : ''}
                   </Badge>
                   <span className="text-muted-foreground">{turn.whatWentWrong || turn.reason}</span>
                 </div>
@@ -434,7 +455,7 @@ function LegacyContent({
                 {turn.suggestedRewrite && (
                   <details className="text-xs">
                     <summary className="cursor-pointer text-muted-foreground hover:text-foreground">
-                      Better prompt
+                      {t('insights.pq.betterPrompt')}
                     </summary>
                     <p className="mt-1 bg-muted/50 rounded p-1.5">
                       {turn.suggestedRewrite}
@@ -445,7 +466,7 @@ function LegacyContent({
             ))}
             {wastedTurns.length > 5 && (
               <p className="text-xs text-muted-foreground">
-                +{wastedTurns.length - 5} more wasted turns...
+                {t('insights.pq.moreWastedTurns', { count: wastedTurns.length - 5 })}
               </p>
             )}
           </div>
@@ -456,7 +477,7 @@ function LegacyContent({
         <div className="space-y-2">
           <div className="flex items-center gap-1.5 text-sm font-medium">
             <Lightbulb className="h-3.5 w-3.5 text-yellow-500" />
-            Tips
+            {t('insights.pq.tips')}
           </div>
           <ul className="list-disc list-inside space-y-1.5 text-sm text-muted-foreground">
             {bullets.map((bullet, i) => {
@@ -533,6 +554,7 @@ export function PromptQualityContent({ insight }: { insight: Insight }) {
 }
 
 export function PromptQualityCard({ insight }: PromptQualityCardProps) {
+  const { t } = useLocale();
   return (
     <Card className="border-rose-500/20">
       <CardHeader className="pb-3">
@@ -541,10 +563,10 @@ export function PromptQualityCard({ insight }: PromptQualityCardProps) {
             <div className="rounded-md p-1.5 bg-rose-500/10 text-rose-500 border-rose-500/20">
               <Target className="h-4 w-4" />
             </div>
-            <CardTitle className="text-base">Prompt Quality Analysis</CardTitle>
+            <CardTitle className="text-base">{t('insights.pq.title')}</CardTitle>
           </div>
           <Badge variant="outline" className="bg-rose-500/10 text-rose-500 border-rose-500/20">
-            Prompt Quality
+            {t('insights.type.promptQuality')}
           </Badge>
         </div>
       </CardHeader>

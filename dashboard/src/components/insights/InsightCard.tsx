@@ -1,11 +1,11 @@
-import { formatDistanceToNow } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { FileText, GitCommit, BookOpen, Target } from 'lucide-react';
-import { INSIGHT_TYPE_COLORS, INSIGHT_TYPE_LABELS } from '@/lib/constants/colors';
+import { INSIGHT_TYPE_COLORS, INSIGHT_TYPE_MESSAGE_KEYS } from '@/lib/constants/colors';
 import type { Insight, InsightType, InsightMetadata } from '@/lib/types';
 import { parseJsonField } from '@/lib/types';
 import { renderTypeContent } from './insight-metadata';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 // Re-export from shared module for backward compat (SessionDetailPage, SessionsPage import these)
 export { OutcomeBadge } from './insight-metadata';
@@ -25,6 +25,7 @@ const typeIcons: Record<InsightType, typeof FileText> = {
 };
 
 export function InsightCard({ insight, showProject = false, allInsightIds }: InsightCardProps) {
+  const { t, formatRelativeDate } = useLocale();
   const Icon = typeIcons[insight.type];
   const bullets = parseJsonField<string[]>(insight.bullets, []);
   const metadata = parseJsonField<InsightMetadata>(insight.metadata, {});
@@ -62,11 +63,11 @@ export function InsightCard({ insight, showProject = false, allInsightIds }: Ins
           </div>
           <div className="flex flex-col gap-1">
             <Badge variant="outline" className={INSIGHT_TYPE_COLORS[insight.type]}>
-              {INSIGHT_TYPE_LABELS[insight.type]}
+              {t(INSIGHT_TYPE_MESSAGE_KEYS[insight.type])}
             </Badge>
             {recurringCount > 0 && (
               <Badge variant="secondary" className="bg-amber-500/10 text-amber-600 border-amber-500/20">
-                Recurring ({recurringCount + 1}x)
+                {t('insights.card.recurring', { count: recurringCount + 1 })}
               </Badge>
             )}
           </div>
@@ -81,7 +82,7 @@ export function InsightCard({ insight, showProject = false, allInsightIds }: Ins
               ))}
               {bullets.length > 3 && (
                 <li className="text-muted-foreground/70">
-                  +{bullets.length - 3} more...
+                  {t('insights.card.more', { count: bullets.length - 3 })}
                 </li>
               )}
             </ul>
@@ -93,12 +94,12 @@ export function InsightCard({ insight, showProject = false, allInsightIds }: Ins
         )}
         {evidence.length > 0 && (
           <p className="mt-2 text-xs text-muted-foreground line-clamp-2">
-            Evidence: {evidence.join(', ')}
+            {t('insights.card.evidence', { evidence: evidence.join(', ') })}
           </p>
         )}
         <div className="mt-2 flex items-center justify-between">
           <span className="text-xs text-muted-foreground">
-            {formatDistanceToNow(new Date(insight.timestamp), { addSuffix: true })}
+            {formatRelativeDate(insight.timestamp)}
           </span>
         </div>
       </CardContent>

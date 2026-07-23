@@ -1,13 +1,20 @@
 import { Hono } from 'hono';
+import {
+  PROVIDERS,
+  validateProviderBaseUrl,
+} from '@code-insights/cli/constants/llm-providers';
 import { loadConfig, saveConfig } from '@code-insights/cli/utils/config';
-import type { ClaudeInsightConfig, LLMProviderConfig } from '@code-insights/cli/types';
+import type { AnalysisLanguage, ClaudeInsightConfig, LLMProviderConfig } from '@code-insights/cli/types';
+import { configuredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 import { loadLLMConfig, testLLMConfig } from '../llm/client.js';
+import { llmBusyPayload, runWithLlmLock } from '../llm/llm-lock.js';
 import { discoverOllamaModels } from '../llm/providers/ollama.js';
 import { discoverLlamaCppModels } from '../llm/providers/llamacpp.js';
 
 const app = new Hono();
 
-const VALID_PROVIDERS = ['openai', 'anthropic', 'gemini', 'ollama', 'llamacpp'] as const;
+const VALID_PROVIDERS = PROVIDERS.map((provider) => provider.id);
+const VALID_ANALYSIS_LANGUAGES: AnalysisLanguage[] = ['auto', 'zh-CN', 'en-US'];
 
 function maskApiKey(key: string | undefined): string | undefined {
   if (!key || key.length < 8) return key ? '***' : undefined;
@@ -21,10 +28,17 @@ app.get('/llm', (c) => {
 
   return c.json({
     dashboardPort: config?.dashboard?.port ?? 7890,
+    analysisLanguage: configuredAnalysisLanguage(config),
     provider: llm?.provider,
     model: llm?.model,
     apiKey: maskApiKey(llm?.apiKey),
-    baseUrl: llm?.baseUrl,
+    baseUrl: PROVIDERS.find((provider) => provider.id === llm?.provider)?.supportsCustomBaseUrl
+      ? llm?.baseUrl
+      : undefined,
+    providers: PROVIDERS.map(({ id, supportsCustomBaseUrl }) => ({
+      id,
+      supportsCustomBaseUrl,
+    })),
   });
 });
 
@@ -32,10 +46,11 @@ app.get('/llm', (c) => {
 app.put('/llm', async (c) => {
   const body = await c.req.json<{
     dashboardPort?: number;
+    analysisLanguage?: AnalysisLanguage;
     provider?: string;
     model?: string;
     apiKey?: string;
-    baseUrl?: string;
+    baseUrl?: unknown;
   }>();
 
   const config: ClaudeInsightConfig = loadConfig() ?? {
@@ -43,6 +58,16 @@ app.put('/llm', async (c) => {
   };
 
   let changed = false;
+
+  if (body.analysisLanguage !== undefined) {
+    if (!VALID_ANALYSIS_LANGUAGES.includes(body.analysisLanguage)) {
+      return c.json({
+        error: `analysisLanguage must be one of: ${VALID_ANALYSIS_LANGUAGES.join(', ')}`,
+      }, 400);
+    }
+    config.dashboard = { ...config.dashboard, analysisLanguage: body.analysisLanguage };
+    changed = true;
+  }
 
   // Update dashboard port if provided
   if (body.dashboardPort !== undefined) {
@@ -59,22 +84,40 @@ app.put('/llm', async (c) => {
     body.apiKey !== undefined || body.baseUrl !== undefined;
 
   if (hasLLMField) {
-    if (body.provider !== undefined && !VALID_PROVIDERS.includes(body.provider as typeof VALID_PROVIDERS[number])) {
+    if (body.provider !== undefined && !VALID_PROVIDERS.includes(body.provider as LLMProviderConfig['provider'])) {
       return c.json({ error: `provider must be one of: ${VALID_PROVIDERS.join(', ')}` }, 400);
     }
 
     const existingLlm = config.dashboard?.llm ?? {} as Partial<LLMProviderConfig>;
+    const provider = (body.provider as LLMProviderConfig['provider'])
+      ?? existingLlm.provider
+      ?? 'ollama';
+    const providerInfo = PROVIDERS.find((candidate) => candidate.id === provider);
+    const preserveExistingBaseUrl = existingLlm.provider === provider
+      && providerInfo?.supportsCustomBaseUrl;
+    const baseUrlCandidate = body.baseUrl !== undefined
+      ? body.baseUrl
+      : preserveExistingBaseUrl
+        ? existingLlm.baseUrl
+        : undefined;
+    const baseUrlValidation = validateProviderBaseUrl(provider, baseUrlCandidate);
+    if (!baseUrlValidation.ok) {
+      return c.json({
+        error: baseUrlValidation.message,
+        code: baseUrlValidation.code,
+      }, 400);
+    }
 
     const updatedLlm: LLMProviderConfig = {
-      provider: (body.provider as LLMProviderConfig['provider']) ?? existingLlm.provider ?? 'ollama',
+      provider,
       model: body.model ?? existingLlm.model ?? '',
       // Preserve existing API key if not provided in update
       ...(body.apiKey !== undefined
         ? { apiKey: body.apiKey || undefined }
         : existingLlm.apiKey !== undefined ? { apiKey: existingLlm.apiKey } : {}),
-      ...(body.baseUrl !== undefined
-        ? { baseUrl: body.baseUrl || undefined }
-        : existingLlm.baseUrl !== undefined ? { baseUrl: existingLlm.baseUrl } : {}),
+      ...(baseUrlValidation.value !== undefined
+        ? { baseUrl: baseUrlValidation.value }
+        : {}),
     };
 
     if (!updatedLlm.model) {
@@ -101,11 +144,20 @@ app.post('/llm/test', async (c) => {
   try {
     const body = await c.req.json<Partial<LLMProviderConfig>>();
     if (body.provider && body.model) {
+      const providerInfo = PROVIDERS.find((provider) => provider.id === body.provider);
+      if (!providerInfo) {
+        return c.json({
+          success: false,
+          error: `provider must be one of: ${VALID_PROVIDERS.join(', ')}`,
+        }, 400);
+      }
       testConfig = {
         provider: body.provider,
         model: body.model,
         ...(body.apiKey ? { apiKey: body.apiKey } : {}),
-        ...(body.baseUrl ? { baseUrl: body.baseUrl } : {}),
+        ...(body.baseUrl !== undefined
+          ? { baseUrl: body.baseUrl }
+          : {}),
       };
     }
   } catch {
@@ -123,7 +175,25 @@ app.post('/llm/test', async (c) => {
     }, 400);
   }
 
-  const result = await testLLMConfig(testConfig);
+  const baseUrlValidation = validateProviderBaseUrl(
+    testConfig.provider,
+    testConfig.baseUrl,
+  );
+  if (!baseUrlValidation.ok) {
+    return c.json({
+      error: baseUrlValidation.message,
+      code: baseUrlValidation.code,
+    }, 400);
+  }
+  if (baseUrlValidation.value === undefined) {
+    delete testConfig.baseUrl;
+  } else {
+    testConfig.baseUrl = baseUrlValidation.value;
+  }
+
+  const locked = await runWithLlmLock(c, () => testLLMConfig(testConfig));
+  if (!locked.acquired) return c.json(llmBusyPayload(), 409);
+  const result = locked.value;
   return c.json(result, result.success ? 200 : 422);
 });
 

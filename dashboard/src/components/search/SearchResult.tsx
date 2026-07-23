@@ -1,15 +1,26 @@
 import { MessageSquare, Lightbulb, GitCommit, BookOpen, FileText, Target, ChevronRight } from 'lucide-react';
 import { SearchHighlight } from './SearchHighlight';
-import { formatDistanceToNow, parseISO } from 'date-fns';
 import type { SearchSessionResult, SearchInsightResult } from '@/lib/api';
+import { useLocale } from '@/i18n/LocaleProvider';
+import type { MessageKey } from '@/i18n/messages/catalog';
 
-function formatRelativeDate(isoDate: string): string {
-  try {
-    return formatDistanceToNow(parseISO(isoDate), { addSuffix: true });
-  } catch {
-    return isoDate;
-  }
-}
+const CHARACTER_KEYS: Record<string, MessageKey> = {
+  deep_focus: 'search.character.deepFocus',
+  bug_hunt: 'search.character.bugHunt',
+  feature_build: 'search.character.featureBuild',
+  exploration: 'search.character.exploration',
+  refactor: 'search.character.refactor',
+  learning: 'search.character.learning',
+  quick_task: 'search.character.quickTask',
+};
+
+const INSIGHT_TYPE_KEYS: Record<string, MessageKey> = {
+  summary: 'search.insight.summary',
+  decision: 'search.insight.decision',
+  learning: 'search.insight.learning',
+  technique: 'search.insight.technique',
+  prompt_quality: 'search.insight.promptQuality',
+};
 
 const INSIGHT_ICONS: Record<string, typeof FileText> = {
   summary: FileText,
@@ -27,9 +38,11 @@ interface SessionResultProps {
 }
 
 export function SessionSearchResult({ result, query, isActive, onClick }: SessionResultProps) {
-  const characterLabel = result.session_character
-    ? result.session_character.replace(/_/g, ' ')
-    : null;
+  const { t, formatRelativeDate } = useLocale();
+  const characterKey = result.session_character ? CHARACTER_KEYS[result.session_character] : undefined;
+  const characterLabel = characterKey
+    ? t(characterKey)
+    : result.session_character?.replace(/_/g, ' ') ?? null;
 
   return (
     <div
@@ -75,7 +88,9 @@ interface InsightResultProps {
 }
 
 export function InsightSearchResult({ result, query, isActive, onClick }: InsightResultProps) {
+  const { t, formatRelativeDate } = useLocale();
   const Icon = INSIGHT_ICONS[result.type] ?? Lightbulb;
+  const insightTypeKey = INSIGHT_TYPE_KEYS[result.type];
 
   return (
     <div
@@ -92,7 +107,7 @@ export function InsightSearchResult({ result, query, isActive, onClick }: Insigh
           <SearchHighlight text={result.title} query={query} />
         </div>
         <div className="text-xs text-muted-foreground/60 mt-0.5 flex items-center gap-1.5">
-          <span className="capitalize">{result.type.replace(/_/g, ' ')}</span>
+          <span>{insightTypeKey ? t(insightTypeKey) : result.type.replace(/_/g, ' ')}</span>
           <span>·</span>
           <span className="truncate">{result.project_name}</span>
           <span>·</span>

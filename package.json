@@ -1,16 +1,19 @@
 {
   "name": "code-insights-workspace",
   "private": true,
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "build": "pnpm --filter @code-insights/cli build && pnpm --filter @code-insights/server build && pnpm --filter @code-insights/dashboard build",
     "dev": "pnpm --filter @code-insights/cli dev",
-    "test": "pnpm -r test",
+    "test": "pnpm run test:automation && pnpm -r test",
+    "test:automation": "bash automation/tests/cli-build.test.sh && bash automation/tests/maintenance.test.sh && bash automation/tests/throttled-analysis.test.sh && bash automation/tests/throttled-lock.test.sh && bash automation/tests/install-launchd.test.sh",
+    "typecheck": "pnpm --filter @code-insights/cli build && pnpm --filter @code-insights/server typecheck && pnpm --filter @code-insights/dashboard typecheck",
     "test:watch": "vitest",
     "test:coverage": "pnpm --filter @code-insights/cli test:coverage && pnpm --filter @code-insights/server test:coverage"
   },
   "engines": {
-    "node": ">=18.0.0",
-    "pnpm": ">=8.0.0"
+    "node": "^20.0.0 || ^22.0.0 || >=24.0.0",
+    "pnpm": "9.15.9"
   },
   "devDependencies": {
     "@vitest/coverage-v8": "^4.0.18",

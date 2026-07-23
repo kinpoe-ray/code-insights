@@ -12,20 +12,22 @@ import { StatsHeroSkeleton } from '@/components/skeletons/StatsHeroSkeleton';
 import { ErrorCard } from '@/components/ErrorCard';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useLocale } from '@/i18n/LocaleProvider';
 import type { DailyStats } from '@/lib/types';
 import { Sparkles, ArrowRight } from 'lucide-react';
 
 type DashboardRange = '7d' | '30d' | '90d' | 'all';
 
-function getGreeting(): string {
+function getGreetingKey() {
   const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 17) return 'Good afternoon';
-  return 'Good evening';
+  if (hour < 12) return 'dashboard.greeting.morning' as const;
+  if (hour < 17) return 'dashboard.greeting.afternoon' as const;
+  return 'dashboard.greeting.evening' as const;
 }
 
 export default function DashboardPage() {
   const [range, setRange] = useState<DashboardRange>('7d');
+  const { t, formatDate } = useLocale();
 
   const { data: dashStats, isLoading: statsLoading, isError: statsError, refetch: refetchStats } = useDashboardStats(range);
   const { data: sessions = [], isLoading: sessionsLoading, isError: sessionsError, refetch: refetchSessions } = useSessions({ limit: 500 });
@@ -35,7 +37,7 @@ export default function DashboardPage() {
   const loading = statsLoading || sessionsLoading || insightsLoading;
   const hasError = statsError || sessionsError;
 
-  const todayLabel = new Date().toLocaleDateString(undefined, {
+  const todayLabel = formatDate(new Date(), {
     month: 'long',
     day: 'numeric',
   });
@@ -97,11 +99,10 @@ export default function DashboardPage() {
       {/* Greeting header */}
       <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-lg font-bold">{getGreeting()}.</h1>
+          <h1 className="text-lg font-bold">{t(getGreetingKey())}</h1>
           {!loading && (
             <p className="text-muted-foreground text-xs animate-in fade-in slide-in-from-bottom-2 duration-300">
-              {sessions.length} session{sessions.length !== 1 ? 's' : ''} loaded
-              {' '}&middot; {projects.length} project{projects.length !== 1 ? 's' : ''}
+              {t('dashboard.loaded', { sessions: sessions.length, projects: projects.length })}
             </p>
           )}
         </div>
@@ -111,7 +112,7 @@ export default function DashboardPage() {
       {/* Error state */}
       {hasError && !loading && (
         <ErrorCard
-          message="Failed to load dashboard data"
+          message={t('dashboard.error.load')}
           onRetry={() => { refetchStats(); refetchSessions(); }}
         />
       )}
@@ -165,11 +166,10 @@ export default function DashboardPage() {
               <Sparkles className="h-4 w-4 text-amber-600" />
               <div>
                 <p className="text-sm font-medium">
-                  {unanalyzedSessions.length} session{unanalyzedSessions.length !== 1 ? 's' : ''}{' '}
-                  without analysis
+                  {t('dashboard.unanalyzed.count', { sessions: unanalyzedSessions.length })}
                 </p>
                 <p className="text-xs text-muted-foreground">
-                  Generate AI insights to extract learnings and decisions
+                  {t('dashboard.unanalyzed.description')}
                 </p>
               </div>
             </div>
@@ -185,12 +185,12 @@ export default function DashboardPage() {
         }
       >
         <div className="flex items-center justify-between mb-1">
-          <h2 className="text-xs font-semibold">Recent Activity</h2>
+          <h2 className="text-xs font-semibold">{t('dashboard.recentActivity')}</h2>
           <Link
             to="/sessions"
             className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
-            View all
+            {t('dashboard.viewAll')}
             <ArrowRight className="h-3 w-3" />
           </Link>
         </div>

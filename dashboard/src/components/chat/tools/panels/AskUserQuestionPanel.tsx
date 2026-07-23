@@ -3,6 +3,7 @@ import { Badge } from '@/components/ui/badge';
 import type { ToolCall, ToolResult } from '@/lib/types';
 import { parseToolInput } from '../utils';
 import { CollapsibleToolPanel } from '../CollapsibleToolPanel';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface AskUserQuestionPanelProps {
   toolCall: ToolCall;
@@ -46,6 +47,7 @@ function parseAnswers(resultText: string): Map<string, string> {
 }
 
 export function AskUserQuestionPanel({ toolCall, result }: AskUserQuestionPanelProps) {
+  const { t } = useLocale();
   const input = parseToolInput(toolCall.input);
   const questions = (input.questions as Question[]) || [];
   const answers = parseAnswers(result?.output || '');
@@ -64,7 +66,7 @@ export function AskUserQuestionPanel({ toolCall, result }: AskUserQuestionPanelP
       {hasAnswers && (
         <Badge variant="outline" className="text-[10px] py-0 shrink-0 text-green-600 dark:text-green-400 border-green-500/20">
           <Check className="h-3 w-3 mr-0.5" />
-          Answered
+          {t('chat.question.answered')}
         </Badge>
       )}
     </>
@@ -73,7 +75,9 @@ export function AskUserQuestionPanel({ toolCall, result }: AskUserQuestionPanelP
   return (
     <CollapsibleToolPanel
       icon={<HelpCircle className="h-3.5 w-3.5 text-blue-500 shrink-0" />}
-      label={`Asked ${questions.length === 1 ? 'Question' : `${questions.length} Questions`}`}
+      label={questions.length === 1
+        ? t('chat.question.askedOne')
+        : t('chat.question.askedMany', { count: questions.length })}
       summary={summary}
       className="border-blue-500/20"
     >
@@ -111,7 +115,7 @@ export function AskUserQuestionPanel({ toolCall, result }: AskUserQuestionPanelP
 
               {answer && (!q.options || !q.options.some(o => o.label === answer)) && (
                 <div className="flex items-center gap-1.5">
-                  <span className="text-[10px] text-muted-foreground">Answer:</span>
+                  <span className="text-[10px] text-muted-foreground">{t('chat.question.answer')}</span>
                   <Badge variant="default" className="text-[10px] bg-blue-500 hover:bg-blue-500 text-white">
                     {answer}
                   </Badge>

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Terminal } from 'lucide-react';
 import type { ToolCall, ToolResult } from '@/lib/types';
 import { CollapsibleToolPanel } from '../CollapsibleToolPanel';
+import { useLocale } from '@/i18n/LocaleProvider';
 
 interface GenericToolPanelProps {
   toolCall: ToolCall;
@@ -9,6 +10,7 @@ interface GenericToolPanelProps {
 }
 
 export function GenericToolPanel({ toolCall, result }: GenericToolPanelProps) {
+  const { t } = useLocale();
   const [showResult, setShowResult] = useState(false);
 
   let formattedInput = toolCall.input;
@@ -31,7 +33,7 @@ export function GenericToolPanel({ toolCall, result }: GenericToolPanelProps) {
   return (
     <CollapsibleToolPanel
       icon={<Terminal className="h-3.5 w-3.5 text-muted-foreground shrink-0" />}
-      label="Tool"
+      label={t('chat.tool.generic')}
       summary={summary}
     >
       <pre className="px-3 py-2 text-xs font-mono text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap">
@@ -43,7 +45,7 @@ export function GenericToolPanel({ toolCall, result }: GenericToolPanelProps) {
             onClick={() => setShowResult(!showResult)}
             className="px-3 py-1 text-xs text-muted-foreground hover:text-foreground"
           >
-            {showResult ? 'Hide result' : 'Show result'}
+            {showResult ? t('chat.result.hide') : t('chat.result.show')}
           </button>
           {showResult && (
             <pre className="px-3 pb-2 text-xs font-mono text-muted-foreground overflow-x-auto max-h-48 whitespace-pre-wrap">

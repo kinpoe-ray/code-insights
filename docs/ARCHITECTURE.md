@@ -7,8 +7,14 @@
 ## Data Flow
 
 ```
-Source tool session files -> Provider (discover + parse) -> SQLite -> Dashboard (localhost:7890)
+Source tool session files -> Provider (discover + parse) -> local SQLite
                                                          -> CLI stats commands
+                                                         -> loopback dashboard/API
+                                                         -> AnalysisEngine
+                                                            -> local model endpoint, or
+                                                            -> redacted content to cloud/custom endpoint
+                                                         -> ClaudeNativeRunner
+                                                            -> installed Claude CLI boundary
 ```
 
 ---
@@ -75,7 +81,8 @@ code-insights/
 - `utils/config.ts` — Configuration management (~/.code-insights/config.json)
 - `utils/device.ts` — Device ID generation, git remote detection, stable project IDs
 - `utils/paths.ts` — Virtual path handling (shared by sync and stats)
-- `utils/telemetry.ts` — PostHog telemetry (opt-out model, 14 event types)
+- `utils/telemetry.ts` — PostHog telemetry (default-on/opt-out, allowlisted
+  events and properties)
 - `types.ts` — TypeScript type definitions (SINGLE SOURCE OF TRUTH)
 - `index.ts` — CLI entry point (Commander.js)
 
@@ -108,7 +115,7 @@ Providers are registered in `providers/registry.ts`. To add a new source tool:
 - **Location:** `~/.code-insights/data.db`
 - **Mode:** WAL (concurrent reads during CLI sync)
 - **Driver:** better-sqlite3 (synchronous, fast, no async overhead)
-- **Schema:** Versioned migrations (V1–V9) applied on startup
+- **Schema:** Versioned migrations (V1–V12) applied on startup
 - **Timestamps:** ISO 8601 strings
 
 ### Tables
@@ -121,10 +128,132 @@ Providers are registered in `providers/registry.ts`. To add a new source tool:
 | `insights` | LLM-generated insights (5 types) | V1, V2 (index) |
 | `usage_stats` | Global usage aggregation | V1 |
 | `session_facets` | Cross-session facet data (friction, patterns, workflow) | V3 |
-| `reflect_snapshots` | Cached synthesis results, composite PK `(period, project_id, source_tool)` | V4 |
-| `analysis_usage` | Per-session LLM analysis cost data, composite PK `(session_id, analysis_type)`; V8 adds `session_message_count` for resume detection | V7, V8 |
-| `analysis_queue` | Async hook-triggered analysis jobs; durable retry-aware queue (pending/processing/completed/failed, max 3 attempts) | V9 |
+| `reflect_snapshots` | Cached synthesis results; V11 composite PK `(period, project_id, source_scope)` isolates all-source and per-source snapshots | V4, V11 |
+| `analysis_usage` | Per-session LLM analysis cost data; V8 adds message-count freshness and V12 adds input/pipeline revision fields | V7, V8, V12 |
+| `analysis_queue` | One durable row per session; V11 adds rerun coalescing and persistent retry scheduling through `next_attempt_at` | V9, V11 |
+| `code_insights_metadata` | Persistent database ID and sync generation used to bind filesystem checkpoints to this database lifecycle | V10 |
+| `analysis_campaigns` | Fixed scope and provider/model identity for one durable history reanalysis campaign | V12 |
+| `analysis_campaign_items` | Frozen membership, staged first pass, attempts, claims, and per-session campaign state | V12 |
+| `analysis_campaign_snapshots` | Previous visible results captured immediately before an atomic campaign replacement | V12 |
 | `schema_version` | Migration tracking | V1 |
+
+---
+
+## Analysis Engine, Queue, and Database Identity
+
+Configured-provider session analysis has one shared core:
+`cli/src/analysis/analysis-engine.ts`. Both the CLI command and the server
+persistence adapter call `createAnalysisEngine()`, so prompt construction,
+budgeting, credential redaction, response parsing, usage accounting, and pricing
+follow one contract. The server adapter persists only complete results.
+
+`analysis_usage` records provider/model, input/output and cache tokens, estimated
+cost, duration, analyzed message count, exact input revision, and pipeline
+revision. Provider work is skipped only when both `session` and
+`prompt_quality` rows match all five freshness dimensions: message count,
+provider, model, input revision, and pipeline revision. Missing fields fail
+closed, so pre-V12 rows with `NULL` revisions are stale until a new two-pass
+analysis completes.
+
+`analysis_queue` is a durable state machine:
+
+```
+pending (due) -> processing -> completed
+                         \-> pending at next_attempt_at -> processing
+                         \-> failed after max_attempts
+```
+
+- `claimNext()` atomically claims due `pending` rows in
+  `(enqueued_at, rowid)` FIFO order.
+- Claims exclude unfinished members of every active or paused history campaign;
+  their queue rows stay pending instead of competing for paid provider work.
+- The default maximum is three attempts. The first and second failures are
+  deferred for 30 and 60 seconds; the third becomes terminal.
+- Enqueuing a session that is currently processing sets `rerun_requested`
+  without replacing the active runner metadata. Completion or failure then
+  creates one fresh pending rerun.
+- `POST /api/analysis/queue` validates and enqueues 1–500 session IDs as one
+  batch. The local queue pump processes one item per turn; durable timing remains
+  in SQLite, not only in a process timer.
+- A `processing` claim has a ten-minute lease. A restart does not immediately
+  reset a still-valid claim: SQLite exposes its lease deadline as the next
+  durable wake-up. At expiry, stale recovery consumes an attempt and follows
+  the same rerun/backoff rules.
+
+`code_insights_metadata` stores a stable database ID and a sync generation.
+Filesystem sync checkpoints include both values. A successful full sync
+advances the generation, while `reset` clears user tables and advances the
+generation transactionally. This prevents a stale `sync-state.json` from
+silently suppressing data after a reset or database replacement.
+
+### Durable History Reanalysis
+
+`reanalyze --dry-run` opens the existing SQLite database read-only. It selects
+the exact eligible membership and reports the call estimate without applying
+migrations, creating a campaign, or invoking a model.
+
+`reanalyze start` persists that fixed membership plus the provider, model,
+one-way endpoint fingerprint, analysis version, and pipeline revision. The
+optional `--model` for preview/start must equal the currently configured model;
+it is a guard, not an execution override. A model migration therefore begins by
+changing `config llm`. At most one active or paused campaign can exist. Items
+move through this resumable state machine:
+
+```
+pending -> session_staged -> succeeded
+   \              \-> failed -> session_staged (explicit retry)
+    \-> failed ----------------> pending        (explicit retry)
+```
+
+The first analysis pass is staged but does not change user-visible results. Once
+the prompt-quality pass also succeeds, one SQLite transaction snapshots the old
+insights, facets, usage rows, and generated title; publishes both prepared
+passes; and marks the item successful. Failures therefore leave the old results
+visible. Claims are leased so work can resume after a crash, and succeeded items
+are never selected again.
+
+Before taking the LLM lock or creating a runner, `reanalyze run` compares every
+locked identity field with the current configuration and pipeline. Any provider,
+model, endpoint fingerprint, analysis-version, or pipeline-revision mismatch
+stops with zero provider requests.
+
+For `N` members, the two logical passes require a minimum of `2N` provider
+requests. Long-session chunking, facet extraction, and bounded retries increase
+that number. A process crash after a provider response but before its local stage
+or publish commit is an unavoidable uncertainty window and may add another
+request. `reanalyze retry-failed --yes` grants failed members a fresh bounded
+retry budget; `reanalyze cancel --yes` terminally releases the active campaign
+without rolling back already-published members.
+
+Campaign and global maintenance pauses are cooperative scheduling boundaries:
+an in-flight provider request can finish, but no new pass starts after the pause
+or deadline is observed. Scheduled maintenance prioritizes an active campaign
+over legacy history batches and defers weekly reflection until that campaign is
+complete.
+
+The ordinary analysis queue excludes every unfinished member of an active or
+paused campaign when claiming work. The queue row stays pending until the member
+succeeds or the campaign reaches a terminal state, avoiding duplicate paid work
+between the two schedulers.
+
+---
+
+## Local Dashboard Security Boundary
+
+The Hono server binds to `127.0.0.1`, not an external interface. Security
+middleware rejects non-loopback `Host` values and, when supplied, non-loopback
+or non-HTTP `Origin` values.
+
+`GET /api/session` bootstraps a random 32-byte, base64url token held only in the
+server process. The dashboard caches it only in JavaScript memory and sends it
+on later API requests. Every `/api` route except `/api/health` and that bootstrap
+requires the token; static assets and health are token-exempt but still pass
+the `Host`/`Origin` checks. Restarting the server rotates the token.
+
+This boundary reduces browser-based cross-origin and DNS-rebinding exposure. It
+does not protect against another local process running as the same user, and
+the SQLite database is not encrypted. See
+[SECURITY-MODEL.md](SECURITY-MODEL.md).
 
 ---
 
@@ -179,6 +308,7 @@ Both friction points and effective patterns use canonical category taxonomies wi
 
 | Route | Method | Purpose |
 |-------|--------|---------|
+| `/api/session` | GET | Bootstrap the in-memory local-dashboard session token |
 | `/api/health` | GET | Server health check |
 | `/api/projects` | GET | List all projects |
 | `/api/projects/:id` | GET | Project detail |
@@ -188,6 +318,7 @@ Both friction points and effective patterns use canonical category taxonomies wi
 | `/api/sessions/:id` | DELETE | Soft-delete a session |
 | `/api/sessions/deleted/count` | GET | Count of soft-deleted sessions |
 | `/api/messages/:sessionId` | GET | Message content for a session |
+| `/api/search` | GET | Search sessions, insights, and patterns |
 | `/api/insights` | GET | Browse generated insights |
 | `/api/insights` | POST | Create an insight |
 | `/api/insights/:id` | DELETE | Delete an insight |
@@ -204,6 +335,8 @@ Both friction points and effective patterns use canonical category taxonomies wi
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/analysis/usage` | GET | Analysis cost/usage data per session |
+| `/api/analysis/queue` | GET | Read queue status and next retry/lease wake time |
+| `/api/analysis/queue` | POST | Enqueue a validated batch of 1–500 sessions |
 | `/api/analysis/session` | POST | Trigger session analysis with LLM |
 | `/api/analysis/session/stream` | GET | SSE streaming for session analysis |
 | `/api/analysis/prompt-quality` | POST | Trigger prompt quality analysis |
@@ -217,6 +350,13 @@ Both friction points and effective patterns use canonical category taxonomies wi
 | `/api/export/markdown` | POST | Session-level markdown export (Knowledge Base / Agent Rules templates) |
 | `/api/export/generate` | POST | LLM-powered cross-session export synthesis |
 | `/api/export/generate/stream` | GET | SSE streaming for export generation |
+
+### Dispatch
+
+| Route | Method | Purpose |
+|-------|--------|---------|
+| `/api/dispatch/generate` | POST | Generate a blog or LinkedIn post from curated insights |
+| `/api/dispatch/image-prompt` | POST | Generate a cover-image prompt for a Dispatch result |
 
 ### Facets
 
@@ -233,12 +373,16 @@ Both friction points and effective patterns use canonical category taxonomies wi
 
 ### Reflect (Cross-Session Synthesis)
 
+CLI reflection accepts `--source <tool>`. The same source scope is carried
+through aggregation, week history, generation, and snapshot lookup, and is part
+of the V11 snapshot primary key.
+
 | Route | Method | Purpose |
 |-------|--------|---------|
 | `/api/reflect/generate` | POST | Cross-session LLM synthesis (SSE streaming) |
 | `/api/reflect/results` | GET | Aggregated facet data without LLM synthesis |
-| `/api/reflect/weeks` | GET | Last 8 ISO weeks with session counts and snapshot status |
-| `/api/reflect/snapshot` | GET | Cached synthesis snapshot for a specific week/project |
+| `/api/reflect/weeks` | GET | Data-driven ISO week history, optionally scoped by project/source |
+| `/api/reflect/snapshot` | GET | Cached synthesis for a specific week/project/source scope |
 
 ### Configuration & Telemetry
 
@@ -248,6 +392,7 @@ Both friction points and effective patterns use canonical category taxonomies wi
 | `/api/config/llm` | PUT | Update LLM configuration |
 | `/api/config/llm/test` | POST | Test LLM credentials |
 | `/api/config/llm/ollama-models` | GET | Discover available Ollama models |
+| `/api/config/llm/llamacpp-models` | GET | Discover models exposed by llama.cpp |
 | `/api/telemetry/identity` | GET | Telemetry identity and opt-out status |
 
 ---

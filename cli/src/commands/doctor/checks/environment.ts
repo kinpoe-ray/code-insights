@@ -46,15 +46,16 @@ export function environmentChecks(): Check[] {
       label: 'Node.js version',
       run: async () => {
         const major = parseInt(process.versions.node.split('.')[0], 10);
-        if (major >= 18) {
+        const supported = major === 20 || major === 22 || major >= 24;
+        if (supported) {
           return { id: 'env.node_version', label: 'Node.js version', status: 'pass', detail: `v${process.versions.node}` };
         }
         return {
           id: 'env.node_version',
           label: 'Node.js version',
           status: 'fail',
-          detail: `v${process.versions.node} (requires >= 18)`,
-          hint: 'Install Node.js 18 or later from https://nodejs.org',
+          detail: `v${process.versions.node} (requires 20.x, 22.x, or >=24)`,
+          hint: 'Install Node.js 20, 22, or 24+ from https://nodejs.org',
         };
       },
     },

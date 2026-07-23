@@ -30,6 +30,15 @@ export const INSIGHT_TYPE_LABELS: Record<InsightType, string> = {
   prompt_quality: 'Prompt Quality',
 };
 
+/** Locale message keys for insight type display; domain values stay unchanged. */
+export const INSIGHT_TYPE_MESSAGE_KEYS = {
+  summary: 'insights.type.summary',
+  decision: 'insights.type.decision',
+  learning: 'insights.type.learning',
+  technique: 'insights.type.learning',
+  prompt_quality: 'insights.type.promptQuality',
+} as const satisfies Record<InsightType, string>;
+
 export const SESSION_CHARACTER_COLORS: Record<string, string> = {
   deep_focus: 'bg-indigo-500/10 text-indigo-600 border-indigo-500/20',
   bug_hunt: 'bg-red-500/10 text-red-600 border-red-500/20',

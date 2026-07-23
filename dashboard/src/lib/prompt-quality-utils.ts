@@ -15,6 +15,23 @@ const PQ_CATEGORY_LABELS: Record<string, string> = {
   'productive-correction': 'Productive Correction',
 };
 
+export const PQ_CATEGORY_MESSAGE_KEYS = {
+  'vague-request': 'insights.pq.category.vagueRequest',
+  'missing-context': 'insights.pq.category.missingContext',
+  'late-constraint': 'insights.pq.category.lateConstraint',
+  'unclear-correction': 'insights.pq.category.unclearCorrection',
+  'scope-drift': 'insights.pq.category.scopeDrift',
+  'missing-acceptance-criteria': 'insights.pq.category.missingAcceptanceCriteria',
+  'assumption-not-surfaced': 'insights.pq.category.assumptionNotSurfaced',
+  'precise-request': 'insights.pq.category.preciseRequest',
+  'effective-context': 'insights.pq.category.effectiveContext',
+  'productive-correction': 'insights.pq.category.productiveCorrection',
+} as const;
+
+export function getPQCategoryMessageKey(category: string) {
+  return PQ_CATEGORY_MESSAGE_KEYS[category as keyof typeof PQ_CATEGORY_MESSAGE_KEYS];
+}
+
 const STRENGTH_CATEGORIES = new Set([
   'precise-request', 'effective-context', 'productive-correction',
 ]);

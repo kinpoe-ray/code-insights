@@ -3,6 +3,7 @@
 // Owns the InsightRow and SessionData types used by both CLI and server.
 
 import { randomUUID } from 'crypto';
+import type Database from 'better-sqlite3';
 import { getDb } from '../db/client.js';
 import type { AnalysisResponse, PromptQualityResponse } from './prompt-types.js';
 import { normalizePatternCategory } from './pattern-normalize.js';
@@ -195,10 +196,13 @@ export function convertPQToInsightRow(response: PromptQualityResponse, session: 
  * Auto-apply an LLM-generated summary title as the session's generated_title.
  * Called after saving insights so the session title reflects the analysis output.
  */
-export function applyGeneratedTitle(sessionId: string, insights: Array<{ type: string; title?: string }>): void {
+export function applyGeneratedTitle(
+  sessionId: string,
+  insights: Array<{ type: string; title?: string }>,
+  db: Database.Database = getDb(),
+): void {
   const summaryInsight = insights.find(i => i.type === 'summary');
   if (!summaryInsight?.title) return;
-  const db = getDb();
   db.prepare('UPDATE sessions SET generated_title = ? WHERE id = ? AND deleted_at IS NULL')
     .run(summaryInsight.title.slice(0, 120), sessionId);
 }
@@ -206,9 +210,11 @@ export function applyGeneratedTitle(sessionId: string, insights: Array<{ type: s
 /**
  * Write insight rows to SQLite using prepared statements.
  */
-export function saveInsightsToDb(insights: InsightRow[]): void {
+export function saveInsightsToDb(
+  insights: InsightRow[],
+  db: Database.Database = getDb(),
+): void {
   if (insights.length === 0) return;
-  const db = getDb();
   const insert = db.prepare(`
     INSERT OR REPLACE INTO insights (
       id, session_id, project_id, project_name, type, title, content,
@@ -240,7 +246,32 @@ export function saveInsightsToDb(insights: InsightRow[]): void {
     }
   });
 
-  insertMany(insights);
+  if (db.inTransaction) {
+    // The two-pass publisher owns the surrounding transaction. Avoid opening a
+    // nested savepoint so all visible artifacts share one publication boundary.
+    for (const row of insights) {
+      insert.run(
+        row.id,
+        row.session_id,
+        row.project_id,
+        row.project_name,
+        row.type,
+        row.title,
+        row.content,
+        row.summary,
+        row.bullets,
+        row.confidence,
+        row.source,
+        row.metadata,
+        row.timestamp,
+        row.created_at,
+        row.scope,
+        row.analysis_version,
+      );
+    }
+  } else {
+    insertMany(insights);
+  }
 }
 
 export interface DeleteOptions {
@@ -252,8 +283,11 @@ export interface DeleteOptions {
 /**
  * Delete insights for a session, with optional type and ID exclusions.
  */
-export function deleteSessionInsights(sessionId: string, opts: DeleteOptions): void {
-  const db = getDb();
+export function deleteSessionInsights(
+  sessionId: string,
+  opts: DeleteOptions,
+  db: Database.Database = getDb(),
+): void {
   const conditions: string[] = ['session_id = ?'];
   const params: (string | number)[] = [sessionId];
 
@@ -284,8 +318,15 @@ export function saveFacetsToDb(
   sessionId: string,
   facets: NonNullable<AnalysisResponse['facets']>,
   analysisVersion: string = ANALYSIS_VERSION,
+  db: Database.Database = getDb(),
 ): void {
-  const db = getDb();
+  // Facet-only and chunked analysis paths can bypass parseAnalysisResponse(),
+  // so enforce the friction category invariant at the shared persistence boundary.
+  const sanitizedFrictionPoints = Array.isArray(facets.friction_points)
+    ? facets.friction_points.filter(
+        fp => typeof fp?.category === 'string' && fp.category.trim() !== '',
+      )
+    : [];
 
   // Normalize pattern categories at write time so stored data is always clean.
   // This handles LLM variants (e.g., "task-decomposition" → "structured-planning")
@@ -317,8 +358,16 @@ export function saveFacetsToDb(
     facets.had_course_correction ? 1 : 0,
     facets.course_correction_reason,
     facets.iteration_count,
-    JSON.stringify(Array.isArray(facets.friction_points) ? facets.friction_points : []),
+    JSON.stringify(sanitizedFrictionPoints),
     JSON.stringify(normalizedPatterns),
     analysisVersion,
   );
+}
+
+/** Remove stale facets when a successful replacement analysis has none. */
+export function deleteSessionFacets(
+  sessionId: string,
+  db: Database.Database = getDb(),
+): void {
+  db.prepare('DELETE FROM session_facets WHERE session_id = ?').run(sessionId);
 }
