@@ -114,8 +114,8 @@ const PQ_RESPONSE: PromptQualityResponse = {
   efficiency_score: 75,
   message_overhead: 0.2,
   assessment: 'Good prompting overall',
-  takeaways: [{ type: 'reinforce', category: 'precise-request', label: 'Clear ask', message_ref: 'msg-1', what_worked: 'specific', why_effective: 'fast' }],
-  findings: [{ category: 'precise-request', type: 'strength', description: 'Clear requirements', message_ref: 'msg-1', impact: 'high', confidence: 0.9 }],
+  takeaways: [{ type: 'reinforce', category: 'precise-request', label: 'Clear ask', message_ref: 'User#0', what_worked: 'specific', why_effective: 'fast' }],
+  findings: [{ category: 'precise-request', type: 'strength', description: 'Clear requirements', message_ref: 'User#0', impact: 'high', confidence: 0.9 }],
   dimension_scores: {
     context_provision: 80,
     request_specificity: 75,

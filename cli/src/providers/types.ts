@@ -10,6 +10,13 @@ export interface SessionProvider {
   /** Discover session files/databases on this machine */
   discover(options?: { projectFilter?: string }): Promise<string[]>;
 
-  /** Parse a single session file into normalized format */
+  /**
+   * Fingerprint provider-owned inputs that are not covered by the discovered
+   * source file itself. Multi-session providers can use this to invalidate one
+   * virtual session without invalidating every sibling.
+   */
+  getSourceFingerprint?(filePath: string): string | null;
+
+  /** Parse a single session source into normalized form. */
   parse(filePath: string): Promise<ParsedSession | null>;
 }

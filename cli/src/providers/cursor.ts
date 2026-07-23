@@ -7,6 +7,11 @@ import type { ParsedSession, ParsedMessage, ToolCall } from '../types.js';
 import { generateTitle, detectSessionCharacter } from '../parser/titles.js';
 import { isVerbose } from './context.js';
 
+interface CursorWorkspaceAttribution {
+  workspaceDbPath: string;
+  projectPath: string | null;
+}
+
 /**
  * Cursor IDE session provider.
  * Discovers and parses sessions from Cursor's SQLite databases.
@@ -17,6 +22,13 @@ import { isVerbose } from './context.js';
  * This keeps the SessionProvider interface unchanged (1 path = 1 session).
  */
 export class CursorProvider implements SessionProvider {
+  private readonly cursorDataDir: string | null;
+  private readonly workspaceAttributions = new Map<string, CursorWorkspaceAttribution>();
+
+  constructor(cursorDataDir: string | null = getCursorDataDir()) {
+    this.cursorDataDir = cursorDataDir;
+  }
+
   getProviderName(): string {
     return 'cursor';
   }
@@ -26,17 +38,18 @@ export class CursorProvider implements SessionProvider {
    * Returns virtual paths: `<dbPath>#<composerId>` — one per session.
    */
   async discover(options?: { projectFilter?: string }): Promise<string[]> {
-    const cursorDataDir = getCursorDataDir();
+    const cursorDataDir = this.cursorDataDir;
     if (!cursorDataDir) {
       return [];
     }
 
-    const dbPaths: string[] = [];
+    this.workspaceAttributions.clear();
+    const workspaceDbPaths: Array<{ dbPath: string; projectPath: string | null }> = [];
 
     // 1. Check workspace storage databases
     const workspaceStorageDir = path.join(cursorDataDir, 'workspaceStorage');
     if (fs.existsSync(workspaceStorageDir)) {
-      const entries = fs.readdirSync(workspaceStorageDir);
+      const entries = fs.readdirSync(workspaceStorageDir).sort();
       for (const entry of entries) {
         const wsDir = path.join(workspaceStorageDir, entry);
         if (!fs.statSync(wsDir).isDirectory()) continue;
@@ -45,34 +58,72 @@ export class CursorProvider implements SessionProvider {
         if (!fs.existsSync(dbPath)) continue;
 
         // Apply project filter if specified
+        const projectPath = resolveWorkspacePath(wsDir);
         if (options?.projectFilter) {
-          const projectPath = resolveWorkspacePath(wsDir);
-          if (projectPath && !projectPath.toLowerCase().includes(options.projectFilter.toLowerCase())) {
+          if (!projectPath || !projectPath.toLowerCase().includes(options.projectFilter.toLowerCase())) {
             continue;
           }
         }
 
-        dbPaths.push(dbPath);
+        workspaceDbPaths.push({ dbPath, projectPath });
       }
     }
 
     // 2. Check global storage database
     const globalDbPath = path.join(cursorDataDir, 'globalStorage', 'state.vscdb');
-    if (fs.existsSync(globalDbPath)) {
-      dbPaths.push(globalDbPath);
-    }
+    const globalComposerIds = fs.existsSync(globalDbPath)
+      ? getComposerIds(globalDbPath)
+      : [];
+    const globalComposerIdSet = new Set(globalComposerIds);
+    const canonicalSources = new Map<string, string>();
 
-    // Expand each DB path into virtual paths — one per composer session
-    const virtualPaths: string[] = [];
-
-    for (const dbPath of dbPaths) {
+    // Workspace metadata may refer to a composer whose actual conversation is
+    // stored in the global DB. Prefer the global DB as the canonical source so
+    // sync snapshots include the SQLite WAL that changes with the conversation.
+    for (const { dbPath, projectPath } of workspaceDbPaths) {
       const composerIds = getComposerIds(dbPath);
       for (const composerId of composerIds) {
-        virtualPaths.push(`${dbPath}#${composerId}`);
+        if (!this.workspaceAttributions.has(composerId)) {
+          this.workspaceAttributions.set(composerId, {
+            workspaceDbPath: dbPath,
+            projectPath,
+          });
+        }
+        canonicalSources.set(
+          composerId,
+          globalComposerIdSet.has(composerId) ? globalDbPath : dbPath,
+        );
       }
     }
 
-    return virtualPaths;
+    for (const composerId of globalComposerIds) {
+      // With a project filter, global-only composers have no trustworthy
+      // workspace attribution at discovery time. Do not let them bypass the
+      // filter; overlapping workspace composers are already present above.
+      if (!options?.projectFilter || canonicalSources.has(composerId)) {
+        canonicalSources.set(composerId, globalDbPath);
+      }
+    }
+
+    return [...canonicalSources]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([composerId, dbPath]) => `${dbPath}#${composerId}`);
+  }
+
+  /**
+   * Return the per-composer attribution input that is not represented by the
+   * canonical SQLite path. Sync stores this separately so a workspace mapping
+   * change re-parses only the affected composer.
+   */
+  getSourceFingerprint(virtualPath: string): string | null {
+    const hashIndex = virtualPath.lastIndexOf('#');
+    const composerId = hashIndex === -1 ? '' : virtualPath.slice(hashIndex + 1);
+    const attribution = this.workspaceAttributions.get(composerId);
+    if (!attribution) return null;
+    return JSON.stringify({
+      workspaceDbPath: attribution.workspaceDbPath,
+      projectPath: attribution.projectPath,
+    });
   }
 
   /**
@@ -87,7 +138,12 @@ export class CursorProvider implements SessionProvider {
     const composerId = virtualPath.slice(hashIndex + 1);
     if (!composerId) return null;
 
-    return parseCursorSession(dbPath, composerId);
+    return parseCursorSession(
+      dbPath,
+      composerId,
+      this.cursorDataDir,
+      this.workspaceAttributions.get(composerId)?.projectPath ?? undefined,
+    );
   }
 }
 
@@ -283,8 +339,10 @@ function extractProjectPathFromBubbles(bubbles: Array<Record<string, unknown>>):
  * The global DB stores full composer conversation data in cursorDiskKV.
  * Returns null if the global DB doesn't exist or can't be opened.
  */
-function openGlobalDb(anyDbPath: string): InstanceType<typeof Database> | null {
-  const cursorDataDir = getCursorDataDir();
+function openGlobalDb(
+  anyDbPath: string,
+  cursorDataDir: string | null,
+): InstanceType<typeof Database> | null {
   if (!cursorDataDir) return null;
 
   const globalDbPath = path.join(cursorDataDir, 'globalStorage', 'state.vscdb');
@@ -361,7 +419,12 @@ function getComposerIds(dbPath: string): string[] {
 /**
  * Parse a single Cursor composer session from a database.
  */
-function parseCursorSession(dbPath: string, composerId: string): ParsedSession | null {
+function parseCursorSession(
+  dbPath: string,
+  composerId: string,
+  cursorDataDir: string | null,
+  workspaceProjectPath?: string,
+): ParsedSession | null {
   let db: InstanceType<typeof Database> | null = null;
   try {
     db = new Database(dbPath, { readonly: true, fileMustExist: true });
@@ -422,7 +485,7 @@ function parseCursorSession(dbPath: string, composerId: string): ParsedSession |
     // Full conversation data (with bubbles) lives in the global DB's cursorDiskKV table.
     // If we got no messages from the workspace DB, look up the composer in the global DB.
     if (messages.length === 0) {
-      const globalDb = openGlobalDb(dbPath);
+      const globalDb = openGlobalDb(dbPath, cursorDataDir);
       if (globalDb) {
         try {
           const globalRow = globalDb.prepare(
@@ -452,14 +515,16 @@ function parseCursorSession(dbPath: string, composerId: string): ParsedSession |
     if (messages.length === 0) return null;
 
     // Resolve project path — try multiple strategies in order of reliability:
-    //   1. workspace.json in the workspace hash directory (works for workspace DB sessions)
-    //   2. Extract from codeBlock URIs + relevantFiles in inline composerData.conversation
-    //   3. Extract from raw bubbles (covers fullConversationHeadersOnly where codeBlocks
+    //   1. workspace path captured during discovery (preserved for global canonical sources)
+    //   2. workspace.json beside a workspace DB
+    //   3. Extract from codeBlock URIs + relevantFiles in inline composerData.conversation
+    //   4. Extract from raw bubbles (covers fullConversationHeadersOnly where codeBlocks
     //      live in individual bubbleId DB rows, not inline in composerData)
-    //   4. Fallback to cursor://workspace-<hash8> so sessions stay distinct per-workspace
+    //   5. Fallback to cursor://workspace-<hash8> so sessions stay distinct per-workspace
     const wsDir = path.dirname(dbPath); // workspaceStorage/<hash>/ or globalStorage/
     const workspaceHash = path.basename(wsDir); // the hash directory name (or "globalStorage")
     const projectPath =
+      workspaceProjectPath ||
       resolveWorkspacePath(wsDir) ||
       extractProjectPathFromComposerData(composerData) ||
       extractProjectPathFromBubbles(rawBubbles) ||
@@ -481,11 +546,14 @@ function parseCursorSession(dbPath: string, composerId: string): ParsedSession |
     const createdAt = composerData.createdAt as number | undefined;
     const lastUpdatedAt = (composerData.lastUpdatedAt || composerData.updatedAt) as number | undefined;
 
-    if (createdAt && timestamps.length === 0) {
-      startedAt = new Date(createdAt);
-    }
-    if (lastUpdatedAt && lastUpdatedAt > startedAt.getTime()) {
-      endedAt = new Date(lastUpdatedAt);
+    if (timestamps.length === 0) {
+      if (createdAt) {
+        startedAt = new Date(createdAt);
+        endedAt = new Date(createdAt);
+      }
+      if (lastUpdatedAt && lastUpdatedAt > endedAt.getTime()) {
+        endedAt = new Date(lastUpdatedAt);
+      }
     }
 
     const userMessages = messages.filter(m => m.type === 'user');
@@ -584,8 +652,9 @@ function parseCursorSession(dbPath: string, composerId: string): ParsedSession |
     session.sessionCharacter = detectedCharacter ?? (isAgentic ? 'feature_build' : null);
 
     return session;
-  } catch {
-    return null;
+  } catch (error) {
+    if (error instanceof Error) throw error;
+    throw new Error(`Failed to parse Cursor session ${composerId}`);
   } finally {
     db?.close();
   }
@@ -618,6 +687,25 @@ function findMessageArray(composerData: Record<string, unknown>): [Array<Record<
   return [[], null];
 }
 
+function dedupeExactBubbles(
+  bubbles: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const seen = new Map<string, string>();
+  return bubbles.filter(bubble => {
+    if (typeof bubble.bubbleId !== 'string' || bubble.bubbleId.length === 0) {
+      return true;
+    }
+    const payload = JSON.stringify(bubble);
+    const previous = seen.get(bubble.bubbleId);
+    if (previous === payload) return false;
+    if (previous !== undefined) {
+      throw new Error(`Conflicting Cursor bubble ID in one session: ${bubble.bubbleId}`);
+    }
+    seen.set(bubble.bubbleId, payload);
+    return true;
+  });
+}
+
 /**
  * Extract parsed messages from Cursor composer data.
  *
@@ -638,11 +726,11 @@ function extractMessages(
   // Strategy 1: Try fullConversationHeadersOnly (newer Cursor format, ~72% of sessions)
   const headers = composerData.fullConversationHeadersOnly;
   if (Array.isArray(headers) && headers.length > 0 && db) {
-    const rawBubbles = loadBubblesFromHeaders(
+    const rawBubbles = dedupeExactBubbles(loadBubblesFromHeaders(
       headers as Array<{ bubbleId: string; type: number }>,
       sessionId,
       db,
-    );
+    ));
     if (rawBubbles.length > 0) {
       return [parseBubbles(rawBubbles, sessionId), rawBubbles];
     }
@@ -650,7 +738,8 @@ function extractMessages(
   }
 
   // Strategy 2: Try inline message arrays (older Cursor format)
-  const [rawBubbles, keyUsed] = findMessageArray(composerData);
+  const [storedBubbles, keyUsed] = findMessageArray(composerData);
+  const rawBubbles = dedupeExactBubbles(storedBubbles);
 
   if (rawBubbles.length === 0) {
     // No messages found — log top-level keys to help diagnose future Cursor format changes.
@@ -697,15 +786,19 @@ function loadBubblesFromHeaders(
   const stmt = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?");
 
   for (const header of headers) {
-    if (!header.bubbleId) continue;
+    if (!header.bubbleId) {
+      throw new Error('Cursor conversation header is missing a bubble ID');
+    }
     try {
       const row = stmt.get(`bubbleId:${composerId}:${header.bubbleId}`) as { value: string } | undefined;
-      if (row?.value) {
-        const bubble = JSON.parse(row.value) as Record<string, unknown>;
-        bubbles.push(bubble);
+      if (!row?.value) {
+        throw new Error(`Cursor bubble is missing from a headers-only snapshot: ${header.bubbleId}`);
       }
-    } catch {
-      // Individual bubble parse failure — skip it, keep loading others
+      const bubble = JSON.parse(row.value) as Record<string, unknown>;
+      bubbles.push(bubble);
+    } catch (error) {
+      if (error instanceof Error && /Cursor bubble/.test(error.message)) throw error;
+      throw new Error(`Failed to load Cursor bubble ${header.bubbleId}`);
     }
   }
 
@@ -769,15 +862,18 @@ function parseBubbles(conversation: Array<Record<string, unknown>>, sessionId: s
     // Truncate to 10,000 chars (same as Claude Code parser)
     const truncatedContent = content.length > 10000 ? content.slice(0, 10000) : content;
 
-    // Extract timestamp (milliseconds).
-    // Cursor does not store a createdAt field on bubbles. Real wall-clock time lives
-    // in assistant bubbles under timingInfo.clientRpcSendTime (Unix ms). User bubbles
-    // have no timestamp — leave as epoch so session bounds code filters them out.
+    // Current Cursor storage exposes an ISO createdAt timestamp on both user and
+    // assistant bubbles. Older formats may only expose assistant wall-clock time
+    // under timingInfo.clientRpcSendTime (Unix ms).
     // NOTE: clientStartTime is a performance offset (e.g. 926228.7 ms), NOT a wall clock.
     let timestamp: Date;
+    const createdAt = bubble.createdAt;
+    const createdAtMs = typeof createdAt === 'string' ? Date.parse(createdAt) : Number.NaN;
     const timingInfo = bubble.timingInfo as Record<string, unknown> | undefined;
     const clientRpcSendTime = timingInfo?.clientRpcSendTime;
-    if (typeof clientRpcSendTime === 'number' && clientRpcSendTime > 1_000_000_000_000) {
+    if (Number.isFinite(createdAtMs)) {
+      timestamp = new Date(createdAtMs);
+    } else if (typeof clientRpcSendTime === 'number' && clientRpcSendTime > 1_000_000_000_000) {
       // Sanity-check: must be after 2001-09-09 (Unix ms > 1e12) to be a wall clock
       timestamp = new Date(clientRpcSendTime);
     } else {

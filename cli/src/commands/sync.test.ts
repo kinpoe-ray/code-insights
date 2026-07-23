@@ -7,14 +7,18 @@ import { makeParsedMessage, makeParsedSession } from '../__fixtures__/db/seed.js
 let syncState: {
   lastSync: string;
   files: Record<string, any>;
-  migrations?: { codexScopedMessageIds?: boolean };
+  migrations?: {
+    codexScopedMessageIds?: boolean;
+    copilotScopedMessageIds?: boolean;
+  };
   databaseIdentity?: string;
 } = { lastSync: '', files: {} };
 let currentDbIdentity = '/mock/data.db#database-a';
 let currentDbPath = '/mock/data.db';
 const advanceDbSyncIdentity = vi.fn(() => currentDbIdentity);
+const dbRun = vi.fn();
 const getDb = vi.fn(() => ({
-  prepare: vi.fn(() => ({ run: vi.fn() })),
+  prepare: vi.fn(() => ({ run: dbRun })),
 }));
 const getDbIdentity = vi.fn(() => currentDbIdentity);
 const getMigrationResult = vi.fn(() => ({ v6Applied: false }));
@@ -44,11 +48,18 @@ vi.mock('../utils/ollama-detect.js', () => ({
 
 const insertSessionWithProjectAndReturnIsNew = vi.fn();
 const insertMessages = vi.fn();
+const replaceSessionSnapshot = vi.fn();
 const recalculateUsageStats = vi.fn(() => ({ sessionsWithUsage: 0, totalTokens: 0, estimatedCostUsd: 0 }));
 vi.mock('../db/write.js', () => ({
   insertSessionWithProjectAndReturnIsNew,
   insertMessages,
+  replaceSessionSnapshot,
   recalculateUsageStats,
+}));
+
+const sessionExists = vi.fn();
+vi.mock('../db/read.js', () => ({
+  sessionExists,
 }));
 
 const invalidateAnalysisUsage = vi.fn();
@@ -85,6 +96,7 @@ describe('runSync', () => {
     currentDbIdentity = '/mock/data.db#database-a';
     currentDbPath = path.join(tempDir, 'data.db');
     getDb.mockClear();
+    dbRun.mockClear();
     getDbIdentity.mockClear();
     getMigrationResult.mockClear();
     advanceDbSyncIdentity.mockReset();
@@ -93,6 +105,14 @@ describe('runSync', () => {
     saveSyncState.mockClear();
     insertSessionWithProjectAndReturnIsNew.mockReset();
     insertMessages.mockReset();
+    replaceSessionSnapshot.mockReset();
+    replaceSessionSnapshot.mockImplementation((session, isForce) => {
+      const isNew = insertSessionWithProjectAndReturnIsNew(session, isForce);
+      insertMessages(session, true);
+      return { isNew, snapshotChanged: false };
+    });
+    sessionExists.mockReset();
+    sessionExists.mockReturnValue(false);
     recalculateUsageStats.mockClear();
     invalidateAnalysisUsage.mockReset();
     getAllProviders.mockReset();
@@ -148,6 +168,149 @@ describe('runSync', () => {
     expect(recalculateUsageStats).toHaveBeenCalledTimes(1);
   });
 
+  it('resurrects only sessions successfully processed by a force sync', async () => {
+    const goodPath = path.join(tempDir, 'good.jsonl');
+    const badPath = path.join(tempDir, 'bad.jsonl');
+    fs.writeFileSync(goodPath, '{}');
+    fs.writeFileSync(badPath, '{}');
+    const session = makeParsedSession({
+      id: 'cursor:good',
+      sourceTool: 'cursor',
+      messageCount: 3,
+      messages: [
+        makeParsedMessage({ id: 'good-1', sessionId: 'cursor:good' }),
+        makeParsedMessage({ id: 'good-2', sessionId: 'cursor:good', type: 'assistant' }),
+        makeParsedMessage({ id: 'good-3', sessionId: 'cursor:good' }),
+      ],
+    });
+
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [goodPath, badPath],
+      parse: async (filePath: string) => {
+        if (filePath === badPath) throw new Error('simulated parse failure');
+        return session;
+      },
+    }]);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValue(false);
+
+    const result = await runSync({ quiet: true, force: true });
+
+    expect(result.errorCount).toBe(1);
+    expect(result.updatedExistingCount).toBe(1);
+    expect(dbRun).toHaveBeenCalledWith('cursor:good');
+    expect(dbRun).not.toHaveBeenCalledWith('cursor:bad');
+    expect(dbRun).not.toHaveBeenCalledWith();
+  });
+
+  it('keeps a Claude force-sync checkpoint pending when its atomic snapshot replacement fails', async () => {
+    const filePath = path.join(tempDir, 'claude-collision.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    syncState.files[filePath] = {
+      lastModified: new Date(0).toISOString(),
+      lastSyncedLine: 0,
+      sessionId: 'claude-collision',
+    };
+    const session = makeParsedSession({
+      id: 'claude-collision',
+      sourceTool: 'claude-code',
+      messageCount: 3,
+      userMessageCount: 2,
+      assistantMessageCount: 1,
+      messages: [
+        makeParsedMessage({ id: 'claude-user-1', sessionId: 'claude-collision' }),
+        makeParsedMessage({
+          id: 'message-owned-by-another-session',
+          sessionId: 'claude-collision',
+          type: 'assistant',
+        }),
+        makeParsedMessage({ id: 'claude-user-2', sessionId: 'claude-collision' }),
+      ],
+    });
+
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'claude-code',
+      discover: async () => [filePath],
+      parse: async () => session,
+    }]);
+    replaceSessionSnapshot.mockImplementation(() => {
+      throw new Error('message ID collision');
+    });
+
+    const result = await runSync({ quiet: true, force: true });
+
+    expect(result.errorCount).toBe(1);
+    expect(result.syncedCount).toBe(0);
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, true);
+    expect(insertSessionWithProjectAndReturnIsNew).not.toHaveBeenCalled();
+    expect(insertMessages).not.toHaveBeenCalled();
+    expect(syncState.files[filePath]).toBeUndefined();
+    expect(dbRun).not.toHaveBeenCalledWith('claude-collision');
+  });
+
+  it('preserves an existing forced Claude session when parsing returns null', async () => {
+    const filePath = path.join(tempDir, 'claude-temporarily-empty.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    syncState.files[filePath] = {
+      lastModified: new Date(0).toISOString(),
+      lastSyncedLine: 0,
+      sessionId: 'claude-existing',
+    };
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'claude-code',
+      discover: async () => [filePath],
+      parse: async () => null,
+    }]);
+    sessionExists.mockImplementation(sessionId => sessionId === 'claude-existing');
+
+    const result = await runSync({ quiet: true, force: true });
+
+    expect(result.errorCount).toBe(1);
+    expect(result.syncedCount).toBe(0);
+    expect(sessionExists).toHaveBeenCalledWith('claude-existing');
+    expect(replaceSessionSnapshot).not.toHaveBeenCalled();
+    expect(insertSessionWithProjectAndReturnIsNew).not.toHaveBeenCalled();
+    expect(insertMessages).not.toHaveBeenCalled();
+    expect(syncState.files[filePath]).toBeUndefined();
+    expect(dbRun).not.toHaveBeenCalledWith('claude-existing');
+  });
+
+  it('restores a stored trivial Claude session during a force sync', async () => {
+    const filePath = path.join(tempDir, 'trivial.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const session = makeParsedSession({
+      id: 'claude-trivial',
+      sourceTool: 'claude-code',
+      messageCount: 2,
+      userMessageCount: 1,
+      assistantMessageCount: 1,
+      messages: [
+        makeParsedMessage({ id: 'trivial-1', sessionId: 'claude-trivial' }),
+        makeParsedMessage({
+          id: 'trivial-2',
+          sessionId: 'claude-trivial',
+          type: 'assistant',
+        }),
+      ],
+    });
+
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'claude-code',
+      discover: async () => [filePath],
+      parse: async () => session,
+    }]);
+    sessionExists.mockReturnValue(true);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValue(false);
+
+    const result = await runSync({ quiet: true, force: true });
+
+    expect(result.errorCount).toBe(0);
+    expect(result.syncedCount).toBe(1);
+    expect(result.updatedExistingCount).toBe(1);
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, true);
+    expect(dbRun).toHaveBeenCalledWith('claude-trivial');
+  });
+
   it('re-syncs virtual paths when the backing DB file changes', async () => {
     const dbPath = path.join(tempDir, 'state.vscdb');
     fs.writeFileSync(dbPath, 'db');
@@ -192,7 +355,275 @@ describe('runSync', () => {
     expect(recalculateUsageStats).toHaveBeenCalledTimes(1);
   });
 
-  it('does not recalculate usage stats for purely new sessions', async () => {
+  it('re-syncs Cursor virtual paths when only the SQLite WAL changes', async () => {
+    const dbPath = path.join(tempDir, 'state-wal.vscdb');
+    const walPath = `${dbPath}-wal`;
+    fs.writeFileSync(dbPath, 'db');
+    fs.writeFileSync(walPath, 'wal-1');
+    const virtualPath = `${dbPath}#composer-wal`;
+    const session = makeParsedSession({
+      id: 'cursor:composer-wal',
+      sourceTool: 'cursor',
+      messageCount: 3,
+      userMessageCount: 2,
+      assistantMessageCount: 1,
+      messages: [
+        makeParsedMessage({ id: 'wal-1', sessionId: 'cursor:composer-wal' }),
+        makeParsedMessage({ id: 'wal-2', sessionId: 'cursor:composer-wal', type: 'assistant' }),
+        makeParsedMessage({ id: 'wal-3', sessionId: 'cursor:composer-wal' }),
+      ],
+    });
+    const parse = vi.fn(async () => session);
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [virtualPath],
+      parse,
+    }]);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValueOnce(true).mockReturnValue(false);
+
+    await runSync({ quiet: true });
+    fs.writeFileSync(walPath, 'wal-2-with-a-different-size');
+    await runSync({ quiet: true });
+
+    expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it('re-syncs only the virtual session whose provider fingerprint changes', async () => {
+    const dbPath = path.join(tempDir, 'state-attribution.vscdb');
+    fs.writeFileSync(dbPath, 'db');
+    const firstPath = `${dbPath}#composer-a`;
+    const secondPath = `${dbPath}#composer-b`;
+    const globalOnlyPath = `${dbPath}#composer-global-only`;
+    const fingerprints = new Map([
+      [firstPath, 'workspace-a:/projects/first'],
+      [secondPath, 'workspace-b:/projects/second'],
+      [globalOnlyPath, null],
+    ]);
+    const sessions = new Map([
+      [firstPath, makeParsedSession({
+        id: 'cursor:composer-a',
+        sourceTool: 'cursor',
+        messageCount: 3,
+        messages: [
+          makeParsedMessage({ id: 'a-1', sessionId: 'cursor:composer-a' }),
+          makeParsedMessage({ id: 'a-2', sessionId: 'cursor:composer-a', type: 'assistant' }),
+          makeParsedMessage({ id: 'a-3', sessionId: 'cursor:composer-a' }),
+        ],
+      })],
+      [secondPath, makeParsedSession({
+        id: 'cursor:composer-b',
+        sourceTool: 'cursor',
+        messageCount: 3,
+        messages: [
+          makeParsedMessage({ id: 'b-1', sessionId: 'cursor:composer-b' }),
+          makeParsedMessage({ id: 'b-2', sessionId: 'cursor:composer-b', type: 'assistant' }),
+          makeParsedMessage({ id: 'b-3', sessionId: 'cursor:composer-b' }),
+        ],
+      })],
+      [globalOnlyPath, makeParsedSession({
+        id: 'cursor:composer-global-only',
+        sourceTool: 'cursor',
+        messageCount: 3,
+        messages: [
+          makeParsedMessage({ id: 'g-1', sessionId: 'cursor:composer-global-only' }),
+          makeParsedMessage({ id: 'g-2', sessionId: 'cursor:composer-global-only', type: 'assistant' }),
+          makeParsedMessage({ id: 'g-3', sessionId: 'cursor:composer-global-only' }),
+        ],
+      })],
+    ]);
+    const parse = vi.fn(async (filePath: string) => sessions.get(filePath)!);
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [firstPath, secondPath, globalOnlyPath],
+      getSourceFingerprint: (filePath: string) => fingerprints.get(filePath)!,
+      parse,
+    }]);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValue(true);
+
+    await runSync({ quiet: true });
+    parse.mockClear();
+    delete syncState.files[dbPath].virtualSourceFingerprints['composer-global-only'];
+    fingerprints.set(firstPath, 'workspace-a:/projects/renamed-first');
+    await runSync({ quiet: true });
+
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith(firstPath);
+
+    parse.mockClear();
+    fingerprints.set(secondPath, null);
+    await runSync({ quiet: true });
+    expect(parse).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledWith(secondPath);
+
+    parse.mockClear();
+    await runSync({ quiet: true });
+    expect(parse).not.toHaveBeenCalled();
+  });
+
+  it('rebuilds virtual-session checkpoints after a changed DB is only partly processed', async () => {
+    const dbPath = path.join(tempDir, 'state-partial.vscdb');
+    fs.writeFileSync(dbPath, 'changed-db');
+    const firstPath = `${dbPath}#composer-a`;
+    const secondPath = `${dbPath}#composer-b`;
+    syncState.files[dbPath] = {
+      lastModified: new Date(0).toISOString(),
+      lastSyncedLine: 0,
+      sessionId: 'cursor:composer-b',
+      syncedSessionIds: ['composer-a', 'composer-b'],
+    };
+    const first = makeParsedSession({
+      id: 'cursor:composer-a',
+      sourceTool: 'cursor',
+      messages: [
+        makeParsedMessage({ id: 'a-1', sessionId: 'cursor:composer-a' }),
+        makeParsedMessage({ id: 'a-2', sessionId: 'cursor:composer-a', type: 'assistant' }),
+        makeParsedMessage({ id: 'a-3', sessionId: 'cursor:composer-a' }),
+      ],
+      messageCount: 3,
+    });
+    const second = makeParsedSession({
+      id: 'cursor:composer-b',
+      sourceTool: 'cursor',
+      messages: [
+        makeParsedMessage({ id: 'b-1', sessionId: 'cursor:composer-b' }),
+        makeParsedMessage({ id: 'b-2', sessionId: 'cursor:composer-b', type: 'assistant' }),
+        makeParsedMessage({ id: 'b-3', sessionId: 'cursor:composer-b' }),
+      ],
+      messageCount: 3,
+    });
+    let secondAttempt = 0;
+    const parse = vi.fn(async (filePath: string) => {
+      if (filePath === firstPath) return first;
+      secondAttempt++;
+      if (secondAttempt === 1) throw new Error('transient parse failure');
+      return second;
+    });
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [firstPath, secondPath],
+      parse,
+    }]);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValue(true);
+
+    const firstRun = await runSync({ quiet: true });
+    expect(firstRun.errorCount).toBe(1);
+    expect(syncState.files[dbPath].syncedSessionIds).toEqual(['composer-a']);
+
+    const secondRun = await runSync({ quiet: true });
+    expect(secondRun.errorCount).toBe(0);
+    expect(parse).toHaveBeenCalledWith(secondPath);
+    expect(syncState.files[dbPath].syncedSessionIds).toEqual(['composer-a', 'composer-b']);
+  });
+
+  it('replaces a complete Cursor message snapshot when the source deletes one of four messages', async () => {
+    const dbPath = path.join(tempDir, 'state-updated.vscdb');
+    fs.writeFileSync(dbPath, 'db');
+    const virtualPath = `${dbPath}#composer-2`;
+
+    syncState.files[dbPath] = {
+      lastModified: new Date(0).toISOString(),
+      lastSyncedLine: 0,
+      sessionId: 'cursor:composer-2',
+      syncedSessionIds: ['composer-2'],
+    };
+
+    const originalMessages = [
+      makeParsedMessage({ id: 'cursor:composer-2:user:1', sessionId: 'cursor:composer-2' }),
+      makeParsedMessage({
+        id: 'cursor:composer-2:assistant:stale',
+        sessionId: 'cursor:composer-2',
+        type: 'assistant',
+      }),
+      makeParsedMessage({ id: 'cursor:composer-2:user:2', sessionId: 'cursor:composer-2' }),
+      makeParsedMessage({
+        id: 'cursor:composer-2:assistant:2',
+        sessionId: 'cursor:composer-2',
+        type: 'assistant',
+      }),
+    ];
+    const replacementMessages = originalMessages.filter(
+      message => message.id !== 'cursor:composer-2:assistant:stale',
+    );
+    const session = makeParsedSession({
+      id: 'cursor:composer-2',
+      sourceTool: 'cursor',
+      messageCount: replacementMessages.length,
+      userMessageCount: 2,
+      assistantMessageCount: 1,
+      messages: replacementMessages,
+    });
+
+    getAllProviders.mockReturnValue([
+      {
+        getProviderName: () => 'cursor',
+        discover: async () => [virtualPath],
+        parse: async () => session,
+      },
+    ]);
+    insertSessionWithProjectAndReturnIsNew.mockReturnValue(false);
+
+    await runSync({ quiet: true });
+
+    expect(insertMessages).toHaveBeenCalledWith(session, true);
+  });
+
+  it('replaces and invalidates an existing Cursor snapshot that shrinks to two messages', async () => {
+    const dbPath = path.join(tempDir, 'state-shortened.vscdb');
+    fs.writeFileSync(dbPath, 'db');
+    const virtualPath = `${dbPath}#composer-shortened`;
+    const session = makeParsedSession({
+      id: 'cursor:composer-shortened',
+      sourceTool: 'cursor',
+      messageCount: 2,
+      userMessageCount: 1,
+      assistantMessageCount: 1,
+      messages: [
+        makeParsedMessage({ id: 'short-1', sessionId: 'cursor:composer-shortened' }),
+        makeParsedMessage({
+          id: 'short-2',
+          sessionId: 'cursor:composer-shortened',
+          type: 'assistant',
+        }),
+      ],
+    });
+
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [virtualPath],
+      parse: async () => session,
+    }]);
+    sessionExists.mockReturnValue(true);
+    replaceSessionSnapshot.mockReturnValue({ isNew: false, snapshotChanged: true });
+
+    await runSync({ quiet: true });
+
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, false);
+    expect(invalidateAnalysisUsage).toHaveBeenCalledWith(session.id);
+  });
+
+  it('does not checkpoint a null parse over a previously stored session', async () => {
+    const filePath = path.join(tempDir, 'temporarily-empty.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const previousModified = new Date(0).toISOString();
+    syncState.files[filePath] = {
+      lastModified: previousModified,
+      lastSyncedLine: 0,
+      sessionId: 'session-existing',
+    };
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'cursor',
+      discover: async () => [filePath],
+      parse: async () => null,
+    }]);
+    sessionExists.mockImplementation(sessionId => sessionId === 'session-existing');
+
+    await runSync({ quiet: true });
+
+    expect(replaceSessionSnapshot).not.toHaveBeenCalled();
+    expect(syncState.files[filePath].lastModified).toBe(previousModified);
+  });
+
+  it('reconciles usage stats after importing a purely new session', async () => {
     const filePath = path.join(tempDir, 'new-session.jsonl');
     fs.writeFileSync(filePath, '{}');
 
@@ -221,7 +652,31 @@ describe('runSync', () => {
     await runSync({ quiet: true });
 
     expect(insertSessionWithProjectAndReturnIsNew).toHaveBeenCalledTimes(1);
-    expect(recalculateUsageStats).not.toHaveBeenCalled();
+    expect(recalculateUsageStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles usage stats on an up-to-date run after a prior interrupted sync', async () => {
+    const filePath = path.join(tempDir, 'already-synced.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const stat = fs.statSync(filePath);
+    syncState.files[filePath] = {
+      lastModified: stat.mtime.toISOString(),
+      fileSize: stat.size,
+      lastSyncedLine: 0,
+      sessionId: 'session-existing',
+    };
+    const parse = vi.fn();
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'mock',
+      discover: async () => [filePath],
+      parse,
+    }]);
+
+    const result = await runSync({ quiet: true });
+
+    expect(result.syncedCount).toBe(0);
+    expect(parse).not.toHaveBeenCalled();
+    expect(recalculateUsageStats).toHaveBeenCalledTimes(1);
   });
 
   it('skips sessions with 2 or fewer messages', async () => {
@@ -323,6 +778,202 @@ describe('runSync', () => {
     expect(insertMessages).toHaveBeenCalledWith(session, true);
     expect(invalidateAnalysisUsage).toHaveBeenCalledWith('codex:legacy-session');
     expect(syncState.migrations?.codexScopedMessageIds).toBe(true);
+  });
+
+  it('replaces four legacy Copilot rows with a three-message scoped snapshot', async () => {
+    const filePath = path.join(tempDir, 'events.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const stat = fs.statSync(filePath);
+    syncState.files[filePath] = {
+      lastModified: stat.mtime.toISOString(),
+      fileSize: stat.size,
+      lastSyncedLine: 0,
+      sessionId: 'copilot:legacy-session',
+    };
+    let storedMessageIds = [
+      'shared-user-id',
+      'copilot-assistant-1',
+      'shared-user-id-copy',
+      'stale-duplicate',
+    ];
+    const session = makeParsedSession({
+      id: 'copilot:legacy-session',
+      sourceTool: 'copilot-cli',
+      messageCount: 3,
+      userMessageCount: 2,
+      assistantMessageCount: 1,
+      messages: [
+        makeParsedMessage({
+          id: 'copilot:legacy-session:user:source:shared-user-id',
+          sessionId: 'copilot:legacy-session',
+        }),
+        makeParsedMessage({
+          id: 'copilot:legacy-session:assistant:generated:1',
+          sessionId: 'copilot:legacy-session',
+          type: 'assistant',
+        }),
+        makeParsedMessage({
+          id: 'copilot:legacy-session:user:generated:2',
+          sessionId: 'copilot:legacy-session',
+        }),
+      ],
+    });
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'copilot-cli',
+      discover: async () => [filePath],
+      parse: async () => session,
+    }]);
+    replaceSessionSnapshot.mockImplementation(incoming => {
+      storedMessageIds = incoming.messages.map(message => message.id);
+      return { isNew: false, snapshotChanged: true };
+    });
+
+    const result = await runSync({ quiet: true });
+
+    expect(result.errorCount).toBe(0);
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, false);
+    expect(insertMessages).not.toHaveBeenCalled();
+    expect(storedMessageIds).toEqual(session.messages.map(message => message.id));
+    expect(storedMessageIds).toHaveLength(3);
+    expect(invalidateAnalysisUsage).toHaveBeenCalledWith(session.id);
+    expect(syncState.migrations?.copilotScopedMessageIds).toBe(true);
+  });
+
+  it('does not complete the Copilot scoped-ID migration when a transcript errors', async () => {
+    const filePath = path.join(tempDir, 'broken-events.jsonl');
+    fs.writeFileSync(filePath, '{"type":');
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'copilot-cli',
+      discover: async () => [filePath],
+      parse: async () => { throw new Error('malformed Copilot event'); },
+    }]);
+
+    const result = await runSync({ quiet: true });
+
+    expect(result.errorCount).toBe(1);
+    expect(replaceSessionSnapshot).not.toHaveBeenCalled();
+    expect(syncState.migrations?.copilotScopedMessageIds).not.toBe(true);
+  });
+
+  it('keeps the Copilot migration pending after incomplete discovery and completes it on retry', async () => {
+    const filePath = path.join(tempDir, 'recovered-events.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const session = makeParsedSession({
+      id: 'copilot:recovered-session',
+      sourceTool: 'copilot-cli',
+      messageCount: 3,
+      messages: [
+        makeParsedMessage({
+          id: 'copilot:recovered-session:user:generated:0',
+          sessionId: 'copilot:recovered-session',
+        }),
+        makeParsedMessage({
+          id: 'copilot:recovered-session:assistant:generated:1',
+          sessionId: 'copilot:recovered-session',
+          type: 'assistant',
+        }),
+        makeParsedMessage({
+          id: 'copilot:recovered-session:user:generated:2',
+          sessionId: 'copilot:recovered-session',
+        }),
+      ],
+    });
+    const discover = vi.fn()
+      .mockRejectedValueOnce(new Error('incomplete Copilot discovery'))
+      .mockResolvedValue([filePath]);
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'copilot-cli',
+      discover,
+      parse: async () => session,
+    }]);
+    replaceSessionSnapshot.mockReturnValue({ isNew: false, snapshotChanged: true });
+
+    const failedResult = await runSync({ quiet: true });
+
+    expect(failedResult.errorCount).toBe(1);
+    expect(replaceSessionSnapshot).not.toHaveBeenCalled();
+    expect(syncState.migrations?.copilotScopedMessageIds).not.toBe(true);
+
+    const recoveredResult = await runSync({ quiet: true });
+
+    expect(recoveredResult.errorCount).toBe(0);
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, false);
+    expect(syncState.migrations?.copilotScopedMessageIds).toBe(true);
+  });
+
+  it('invalidates analysis during the Copilot migration even when the snapshot is unchanged', async () => {
+    const filePath = path.join(tempDir, 'unchanged-events.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const session = makeParsedSession({
+      id: 'copilot:unchanged-session',
+      sourceTool: 'copilot-cli',
+      messageCount: 3,
+      messages: [
+        makeParsedMessage({
+          id: 'copilot:unchanged-session:user:generated:0',
+          sessionId: 'copilot:unchanged-session',
+        }),
+        makeParsedMessage({
+          id: 'copilot:unchanged-session:assistant:generated:1',
+          sessionId: 'copilot:unchanged-session',
+          type: 'assistant',
+        }),
+        makeParsedMessage({
+          id: 'copilot:unchanged-session:user:generated:2',
+          sessionId: 'copilot:unchanged-session',
+        }),
+      ],
+    });
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'copilot-cli',
+      discover: async () => [filePath],
+      parse: async () => session,
+    }]);
+    replaceSessionSnapshot.mockReturnValue({ isNew: false, snapshotChanged: false });
+
+    await runSync({ quiet: true });
+
+    expect(invalidateAnalysisUsage).toHaveBeenCalledWith(session.id);
+    expect(syncState.migrations?.copilotScopedMessageIds).toBe(true);
+  });
+
+  it('does not complete the global Copilot migration from a project-filtered sync', async () => {
+    const filePath = path.join(tempDir, 'project-events.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    const session = makeParsedSession({
+      id: 'copilot:project-session',
+      sourceTool: 'copilot-cli',
+      messageCount: 3,
+      messages: [
+        makeParsedMessage({
+          id: 'copilot:project-session:user:generated:0',
+          sessionId: 'copilot:project-session',
+        }),
+        makeParsedMessage({
+          id: 'copilot:project-session:assistant:generated:1',
+          sessionId: 'copilot:project-session',
+          type: 'assistant',
+        }),
+        makeParsedMessage({
+          id: 'copilot:project-session:user:generated:2',
+          sessionId: 'copilot:project-session',
+        }),
+      ],
+    });
+    const discover = vi.fn(async () => [filePath]);
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'copilot-cli',
+      discover,
+      parse: async () => session,
+    }]);
+    replaceSessionSnapshot.mockReturnValue({ isNew: false, snapshotChanged: true });
+
+    await runSync({ quiet: true, project: 'only-this-project' });
+
+    expect(discover).toHaveBeenCalledWith({ projectFilter: 'only-this-project' });
+    expect(replaceSessionSnapshot).toHaveBeenCalledWith(session, false);
+    expect(invalidateAnalysisUsage).toHaveBeenCalledWith(session.id);
+    expect(syncState.migrations?.copilotScopedMessageIds).not.toBe(true);
   });
 
   it('does not complete the global Codex migration from a project-filtered sync', async () => {
@@ -629,6 +1280,46 @@ describe('runSync', () => {
     expect(syncState.migrations?.codexScopedMessageIds).not.toBe(true);
   });
 
+  it('does not write or checkpoint a forced Claude transcript that keeps changing', async () => {
+    const filePath = path.join(tempDir, 'claude-still-growing.jsonl');
+    fs.writeFileSync(filePath, 'initial');
+    const session = makeParsedSession({
+      id: 'claude-still-growing',
+      sourceTool: 'claude-code',
+      messageCount: 3,
+      messages: [
+        makeParsedMessage({ id: 'claude-growing-user-0', sessionId: 'claude-still-growing' }),
+        makeParsedMessage({
+          id: 'claude-growing-assistant-1',
+          sessionId: 'claude-still-growing',
+          type: 'assistant',
+        }),
+        makeParsedMessage({ id: 'claude-growing-user-2', sessionId: 'claude-still-growing' }),
+      ],
+    });
+    let parseAttempts = 0;
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'claude-code',
+      discover: async () => [filePath],
+      parse: async () => {
+        parseAttempts++;
+        fs.appendFileSync(filePath, `-${parseAttempts}`);
+        return session;
+      },
+    }]);
+
+    const result = await runSync({ quiet: true, force: true });
+
+    expect(parseAttempts).toBe(2);
+    expect(result.errorCount).toBe(1);
+    expect(result.syncedCount).toBe(0);
+    expect(replaceSessionSnapshot).not.toHaveBeenCalled();
+    expect(insertSessionWithProjectAndReturnIsNew).not.toHaveBeenCalled();
+    expect(insertMessages).not.toHaveBeenCalled();
+    expect(syncState.files[filePath]).toBeUndefined();
+    expect(dbRun).not.toHaveBeenCalledWith('claude-still-growing');
+  });
+
   it('checkpoints the parsed Codex snapshot rather than a later file mtime', async () => {
     const filePath = path.join(tempDir, 'rollout-after-parse.jsonl');
     fs.writeFileSync(filePath, 'stable-snapshot');
@@ -672,6 +1363,27 @@ describe('runSync', () => {
       discover: async () => [filePath],
       parse: async () => { throw new Error('broken transcript'); },
     }]);
+
+    const result = await runSync({ quiet: true });
+
+    expect(result.errorCount).toBe(1);
+    expect(syncState.migrations?.codexScopedMessageIds).not.toBe(true);
+  });
+
+  it('does not complete the Codex ID migration when a stored transcript parses as null', async () => {
+    const filePath = path.join(tempDir, 'rollout-null.jsonl');
+    fs.writeFileSync(filePath, '{}');
+    syncState.files[filePath] = {
+      lastModified: new Date(0).toISOString(),
+      lastSyncedLine: 0,
+      sessionId: 'codex:stored-null',
+    };
+    getAllProviders.mockReturnValue([{
+      getProviderName: () => 'codex-cli',
+      discover: async () => [filePath],
+      parse: async () => null,
+    }]);
+    sessionExists.mockImplementation(sessionId => sessionId === 'codex:stored-null');
 
     const result = await runSync({ quiet: true });
 

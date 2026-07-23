@@ -17,6 +17,7 @@ import {
 } from './analysis-db.js';
 import { buildSessionMeta, type AnalysisOptions, type AnalysisResult } from './analysis-internal.js';
 import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
+import { sanitizePromptQualityMessageReferences } from '@code-insights/cli/analysis/message-references';
 
 /**
  * Analyze prompt quality for a session.
@@ -111,7 +112,8 @@ export async function analyzePromptQuality(
     }
 
     options?.onProgress?.({ phase: 'saving' });
-    const insight = convertPromptQualityToInsightRow(parsed.data, session);
+    const sanitizedResponse = sanitizePromptQualityMessageReferences(parsed.data, messages);
+    const insight = convertPromptQualityToInsightRow(sanitizedResponse, session);
 
     // Save new insight, then delete old prompt_quality insights
     saveInsightsToDb([insight]);

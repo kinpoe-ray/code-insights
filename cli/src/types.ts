@@ -378,6 +378,8 @@ export interface SyncState {
   migrations?: {
     /** All Codex transcripts were re-synced after message IDs became session-scoped. */
     codexScopedMessageIds?: boolean;
+    /** All Copilot CLI transcripts were re-synced after every ID became session-scoped. */
+    copilotScopedMessageIds?: boolean;
   };
 }
 
@@ -385,9 +387,13 @@ export interface FileSyncState {
   lastModified: string;
   /** Byte size of the parsed snapshot; catches same-timestamp appends. */
   fileSize?: number;
+  /** Main file plus relevant sidecars (for example SQLite WAL) at parse time. */
+  fileSignature?: string;
   lastSyncedLine: number;
   sessionId: string;
   syncedSessionIds?: string[];  // For providers where 1 file = N sessions (e.g., Cursor SQLite)
+  /** Provider-owned inputs keyed by virtual session fragment. */
+  virtualSourceFingerprints?: Record<string, string>;
 }
 
 // ── Dispatch feature (blog post generator) ───────────────────────────────────

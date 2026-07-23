@@ -37,9 +37,14 @@ vi.mock('../../utils/config.js', () => ({
 
 const mockInsertSession = vi.fn(() => true);
 const mockInsertMessages = vi.fn();
+const mockReplaceSessionSnapshot = vi.fn(() => ({
+  isNew: true,
+  snapshotChanged: true,
+}));
 vi.mock('../../db/write.js', () => ({
   insertSessionWithProjectAndReturnIsNew: mockInsertSession,
   insertMessages: mockInsertMessages,
+  replaceSessionSnapshot: mockReplaceSessionSnapshot,
   recalculateUsageStats: vi.fn(() => ({ sessionsWithUsage: 0 })),
 }));
 
@@ -274,6 +279,8 @@ describe('runInsightsCommand — provider mode (no --native)', () => {
     mockValidate.mockReset();
     mockInsertSession.mockReset();
     mockInsertMessages.mockReset();
+    mockReplaceSessionSnapshot.mockReset();
+    mockReplaceSessionSnapshot.mockReturnValue({ isNew: true, snapshotChanged: true });
     mockProvider.parse.mockReset();
   });
 
@@ -870,7 +877,7 @@ describe('runInsightsCommand — resume detection', () => {
     expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
   });
 
-  it('requires the current v2 policy for a directly requested analysis', async () => {
+  it('requires the current v3 policy for a directly requested analysis', async () => {
     seedSession(mockDb, 'sess1', 10);
     markSessionCurrent(mockDb, 'sess1');
     mockDb.prepare(`
@@ -991,6 +998,8 @@ describe('syncSingleFile', () => {
     runMigrations(mockDb);
     mockInsertSession.mockReset();
     mockInsertMessages.mockReset();
+    mockReplaceSessionSnapshot.mockReset();
+    mockReplaceSessionSnapshot.mockReturnValue({ isNew: true, snapshotChanged: true });
     mockProvider.parse.mockReset();
   });
 
@@ -1004,7 +1013,6 @@ describe('syncSingleFile', () => {
       messageCount: 5,
     };
     mockProvider.parse.mockResolvedValueOnce(fakeSession);
-    mockInsertSession.mockReturnValue(true);
 
     const { syncSingleFile } = await import('../sync.js');
     await syncSingleFile({ filePath: '/path/to/session.jsonl' });
@@ -1076,7 +1084,7 @@ describe('insightsCheckCommand — count-based behavior', () => {
     'analysis-3.0.0/two-pass-v1',
     'analysis-3.0.0/two-pass-v1/lang-zh-CN',
     'analysis-3.0.0/two-pass-v1/lang-en-US',
-  ])('does not auto-invalidate complete legacy analysis at %s', async (pipelineRevision) => {
+  ])('marks complete legacy analysis stale at %s', async (pipelineRevision) => {
     seedSession(mockDb, 'legacy-v1-complete', 10);
     const input = freezeSessionAnalysisInput('legacy-v1-complete', mockDb);
     const insertUsage = mockDb.prepare(`
@@ -1105,8 +1113,10 @@ describe('insightsCheckCommand — count-based behavior', () => {
     });
 
     const { insightsCheckCommand } = await import('../insights.js');
-    await insightsCheckCommand({ days: 7 });
+    await insightsCheckCommand({ days: 7, quiet: true });
 
+    const written = (stdoutSpy.mock.calls as Array<[unknown]>).map(c => String(c[0])).join('');
+    expect(written.trim()).toBe('1');
     expect(mockProviderRunAnalysis).not.toHaveBeenCalled();
   });
 

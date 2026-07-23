@@ -49,7 +49,7 @@ function campaign(overrides: Partial<TestCampaign> = {}): TestCampaign {
     provider: 'anthropic',
     model: 'glm-5.2',
     analysisVersion: '3.0.0',
-    pipelineRevision: 'analysis-3.0.0/two-pass-v2',
+    pipelineRevision: 'analysis-3.0.0/two-pass-v3',
     baseUrlFingerprint: 'endpoint-fingerprint',
     scope: {},
     status: 'active',
@@ -302,7 +302,7 @@ describe('reanalyze command', () => {
     expect(deps.createCampaign).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+        pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
       }),
       'selection-fingerprint',
     );
@@ -358,7 +358,7 @@ describe('reanalyze command', () => {
       dashboard: { ...config.dashboard, analysisLanguage: 'zh-CN' },
     };
     const zhCampaign = campaign({
-      pipelineRevision: 'analysis-3.0.0/two-pass-v2/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v3/lang-zh-CN',
       totalItems: 1,
     });
     const { deps } = makeDependencies({

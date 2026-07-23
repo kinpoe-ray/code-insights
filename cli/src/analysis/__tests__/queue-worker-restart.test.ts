@@ -15,6 +15,12 @@ vi.mock('../../commands/insights.js', () => ({
   runInsightsCommand,
 }));
 
+// Restart recovery must not depend on the operator's real
+// ~/.code-insights/maintenance.paused marker.
+vi.mock('../../commands/maintenance.js', () => ({
+  isMaintenancePaused: () => false,
+}));
+
 vi.mock('../native-runner.js', () => ({
   ClaudeNativeRunner: class MockNativeRunner {
     static validate(): never {

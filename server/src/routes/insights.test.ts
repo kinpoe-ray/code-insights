@@ -56,6 +56,19 @@ function seedInsight(
   `).run(id, sessionId, projectId, type);
 }
 
+function seedMessage(
+  id: string,
+  sessionId: string,
+  type: 'user' | 'assistant' | 'system',
+  content: string,
+  timestamp = '2025-06-15T10:00:00Z',
+) {
+  testDb.prepare(`
+    INSERT INTO messages (id, session_id, type, content, timestamp)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, sessionId, type, content, timestamp);
+}
+
 // ──────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────
@@ -117,8 +130,36 @@ describe('Insights routes', () => {
       // Verify it was persisted
       const row = testDb
         .prepare('SELECT * FROM insights WHERE id = ?')
-        .get(body.id);
-      expect(row).toBeDefined();
+        .get(body.id) as { project_name: string };
+      expect(row.project_name).toBe('test');
+    });
+
+    it('rejects a project that does not own the requested session', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      testDb.prepare(`
+        INSERT INTO projects (id, name, path, last_activity)
+        VALUES ('proj-2', 'other', '/other', datetime('now'))
+      `).run();
+
+      const app = createApp();
+      const res = await app.request('/api/insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'sess-1',
+          projectId: 'proj-2',
+          type: 'summary',
+          title: 'Wrong project',
+          content: 'Must not be persisted.',
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'projectId does not match the session project',
+      });
+      expect(testDb.prepare('SELECT COUNT(*) AS count FROM insights').get())
+        .toEqual({ count: 0 });
     });
 
     it('returns 400 for missing required fields', async () => {
@@ -154,6 +195,176 @@ describe('Insights routes', () => {
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(body.error).toContain('type must be one of');
+    });
+
+    it('rejects a decision when none of its evidence references a real message', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedMessage('msg-1', 'sess-1', 'user', 'Use a transaction.');
+
+      const app = createApp();
+      const res = await app.request('/api/insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'sess-1',
+          projectId: 'proj-1',
+          type: 'decision',
+          title: 'Use a transaction',
+          content: 'Atomic writes avoid partial state.',
+          metadata: {
+            evidence: ['User#9: fabricated', 'msg-1'],
+          },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'decision requires at least one valid evidence reference',
+      });
+
+      const list = await app.request('/api/insights?sessionId=sess-1&type=decision');
+      expect((await list.json()).insights).toEqual([]);
+    });
+
+    it('rejects a learning when none of its evidence references a real message', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedMessage('msg-1', 'sess-1', 'assistant', 'The transaction passed.');
+
+      const app = createApp();
+      const res = await app.request('/api/insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'sess-1',
+          projectId: 'proj-1',
+          type: 'learning',
+          title: 'Transactions are atomic',
+          content: 'Use a transaction for snapshot replacement.',
+          metadata: {
+            evidence: ['Assistant#4: fabricated'],
+          },
+        }),
+      });
+
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({
+        error: 'learning requires at least one valid evidence reference',
+      });
+
+      const list = await app.request('/api/insights?sessionId=sess-1&type=learning');
+      expect((await list.json()).insights).toEqual([]);
+    });
+
+    it.each(['decision', 'learning'] as const)(
+      'normalizes %s evidence and removes invalid siblings before persisting',
+      async (type) => {
+        seedProjectAndSession('proj-1', 'sess-1');
+        seedMessage('msg-1', 'sess-1', 'user', 'Use a transaction.');
+
+        const app = createApp();
+        const res = await app.request('/api/insights', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            sessionId: 'sess-1',
+            projectId: 'proj-1',
+            type,
+            title: type === 'decision' ? 'Use a transaction' : 'Transactions are atomic',
+            content: 'Snapshot replacement must be atomic.',
+            metadata: {
+              evidence: ['User #0: real message', 'User#4: fabricated'],
+              source_detail: 'preserved',
+            },
+          }),
+        });
+
+        expect(res.status).toBe(201);
+        const list = await app.request(`/api/insights?sessionId=sess-1&type=${type}`);
+        const metadata = JSON.parse((await list.json()).insights[0].metadata);
+        expect(metadata).toEqual({
+          evidence: ['User#0: real message'],
+          source_detail: 'preserved',
+        });
+      },
+    );
+
+    it('filters and normalizes prompt-quality references before persisting metadata', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedMessage('msg-1', 'sess-1', 'user', 'First request.', '2025-06-15T10:00:00Z');
+      seedMessage('msg-2', 'sess-1', 'user', 'Second request.', '2025-06-15T10:01:00Z');
+
+      const app = createApp();
+      const res = await app.request('/api/insights', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: 'sess-1',
+          projectId: 'proj-1',
+          type: 'prompt_quality',
+          title: 'Prompt quality',
+          content: 'Prompt quality analysis',
+          metadata: {
+            efficiency_score: 75,
+            message_overhead: 1,
+            assessment: 'Mostly clear',
+            dimension_scores: {
+              context_provision: 70,
+              request_specificity: 80,
+              scope_management: 75,
+              information_timing: 70,
+              correction_quality: 80,
+            },
+            findings: [
+              {
+                category: 'specificity',
+                type: 'strength',
+                description: 'Grounded',
+                message_ref: 'User #1: second request',
+                impact: 'medium',
+                confidence: 90,
+              },
+              {
+                category: 'specificity',
+                type: 'deficit',
+                description: 'Fabricated',
+                message_ref: 'User#2',
+                impact: 'high',
+                confidence: 90,
+              },
+            ],
+            takeaways: [
+              {
+                type: 'reinforce',
+                category: 'specificity',
+                label: 'Grounded takeaway',
+                message_ref: 'User#0: first request',
+              },
+              {
+                type: 'improve',
+                category: 'specificity',
+                label: 'Fabricated takeaway',
+                message_ref: 'msg-1',
+              },
+            ],
+          },
+        }),
+      });
+
+      expect(res.status).toBe(201);
+      const list = await app.request('/api/insights?sessionId=sess-1&type=prompt_quality');
+      const metadata = JSON.parse((await list.json()).insights[0].metadata);
+      expect(metadata.findings).toEqual([
+        expect.objectContaining({
+          description: 'Grounded',
+          message_ref: 'User#1',
+        }),
+      ]);
+      expect(metadata.takeaways).toEqual([
+        expect.objectContaining({
+          label: 'Grounded takeaway',
+          message_ref: 'User#0',
+        }),
+      ]);
     });
   });
 
