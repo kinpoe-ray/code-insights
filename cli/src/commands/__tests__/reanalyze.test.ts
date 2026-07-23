@@ -49,7 +49,7 @@ function campaign(overrides: Partial<TestCampaign> = {}): TestCampaign {
     provider: 'anthropic',
     model: 'glm-5.2',
     analysisVersion: '3.0.0',
-    pipelineRevision: 'analysis-3.0.0/two-pass-v4',
+    pipelineRevision: 'analysis-3.0.0/two-pass-v5',
     baseUrlFingerprint: 'endpoint-fingerprint',
     scope: {},
     status: 'active',
@@ -302,7 +302,7 @@ describe('reanalyze command', () => {
     expect(deps.createCampaign).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
-        pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
+        pipelineRevision: 'analysis-3.0.0/two-pass-v5/lang-zh-CN',
       }),
       'selection-fingerprint',
     );
@@ -358,7 +358,7 @@ describe('reanalyze command', () => {
       dashboard: { ...config.dashboard, analysisLanguage: 'zh-CN' },
     };
     const zhCampaign = campaign({
-      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v5/lang-zh-CN',
       totalItems: 1,
     });
     const { deps } = makeDependencies({
@@ -817,6 +817,36 @@ describe('reanalyze command', () => {
     });
     expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls)).not.toContain('secret-api-key');
     expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls)).not.toContain('example.invalid');
+  });
+
+  it.each([
+    'no_json_found',
+    'json_parse_error',
+    'invalid_structure',
+  ])('classifies exhausted structured-output retries safely: %s', async (parseCategory) => {
+    const only = item(0);
+    const { deps } = makeDependencies({
+      preparePromptQualityPass: vi.fn(async () => {
+        throw new Error(
+          `Prompt quality analysis failed: ${parseCategory} `
+          + '(response length 3492). private-response-body',
+        );
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.markItemFailed).toHaveBeenCalledWith(expect.anything(), {
+      campaignId: only.campaignId,
+      sessionId: only.sessionId,
+      inputRevision: only.inputRevision,
+      error: {
+        code: 'INVALID_MODEL_OUTPUT',
+        message: 'Model structured output remained invalid after retry; previous results were kept.',
+      },
+    });
+    expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls))
+      .not.toContain('private-response-body');
   });
 
   it.each([

@@ -166,13 +166,16 @@ const VALID_ANALYSIS_RESPONSE = {
 const VALID_PQ_RESPONSE = {
   efficiency_score: 75,
   assessment: 'Good prompting.',
-  message_overhead: 'low',
+  message_overhead: 1,
   takeaways: [
     {
-      before: 'vague',
-      after: 'specific',
+      type: 'improve',
       category: 'vague-request',
+      label: 'Make the request specific',
       message_ref: 'User#0',
+      original: 'vague',
+      better_prompt: 'specific',
+      why: 'A concrete request reduces clarification turns.',
     },
   ],
   findings: [
@@ -181,6 +184,8 @@ const VALID_PQ_RESPONSE = {
       type: 'strength',
       description: 'Clear goals',
       message_ref: 'User#0',
+      impact: 'medium',
+      confidence: 85,
     },
   ],
   dimension_scores: {

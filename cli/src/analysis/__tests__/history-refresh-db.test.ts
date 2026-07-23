@@ -170,7 +170,7 @@ describe('history refresh campaign store', () => {
       provider: 'anthropic',
       model: 'glm-5.2',
       analysisVersion: '3.0.0',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v5/lang-zh-CN',
       baseUrlFingerprint: 'base-url-sha256',
       scope: {},
     }, preview.selectionFingerprint);
@@ -182,7 +182,7 @@ describe('history refresh campaign store', () => {
       id: created.id,
       provider: 'anthropic',
       model: 'glm-5.2',
-      pipelineRevision: 'analysis-3.0.0/two-pass-v4/lang-zh-CN',
+      pipelineRevision: 'analysis-3.0.0/two-pass-v5/lang-zh-CN',
       baseUrlFingerprint: 'base-url-sha256',
       selectionFingerprint: preview.selectionFingerprint,
       status: 'active',

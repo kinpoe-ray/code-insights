@@ -869,11 +869,165 @@ describe('parsePromptQualityResponse', () => {
     expect(result.error.error_type).toBe('invalid_structure');
   });
 
+  it.each([
+    ['null', 'null'],
+    ['an array', '[{"efficiency_score":80}]'],
+    ['a Markdown-fenced array', '```json\n[{"efficiency_score":80}]\n```'],
+    ['a prose-wrapped array', 'Here is the result:\n[{"efficiency_score":80}]'],
+    ['a scalar', '42'],
+  ])('returns invalid_structure when the JSON root is %s', (_label, response) => {
+    const result = parsePromptQualityResponse(response);
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.error_type).toBe('invalid_structure');
+  });
+
+  it('skips a non-JSON bracket header before a valid object payload', () => {
+    const result = parsePromptQualityResponse(
+      '[analysis]\n{"efficiency_score":80,"assessment":"Keep literal ] and } characters"}',
+    );
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.assessment).toBe('Keep literal ] and } characters');
+  });
+
   it('returns error for completely invalid response', () => {
     const result = parsePromptQualityResponse('not json');
     expect(result.success).toBe(false);
     if (result.success) return;
     expect(result.error.error_type).toBe('no_json_found');
+  });
+
+  it.each([
+    ['string dimension_scores', {
+      efficiency_score: 80,
+      dimension_scores: 'bad',
+    }],
+    ['array dimension_scores', {
+      efficiency_score: 80,
+      dimension_scores: [1, 2],
+    }],
+  ])('defaults malformed secondary dimensions without rejecting the core score: %s', (_label, payload) => {
+    const result = parsePromptQualityResponse(JSON.stringify(payload));
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.dimension_scores).toEqual({
+      context_provision: 50,
+      request_specificity: 50,
+      scope_management: 50,
+      information_timing: 50,
+      correction_quality: 50,
+    });
+  });
+
+  it('drops malformed child entries without rejecting valid top-level data', () => {
+    const result = parsePromptQualityResponse(JSON.stringify({
+      efficiency_score: 80,
+      takeaways: [null],
+      findings: [null],
+    }));
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.takeaways).toEqual([]);
+    expect(result.data.findings).toEqual([]);
+  });
+
+  it('constructs canonical defaults for malformed secondary scalar fields', () => {
+    const result = parsePromptQualityResponse(JSON.stringify({
+      efficiency_score: 80.6,
+      message_overhead: 'many',
+      assessment: { text: 'not a string' },
+      dimension_scores: {
+        context_provision: 110,
+        request_specificity: 'bad',
+        scope_management: null,
+        information_timing: 33.6,
+        correction_quality: -9,
+        unexpected: 99,
+      },
+    }));
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data).toEqual({
+      efficiency_score: 81,
+      message_overhead: 0,
+      assessment: '',
+      takeaways: [],
+      findings: [],
+      dimension_scores: {
+        context_provision: 100,
+        request_specificity: 50,
+        scope_management: 50,
+        information_timing: 34,
+        correction_quality: 0,
+      },
+    });
+  });
+
+  it('keeps only canonical child records and defaults non-essential finding metadata', () => {
+    const result = parsePromptQualityResponse(JSON.stringify({
+      efficiency_score: 88,
+      takeaways: [
+        {},
+        {
+          type: 'improve',
+          category: ' novel-technique ',
+          label: ' Add the missing context ',
+          message_ref: ' User #1: original request ',
+          original: 'Fix it',
+          better_prompt: 'Fix the parser error in response-parsers.ts',
+          why: 42,
+          unexpected: 'drop me',
+        },
+        {
+          type: 'unknown',
+          category: 'invalid',
+          label: 'Invalid type',
+          message_ref: 'User#0',
+        },
+      ],
+      findings: [
+        null,
+        {
+          category: ' novel-observation ',
+          type: 'deficit',
+          description: 'The original request omitted the failing file.',
+          message_ref: ' User #1: original request ',
+          impact: 'urgent',
+          confidence: 135,
+          suggested_improvement: 42,
+          unexpected: 'drop me',
+        },
+        {
+          category: 'missing-context',
+          type: 'unknown',
+          description: 'Invalid type',
+          message_ref: 'User#0',
+        },
+      ],
+    }));
+    expect(result.success).toBe(true);
+    if (!result.success) return;
+    expect(result.data.takeaways).toEqual([
+      {
+        type: 'improve',
+        category: 'novel-technique',
+        label: 'Add the missing context',
+        message_ref: 'User #1: original request',
+        original: 'Fix it',
+        better_prompt: 'Fix the parser error in response-parsers.ts',
+      },
+    ]);
+    expect(result.data.findings).toEqual([
+      {
+        category: 'novel-observation',
+        type: 'deficit',
+        description: 'The original request omitted the failing file.',
+        message_ref: 'User #1: original request',
+        impact: 'medium',
+        confidence: 100,
+      },
+    ]);
   });
 
   // Fix 2: array guard tests for parsePromptQualityResponse

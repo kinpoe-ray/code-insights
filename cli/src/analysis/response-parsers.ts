@@ -2,7 +2,14 @@
 // Extracted from prompts.ts — handles JSON extraction, repair, and validation.
 
 import { jsonrepair } from 'jsonrepair';
-import type { AnalysisResponse, ParseError, ParseResult, PromptQualityResponse, PromptQualityDimensionScores } from './prompt-types.js';
+import type {
+  AnalysisResponse,
+  ParseError,
+  ParseResult,
+  PromptQualityFinding,
+  PromptQualityResponse,
+  PromptQualityTakeaway,
+} from './prompt-types.js';
 import {
   CANONICAL_FRICTION_CATEGORIES,
   CANONICAL_PATTERN_CATEGORIES,
@@ -35,6 +42,74 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isOptionalString(value: unknown): boolean {
   return value === undefined || typeof value === 'string';
+}
+
+function normalizeBoundedScore(value: unknown, fallback: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function normalizeNonNegativeCount(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.round(value));
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim() !== '';
+}
+
+function normalizePromptQualityTakeaway(value: unknown): PromptQualityTakeaway | undefined {
+  if (
+    !isRecord(value)
+    || (value.type !== 'improve' && value.type !== 'reinforce')
+    || !isNonEmptyString(value.category)
+    || !isNonEmptyString(value.label)
+    || !isNonEmptyString(value.message_ref)
+  ) {
+    return undefined;
+  }
+
+  return {
+    type: value.type,
+    category: value.category.trim(),
+    label: value.label.trim(),
+    message_ref: value.message_ref.trim(),
+    ...(typeof value.original === 'string' && { original: value.original }),
+    ...(typeof value.better_prompt === 'string' && { better_prompt: value.better_prompt }),
+    ...(typeof value.why === 'string' && { why: value.why }),
+    ...(typeof value.what_worked === 'string' && { what_worked: value.what_worked }),
+    ...(typeof value.why_effective === 'string' && { why_effective: value.why_effective }),
+  };
+}
+
+function normalizePromptQualityFinding(value: unknown): PromptQualityFinding | undefined {
+  if (
+    !isRecord(value)
+    || !isNonEmptyString(value.category)
+    || (value.type !== 'deficit' && value.type !== 'strength')
+    || !isNonEmptyString(value.description)
+    || !isNonEmptyString(value.message_ref)
+  ) {
+    return undefined;
+  }
+
+  const impact = value.impact === 'high'
+    || value.impact === 'medium'
+    || value.impact === 'low'
+    ? value.impact
+    : 'medium';
+
+  return {
+    category: value.category.trim(),
+    type: value.type,
+    description: value.description.trim(),
+    message_ref: value.message_ref.trim(),
+    impact,
+    confidence: normalizeBoundedScore(value.confidence, 50),
+    ...(typeof value.suggested_improvement === 'string' && {
+      suggested_improvement: value.suggested_improvement,
+    }),
+  };
 }
 
 function normalizeFrictionPoint(value: unknown): FrictionPoint | undefined {
@@ -94,6 +169,80 @@ export function extractJsonPayload(response: string): string | null {
   if (tagged?.[1]) return tagged[1].trim();
   const jsonMatch = response.match(/\{[\s\S]*\}/);
   return jsonMatch ? jsonMatch[0] : null;
+}
+
+function extractPromptQualityJsonPayload(response: string): string | null {
+  const tagged = response.match(/<json>\s*([\s\S]*?)\s*<\/json>/i);
+  if (tagged?.[1]) return tagged[1].trim();
+
+  const trimmed = response.trim();
+  if (trimmed !== '') {
+    try {
+      JSON.parse(trimmed);
+      return trimmed;
+    } catch {
+      // Fall through to root-aware extraction so prose-wrapped and repairable
+      // object responses remain supported without unwrapping root arrays.
+    }
+  }
+
+  let cursor = 0;
+  let firstCandidate: string | null = null;
+  let firstObjectCandidate: string | null = null;
+  while (cursor < response.length) {
+    const relativeStart = response.slice(cursor).search(/[\[{]/);
+    if (relativeStart === -1) break;
+    const start = cursor + relativeStart;
+    const stack: string[] = [];
+    let quote: '"' | "'" | null = null;
+    let escaped = false;
+    let end = -1;
+
+    for (let index = start; index < response.length; index++) {
+      const char = response[index];
+      if (quote !== null) {
+        if (escaped) {
+          escaped = false;
+        } else if (char === '\\') {
+          escaped = true;
+        } else if (char === quote) {
+          quote = null;
+        }
+        continue;
+      }
+      if (char === '"' || char === "'") {
+        quote = char;
+      } else if (char === '{' || char === '[') {
+        stack.push(char);
+      } else if (char === '}' || char === ']') {
+        const expected = char === '}' ? '{' : '[';
+        if (stack.at(-1) !== expected) break;
+        stack.pop();
+        if (stack.length === 0) {
+          end = index + 1;
+          break;
+        }
+      }
+    }
+
+    if (end === -1) {
+      const remainder = response.slice(start).trim();
+      if (response[start] === '{') return remainder;
+      return firstObjectCandidate ?? firstCandidate ?? remainder;
+    }
+
+    const candidate = response.slice(start, end);
+    firstCandidate ??= candidate;
+    if (response[start] === '{') firstObjectCandidate ??= candidate;
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      cursor = end;
+    }
+  }
+
+  return firstObjectCandidate ?? firstCandidate;
 }
 
 export function validateAnalysisFacets(value: unknown): AnalysisResponse['facets'] | undefined {
@@ -263,8 +412,20 @@ export function parseAnalysisResponse(response: string): ParseResult<AnalysisRes
 export function parsePromptQualityResponse(response: string): ParseResult<PromptQualityResponse> {
   const response_length = response.length;
   const preview = buildResponsePreview(response);
+  const invalidStructure = (message: string): ParseResult<PromptQualityResponse> => {
+    console.error(`Invalid prompt quality response: ${message}`);
+    return {
+      success: false,
+      error: {
+        error_type: 'invalid_structure',
+        error_message: message,
+        response_length,
+        response_preview: preview,
+      },
+    };
+  };
 
-  const jsonPayload = extractJsonPayload(response);
+  const jsonPayload = extractPromptQualityJsonPayload(response);
   if (!jsonPayload) {
     console.error('No JSON found in prompt quality response');
     return {
@@ -273,12 +434,12 @@ export function parsePromptQualityResponse(response: string): ParseResult<Prompt
     };
   }
 
-  let parsed: PromptQualityResponse;
+  let parsedValue: unknown;
   try {
-    parsed = JSON.parse(jsonPayload) as PromptQualityResponse;
+    parsedValue = JSON.parse(jsonPayload) as unknown;
   } catch {
     try {
-      parsed = JSON.parse(jsonrepair(jsonPayload)) as PromptQualityResponse;
+      parsedValue = JSON.parse(jsonrepair(jsonPayload)) as unknown;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Failed to parse prompt quality response (after jsonrepair):', msg);
@@ -289,34 +450,38 @@ export function parsePromptQualityResponse(response: string): ParseResult<Prompt
     }
   }
 
-  if (typeof parsed.efficiency_score !== 'number') {
-    console.error('Invalid prompt quality response: missing efficiency_score');
-    return {
-      success: false,
-      error: { error_type: 'invalid_structure', error_message: 'Missing or invalid efficiency_score field', response_length, response_preview: preview },
-    };
+  if (
+    !isRecord(parsedValue)
+    || typeof parsedValue.efficiency_score !== 'number'
+    || !Number.isFinite(parsedValue.efficiency_score)
+  ) {
+    return invalidStructure('Missing or invalid efficiency_score field');
   }
-
-  // Clamp and default
-  parsed.efficiency_score = Math.max(0, Math.min(100, Math.round(parsed.efficiency_score)));
-  parsed.message_overhead = parsed.message_overhead ?? 0;
-  parsed.assessment = parsed.assessment || '';
-  // Guard against LLM returning non-array values (e.g. "findings": "none") —
-  // || [] alone won't catch truthy non-arrays, and .some() on line 166 would throw.
-  parsed.takeaways = Array.isArray(parsed.takeaways) ? parsed.takeaways : [];
-  parsed.findings = Array.isArray(parsed.findings) ? parsed.findings : [];
-  parsed.dimension_scores = parsed.dimension_scores || {
-    context_provision: 50,
-    request_specificity: 50,
-    scope_management: 50,
-    information_timing: 50,
-    correction_quality: 50,
+  const dimensionScores = isRecord(parsedValue.dimension_scores)
+    ? parsedValue.dimension_scores
+    : {};
+  const parsed: PromptQualityResponse = {
+    efficiency_score: normalizeBoundedScore(parsedValue.efficiency_score, 0),
+    message_overhead: normalizeNonNegativeCount(parsedValue.message_overhead),
+    assessment: typeof parsedValue.assessment === 'string' ? parsedValue.assessment : '',
+    // Guard against LLM returning non-array values (e.g. "findings": "none").
+    // Malformed children are dropped while valid siblings remain usable.
+    takeaways: (Array.isArray(parsedValue.takeaways) ? parsedValue.takeaways : [])
+      .map(normalizePromptQualityTakeaway)
+      .filter((takeaway): takeaway is PromptQualityTakeaway => takeaway !== undefined)
+      .slice(0, 4),
+    findings: (Array.isArray(parsedValue.findings) ? parsedValue.findings : [])
+      .map(normalizePromptQualityFinding)
+      .filter((finding): finding is PromptQualityFinding => finding !== undefined)
+      .slice(0, 8),
+    dimension_scores: {
+      context_provision: normalizeBoundedScore(dimensionScores.context_provision, 50),
+      request_specificity: normalizeBoundedScore(dimensionScores.request_specificity, 50),
+      scope_management: normalizeBoundedScore(dimensionScores.scope_management, 50),
+      information_timing: normalizeBoundedScore(dimensionScores.information_timing, 50),
+      correction_quality: normalizeBoundedScore(dimensionScores.correction_quality, 50),
+    },
   };
-
-  // Clamp dimension scores
-  for (const key of Object.keys(parsed.dimension_scores) as Array<keyof PromptQualityDimensionScores>) {
-    parsed.dimension_scores[key] = Math.max(0, Math.min(100, Math.round(parsed.dimension_scores[key] ?? 50)));
-  }
 
   // Validation: check for missing category or unexpected type values in findings.
   // (Monitoring period complete — warn calls removed after confirming classification quality)
