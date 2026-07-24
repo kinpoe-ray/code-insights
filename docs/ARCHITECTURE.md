@@ -231,6 +231,21 @@ or deadline is observed. Scheduled maintenance prioritizes an active campaign
 over legacy history batches and defers weekly reflection until that campaign is
 complete.
 
+The scheduled runner captures the unique active/paused campaign before entering
+the shared LLM lock. Outside that lock, a private notification cursor tracks
+only failed session IDs from that exact campaign. A retry in `pending` or
+`session_staged` remains open; recovery requires every affected ID to be
+`succeeded`. Cancelled campaigns and unrelated historical failures are not
+reported. Events enter a private durable outbox before delivery, so a transport
+failure cannot erase the original fact or rewrite its event ID/message after
+campaign state changes. The FIFO is drained in order; a later confirmed error
+category for the same session becomes a new incident instead of retaining a
+stale cause. Cancelled-origin events are discarded before delivery. Sender
+payloads cross a private stdin bootstrap instead of process arguments.
+Notification delivery is best-effort and cannot change the maintenance exit
+status. Delivery remains at-least-once if the process exits after TeamTalk
+accepts a message but before the local cursor is persisted.
+
 The ordinary analysis queue excludes every unfinished member of an active or
 paused campaign when claiming work. The queue row stays pending until the member
 succeeds or the campaign reaches a terminal state, avoiding duplicate paid work

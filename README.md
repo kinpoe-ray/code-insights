@@ -204,6 +204,36 @@ advances that campaign instead of legacy historical batches and defers weekly
 reflection until the campaign finishes. Logs are stored under
 `~/.code-insights/logs/`.
 
+Optional TeamTalk alerts use a private, untracked
+`~/.code-insights/analysis-alert.json` file:
+
+```json
+{
+  "version": 1,
+  "enabled": true,
+  "target": "Saved contact alias",
+  "senderScript": "/absolute/path/to/tt-send.mjs"
+}
+```
+
+Protect it with `chmod 600 ~/.code-insights/analysis-alert.json`. The sender
+must support `--config-paths`, `--check`, and text delivery in the form
+`sender target message`; its credentials remain in the sender's own
+private configuration. The maintenance runner only alerts on newly observed
+failures from the exact current campaign, then sends one recovery after those
+same sessions succeed. Pending/staged retries are not recovery, cancelled
+history is not scanned, and a new confirmed error category for the same session
+produces one fresh factual alert. Raw model errors are never included, and
+notification failure does not change the maintenance result. Undelivered events
+stay in a private FIFO outbox and keep the same event ID and message when
+retried; the target and message enter the sender through a private stdin
+bootstrap rather than operating-system process arguments. Delivery is
+at-least-once: a process crash after TeamTalk accepts a message but before the
+cursor is saved can retry that same stable event ID. Set
+`CODE_INSIGHTS_ALERT_DRY_RUN=1` only when testing delivery: it previews the
+notification without advancing the alert cursor, while maintenance itself still
+runs normally.
+
 ```bash
 code-insights maintenance pause
 code-insights maintenance status

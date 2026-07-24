@@ -7,7 +7,7 @@ umask 077
 LABEL='com.code-insights.maintenance'
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 TEMPLATE="${CODE_INSIGHTS_LAUNCHD_TEMPLATE:-$ROOT/automation/$LABEL.plist.in}"
-MAINTENANCE_SCRIPT="${CODE_INSIGHTS_MAINTENANCE_SCRIPT:-$ROOT/automation/code-insights-maintenance.sh}"
+MAINTENANCE_SCRIPT="${CODE_INSIGHTS_MAINTENANCE_SCRIPT:-$ROOT/automation/code-insights-maintenance-runner.sh}"
 CODE_INSIGHTS_BIN="${CODE_INSIGHTS_BIN:-$(command -v code-insights 2>/dev/null || true)}"
 CONFIG_DIR="${CODE_INSIGHTS_CONFIG_DIR:-$HOME/.code-insights}"
 LOG_DIR="$CONFIG_DIR/logs"
@@ -148,6 +148,40 @@ case "$ACTION" in
     NODE_BIN=$(command -v node 2>/dev/null || true)
     [[ -n "$NODE_BIN" && -x "$NODE_BIN" ]] || { printf 'node executable not found\n' >&2; exit 69; }
     mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
+    prepare_private_launchd_log() {
+      "$NODE_BIN" -e '
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const target = process.argv[1];
+        const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+        const nonBlock = fs.constants.O_NONBLOCK ?? 0;
+        const parent = fs.lstatSync(path.dirname(target));
+        if (!parent.isDirectory() || parent.isSymbolicLink()) throw new Error("unsafe log directory");
+        if (typeof process.getuid === "function" && parent.uid !== process.getuid()) {
+          throw new Error("foreign log directory");
+        }
+        if ((parent.mode & 0o077) !== 0) throw new Error("insecure log directory");
+        const descriptor = fs.openSync(
+          target,
+          fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_APPEND | noFollow | nonBlock,
+          0o600,
+        );
+        try {
+          const info = fs.fstatSync(descriptor);
+          if (!info.isFile() || info.nlink !== 1) throw new Error("unsafe log file");
+          if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+            throw new Error("foreign log file");
+          }
+          fs.fchmodSync(descriptor, 0o600);
+        } finally {
+          fs.closeSync(descriptor);
+        }
+      ' "$1" 2>/dev/null
+    }
+    prepare_private_launchd_log "$LOG_DIR/launchd.stdout.log" \
+      || { printf 'Could not protect LaunchAgent output logs.\n' >&2; exit 1; }
+    prepare_private_launchd_log "$LOG_DIR/launchd.stderr.log" \
+      || { printf 'Could not protect LaunchAgent output logs.\n' >&2; exit 1; }
     temporary_plist=""
     backup_plist=""
     claude_settings="$HOME/.claude/settings.json"
