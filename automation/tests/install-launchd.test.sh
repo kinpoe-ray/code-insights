@@ -62,7 +62,7 @@ HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
   "$SCRIPT" --render "$TMP_ROOT/maintenance.plist"
 
 grep -Fq '<string>com.code-insights.maintenance</string>' "$TMP_ROOT/maintenance.plist" || fail 'missing launchd label'
-grep -Fq "$ROOT/automation/code-insights-maintenance.sh" "$TMP_ROOT/maintenance.plist" || fail 'missing absolute maintenance path'
+grep -Fq "$ROOT/automation/code-insights-maintenance-runner.sh" "$TMP_ROOT/maintenance.plist" || fail 'missing absolute maintenance runner path'
 grep -Fq "$TMP_ROOT/bin" "$TMP_ROOT/maintenance.plist" || fail 'missing executable directory in PATH'
 grep -Fq '<key>CODE_INSIGHTS_CONFIG_DIR</key>' "$TMP_ROOT/maintenance.plist" || fail 'missing config directory environment key'
 grep -Fq "<string>$TMP_ROOT/home/.code-insights</string>" "$TMP_ROOT/maintenance.plist" || fail 'missing rendered config directory'
@@ -352,6 +352,50 @@ IFS='|' read -r staged_plist staging_destination < "$PLIST_MV_LOG"
 [[ "$(dirname "$staged_plist")" == "$(dirname "$staging_destination")" ]] || fail 'plist was not staged in the LaunchAgents directory'
 grep -Fxq 'install-hook --provider' "$CLI_CALL_LOG" \
   || fail 'successful install did not configure the SessionEnd hook for the configured provider'
+for launchd_log in launchd.stdout.log launchd.stderr.log; do
+  launchd_log_path="$TMP_ROOT/home/.code-insights/logs/$launchd_log"
+  [[ -f "$launchd_log_path" && ! -L "$launchd_log_path" ]] \
+    || fail "installer did not create a regular $launchd_log"
+  [[ "$(file_mode "$launchd_log_path")" == '600' ]] \
+    || fail "installer did not protect $launchd_log with mode 600"
+done
+
+# Refuse a pre-existing log symlink rather than chmod/appending through it.
+protected_log_target="$TMP_ROOT/protected-log-target"
+printf 'user managed\n' > "$protected_log_target"
+stdout_log="$TMP_ROOT/home/.code-insights/logs/launchd.stdout.log"
+rm -f "$stdout_log"
+ln -s "$protected_log_target" "$stdout_log"
+: > "$LAUNCHCTL_LOG"
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --install > "$TMP_ROOT/install-log-symlink.log" 2>&1
+log_symlink_status=$?
+set -e
+[[ "$log_symlink_status" -ne 0 ]] || fail 'LaunchAgent log symlink was accepted'
+[[ -L "$stdout_log" && "$(readlink "$stdout_log")" == "$protected_log_target" ]] \
+  || fail 'LaunchAgent log symlink was replaced'
+[[ "$(cat "$protected_log_target")" == 'user managed' ]] \
+  || fail 'LaunchAgent log symlink target was modified'
+[[ ! -s "$LAUNCHCTL_LOG" ]] || fail 'rejected log symlink changed launchctl state'
+rm -f "$stdout_log"
+
+# A FIFO must be rejected without blocking while waiting for a reader.
+mkfifo "$stdout_log"
+: > "$LAUNCHCTL_LOG"
+set +e
+HOME="$TMP_ROOT/home" PATH="$TMP_ROOT/bin:/usr/bin:/bin" \
+  CODE_INSIGHTS_BIN="$TMP_ROOT/bin/code-insights" \
+  "$SCRIPT" --install > "$TMP_ROOT/install-log-fifo.log" 2>&1
+log_fifo_status=$?
+set -e
+[[ "$log_fifo_status" -ne 0 ]] || fail 'LaunchAgent log FIFO was accepted'
+[[ -p "$stdout_log" ]] || fail 'LaunchAgent log FIFO was replaced'
+[[ ! -s "$LAUNCHCTL_LOG" ]] || fail 'rejected log FIFO changed launchctl state'
+rm -f "$stdout_log"
+: > "$stdout_log"
+chmod 600 "$stdout_log"
 rm -f "$installed_plist"
 
 # User-managed LaunchAgent plist symlinks are rejected before any launchctl
