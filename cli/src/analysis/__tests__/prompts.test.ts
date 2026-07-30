@@ -696,6 +696,29 @@ describe('parseAnalysisResponse', () => {
     expect(result.error.error_type).toBe('no_json_found');
   });
 
+  it('rejects salvage when any required top-level container is broken', () => {
+    const response = `<json>{
+      "summary": {
+        "title": "Recovered analysis",
+        "content": "The useful summary remains intact.",
+        "outcome": "success",
+        "bullets": ["Kept valid content"]
+      },
+      "decisions": [
+        { "title": "Broken decision", :"reasoning": "Orphan colon" }
+      ],
+      "learnings": [
+        { "title": "Valid learning", "takeaway": "Keep local recovery." }
+      ]
+    }</json>`;
+
+    const result = parseAnalysisResponse(response);
+
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    expect(result.error.error_type).toBe('json_parse_error');
+  });
+
   it('returns error for JSON missing required summary.title', () => {
     const response = '<json>{ "summary": { "content": "no title" }, "decisions": [], "learnings": [] }</json>';
     const result = parseAnalysisResponse(response);

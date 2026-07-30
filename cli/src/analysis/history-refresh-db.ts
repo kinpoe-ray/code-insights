@@ -78,6 +78,7 @@ export interface HistoryRefreshCampaignItem {
   safeError: string | null;
   attempts: number;
   claimedAt: string | null;
+  claimToken: string | null;
   stagedAt: string | null;
   failedAt: string | null;
   succeededAt: string | null;
@@ -109,6 +110,7 @@ export interface StageHistoryRefreshSessionInput {
   campaignId: string;
   sessionId: string;
   inputRevision: string;
+  claimToken: string;
   sessionStage: PreparedSessionPass;
   sessionUsage: PreparedPassUsage;
   now?: string;
@@ -118,6 +120,19 @@ export interface ReleaseHistoryRefreshClaimInput {
   campaignId: string;
   sessionId: string;
   inputRevision: string;
+  claimToken: string;
+  now?: string;
+}
+
+export interface RefreshHistoryRefreshInput {
+  campaignId: string;
+  sessionId: string;
+  previousInputRevision: string;
+  claimToken: string;
+  inputRevision: string;
+  messageCount: number;
+  /** Only true when no provider call occurred under this claim. */
+  refundAttempt?: boolean;
   now?: string;
 }
 
@@ -125,6 +140,7 @@ export interface MarkHistoryRefreshItemFailedInput {
   campaignId: string;
   sessionId: string;
   inputRevision: string;
+  claimToken: string;
   error: {
     code: string;
     message: string;
@@ -142,6 +158,7 @@ export interface PublishHistoryRefreshSuccessInput {
   campaignId: string;
   sessionId: string;
   inputRevision: string;
+  claimToken: string;
   /** Must be synchronous. It runs inside the snapshot/success transaction. */
   publish: (db: Database.Database) => void;
   now?: string;
@@ -160,6 +177,13 @@ export interface HistoryRefreshSnapshot {
   usage: Array<Record<string, unknown>>;
   generatedTitle: string | null;
   createdAt: string;
+}
+
+export class HistoryRefreshClaimLostError extends Error {
+  constructor() {
+    super('History refresh claim is no longer owned by this worker');
+    this.name = 'HistoryRefreshClaimLostError';
+  }
 }
 
 interface SelectedSessionRow extends SessionAnalysisRow {
@@ -201,6 +225,7 @@ interface CampaignItemRow {
   safe_error: string | null;
   attempts: number;
   claimed_at: string | null;
+  claim_token: string | null;
   staged_at: string | null;
   failed_at: string | null;
   succeeded_at: string | null;
@@ -316,6 +341,7 @@ function mapCampaignItem(row: CampaignItemRow): HistoryRefreshCampaignItem {
     safeError: row.safe_error,
     attempts: row.attempts,
     claimedAt: row.claimed_at,
+    claimToken: row.claim_token,
     stagedAt: row.staged_at,
     failedAt: row.failed_at,
     succeededAt: row.succeeded_at,
@@ -473,7 +499,7 @@ function getCampaignItemRow(
   return db.prepare(`
     SELECT campaign_id, session_id, ordinal, message_count, input_revision,
            status, session_stage_json, session_usage_json, error_code,
-           safe_error, attempts, claimed_at, staged_at, failed_at,
+           safe_error, attempts, claimed_at, claim_token, staged_at, failed_at,
            succeeded_at, updated_at
     FROM analysis_campaign_items
     WHERE campaign_id = ? AND session_id = ?
@@ -611,7 +637,7 @@ export function inspectHistoryRefreshCampaign(
   const items = (db.prepare(`
     SELECT campaign_id, session_id, ordinal, message_count, input_revision,
            status, session_stage_json, session_usage_json, error_code,
-           safe_error, attempts, claimed_at, staged_at, failed_at,
+           safe_error, attempts, claimed_at, claim_token, staged_at, failed_at,
            succeeded_at, updated_at
     FROM analysis_campaign_items
     WHERE campaign_id = ?
@@ -693,6 +719,7 @@ export function retryFailedHistoryRefreshItems(
           END,
           attempts = 0,
           claimed_at = NULL,
+          claim_token = NULL,
           error_code = NULL,
           safe_error = NULL,
           failed_at = NULL,
@@ -734,7 +761,7 @@ export function cancelHistoryRefreshCampaign(
     `).run(now, campaignId);
     db.prepare(`
       UPDATE analysis_campaign_items
-      SET claimed_at = NULL, updated_at = ?
+      SET claimed_at = NULL, claim_token = NULL, updated_at = ?
       WHERE campaign_id = ? AND claimed_at IS NOT NULL
     `).run(now, campaignId);
     return mapCampaign(getCampaignRow(db, campaignId)!);
@@ -770,7 +797,7 @@ export function claimNextHistoryRefreshItem(
     const candidate = db.prepare(`
       SELECT campaign_id, session_id, ordinal, message_count, input_revision,
              status, session_stage_json, session_usage_json, error_code,
-             safe_error, attempts, claimed_at, staged_at, failed_at,
+             safe_error, attempts, claimed_at, claim_token, staged_at, failed_at,
              succeeded_at, updated_at
       FROM analysis_campaign_items
       WHERE campaign_id = ?
@@ -786,13 +813,16 @@ export function claimNextHistoryRefreshItem(
       ? (candidate.session_stage_json === null ? 'pending' : 'session_staged')
       : candidate.status;
     const attemptIncrement = candidate.status === 'session_staged' ? 0 : 1;
+    const claimToken = randomUUID();
     db.prepare(`
       UPDATE analysis_campaign_items
-      SET status = ?, claimed_at = ?, attempts = attempts + ?,
+      SET status = ?, claimed_at = ?, claim_token = ?, attempts = attempts + ?,
           error_code = NULL, safe_error = NULL, failed_at = NULL,
           updated_at = ?
       WHERE campaign_id = ? AND session_id = ?
-    `).run(retryStatus, now, attemptIncrement, now, campaignId, candidate.session_id);
+    `).run(
+      retryStatus, now, claimToken, attemptIncrement, now, campaignId, candidate.session_id,
+    );
 
     return mapCampaignItem(getCampaignItemRow(db, campaignId, candidate.session_id)!);
   }).immediate();
@@ -811,6 +841,7 @@ export function stageHistoryRefreshSession(
     if (!item) {
       throw new Error(`History refresh item not found: ${input.campaignId}/${input.sessionId}`);
     }
+    if (item.claim_token !== input.claimToken) throw new HistoryRefreshClaimLostError();
     if (item.status !== 'pending' || item.claimed_at === null) {
       throw new Error(`History refresh item is not a claimed pending item (${item.status})`);
     }
@@ -827,8 +858,8 @@ export function stageHistoryRefreshSession(
       SET status = 'session_staged', session_stage_json = ?,
           session_usage_json = ?, claimed_at = NULL, staged_at = ?,
           error_code = NULL, safe_error = NULL, failed_at = NULL,
-          updated_at = ?
-      WHERE campaign_id = ? AND session_id = ?
+          claim_token = NULL, updated_at = ?
+      WHERE campaign_id = ? AND session_id = ? AND claim_token = ?
     `).run(
       sessionStageJson,
       sessionUsageJson,
@@ -836,6 +867,7 @@ export function stageHistoryRefreshSession(
       now,
       input.campaignId,
       input.sessionId,
+      input.claimToken,
     );
     return mapCampaignItem(getCampaignItemRow(db, input.campaignId, input.sessionId)!);
   }).immediate();
@@ -852,9 +884,17 @@ export function releaseHistoryRefreshClaim(
     if (!item) {
       throw new Error(`History refresh item not found: ${input.campaignId}/${input.sessionId}`);
     }
+    if (
+      item.claimed_at === null
+      && item.claim_token === null
+      && (item.status === 'pending' || item.status === 'session_staged')
+    ) {
+      return mapCampaignItem(item);
+    }
     if (item.input_revision !== input.inputRevision) {
       throw new Error('History refresh input revision does not match the campaign item');
     }
+    if (item.claim_token !== input.claimToken) throw new HistoryRefreshClaimLostError();
     if (item.status !== 'pending' && item.status !== 'session_staged') {
       throw new Error(`Cannot release a history refresh item in ${item.status} state`);
     }
@@ -862,14 +902,71 @@ export function releaseHistoryRefreshClaim(
 
     db.prepare(`
       UPDATE analysis_campaign_items
-      SET claimed_at = NULL,
+      SET claimed_at = NULL, claim_token = NULL,
           attempts = CASE
             WHEN status = 'pending' AND attempts > 0 THEN attempts - 1
             ELSE attempts
           END,
           updated_at = ?
-      WHERE campaign_id = ? AND session_id = ?
-    `).run(now, input.campaignId, input.sessionId);
+      WHERE campaign_id = ? AND session_id = ? AND claim_token = ?
+    `).run(now, input.campaignId, input.sessionId, input.claimToken);
+    return mapCampaignItem(getCampaignItemRow(db, input.campaignId, input.sessionId)!);
+  }).immediate();
+}
+
+/**
+ * Move a claimed item onto the latest frozen session revision without ever
+ * publishing the stale prepared result. This is intentionally an atomic state
+ * transition: any staged pass is discarded and the item returns to pending.
+ */
+export function refreshHistoryRefreshInput(
+  db: Database.Database,
+  input: RefreshHistoryRefreshInput,
+): HistoryRefreshCampaignItem {
+  const now = input.now ?? new Date().toISOString();
+
+  return db.transaction(() => {
+    const item = getCampaignItemRow(db, input.campaignId, input.sessionId);
+    if (!item) {
+      throw new Error(`History refresh item not found: ${input.campaignId}/${input.sessionId}`);
+    }
+    if (item.claimed_at === null || item.claim_token !== input.claimToken) {
+      throw new HistoryRefreshClaimLostError();
+    }
+    if (item.input_revision !== input.previousInputRevision) {
+      throw new Error('History refresh input revision does not match the campaign item');
+    }
+
+    const session = getSelectedSessionRow(db, input.sessionId);
+    if (
+      !session
+      || session.message_count !== input.messageCount
+      || calculateInputRevision(db, session) !== input.inputRevision
+    ) {
+      throw new Error('History refresh source session changed while refreshing its input');
+    }
+
+    db.prepare(`
+      UPDATE analysis_campaign_items
+      SET status = 'pending', message_count = ?, input_revision = ?,
+          session_stage_json = NULL, session_usage_json = NULL,
+          error_code = NULL, safe_error = NULL, claimed_at = NULL, claim_token = NULL,
+          staged_at = NULL, failed_at = NULL,
+          attempts = CASE
+            WHEN ? = 1 AND attempts > 0 THEN attempts - 1
+            ELSE attempts
+          END,
+          updated_at = ?
+      WHERE campaign_id = ? AND session_id = ? AND claim_token = ?
+    `).run(
+      input.messageCount,
+      input.inputRevision,
+      input.refundAttempt ? 1 : 0,
+      now,
+      input.campaignId,
+      input.sessionId,
+      input.claimToken,
+    );
     return mapCampaignItem(getCampaignItemRow(db, input.campaignId, input.sessionId)!);
   }).immediate();
 }
@@ -901,8 +998,8 @@ export function markHistoryRefreshItemFailed(
     if (item.status === 'succeeded') {
       throw new Error('A succeeded history refresh item cannot be marked failed');
     }
-    if (item.claimed_at === null) {
-      throw new Error('History refresh item must be claimed before recording a failure');
+    if (item.claimed_at === null || item.claim_token !== input.claimToken) {
+      throw new HistoryRefreshClaimLostError();
     }
     if (item.input_revision !== input.inputRevision) {
       throw new Error('History refresh input revision does not match the campaign item');
@@ -911,8 +1008,8 @@ export function markHistoryRefreshItemFailed(
     db.prepare(`
       UPDATE analysis_campaign_items
       SET status = 'failed', error_code = ?, safe_error = ?,
-          claimed_at = NULL, failed_at = ?, updated_at = ?
-      WHERE campaign_id = ? AND session_id = ?
+          claimed_at = NULL, claim_token = NULL, failed_at = ?, updated_at = ?
+      WHERE campaign_id = ? AND session_id = ? AND claim_token = ?
     `).run(
       errorCode,
       safeError,
@@ -920,6 +1017,7 @@ export function markHistoryRefreshItemFailed(
       now,
       input.campaignId,
       input.sessionId,
+      input.claimToken,
     );
     return {
       outcome: 'failed',
@@ -974,6 +1072,7 @@ export function publishHistoryRefreshSuccess(
     if (!item) {
       throw new Error(`History refresh item not found: ${input.campaignId}/${input.sessionId}`);
     }
+    if (item.claim_token !== input.claimToken) throw new HistoryRefreshClaimLostError();
     if (item.status !== 'session_staged' || item.claimed_at === null) {
       throw new Error(`History refresh item is not a claimed staged item (${item.status})`);
     }
@@ -1027,10 +1126,10 @@ export function publishHistoryRefreshSuccess(
 
     db.prepare(`
       UPDATE analysis_campaign_items
-      SET status = 'succeeded', claimed_at = NULL, error_code = NULL,
+      SET status = 'succeeded', claimed_at = NULL, claim_token = NULL, error_code = NULL,
           safe_error = NULL, failed_at = NULL, succeeded_at = ?, updated_at = ?
-      WHERE campaign_id = ? AND session_id = ?
-    `).run(now, now, input.campaignId, input.sessionId);
+      WHERE campaign_id = ? AND session_id = ? AND claim_token = ?
+    `).run(now, now, input.campaignId, input.sessionId, input.claimToken);
 
     const remaining = db.prepare(`
       SELECT COUNT(*)

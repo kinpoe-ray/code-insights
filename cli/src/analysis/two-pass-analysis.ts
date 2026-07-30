@@ -304,7 +304,13 @@ export async function prepareSessionAnalysisPass(
       messages: input.messages,
     });
     if (!outcome.ok || outcome.completeness !== 'complete') {
-      const message = outcome.ok ? 'Analysis result was incomplete.' : outcome.error.message;
+      const message = outcome.ok
+        ? 'Analysis result was incomplete. json_parse_error'
+        : [
+            outcome.error.message,
+            outcome.error.parseErrorType,
+            outcome.error.code === 'PARTIAL_RESPONSE' ? 'json_parse_error' : undefined,
+          ].filter(Boolean).join(' ');
       throw new Error(`Session analysis failed: ${message}`);
     }
     response = outcome.response;
@@ -319,16 +325,34 @@ export async function prepareSessionAnalysisPass(
       { preference: analysisLanguage, messages: input.messages },
     );
     const formattedMessages = formatMessagesForAnalysis(input.messages);
-    const result = await runGuardedAnalysis(runner, {
+    const analysisParams = {
       systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
       userPrompt: `${buildCacheableConversationBlock(formattedMessages).text}\n${instructions}`,
-    });
-    const parsed = parseAnalysisResponse(result.rawJson);
-    if (!parsed.success) throw new Error(`Session analysis failed: ${parsed.error.error_message}`);
+    };
+    // Retry once on malformed structured output, mirroring the prompt-quality
+    // pass. jsonrepair patches minor damage (trailing commas, truncation); a
+    // second model call covers the structurally broken JSON that weaker models
+    // emit and jsonrepair cannot reconstruct (e.g. missing keys / colons).
+    const attempts: RunAnalysisResult[] = [await runGuardedAnalysis(runner, analysisParams)];
+    let parsed = parseAnalysisResponse(attempts[0].rawJson);
+    if (!parsed.success) {
+      attempts.push(await runGuardedAnalysis(runner, analysisParams));
+      parsed = parseAnalysisResponse(attempts[attempts.length - 1].rawJson);
+    }
+    if (!parsed.success) {
+      throw new Error(
+        `Session analysis failed: ${parsed.error.error_type}: ${parsed.error.error_message}`,
+      );
+    }
+    const combined = combineRunAnalysisResults(attempts);
     response = parsed.data;
-    provider = result.provider;
-    model = result.model;
-    usage = normalizeUsage({ ...result, estimatedCostUsd: 0, chunkCount: 1 });
+    provider = combined.provider;
+    model = combined.model;
+    usage = normalizeUsage({
+      ...combined,
+      estimatedCostUsd: 0,
+      chunkCount: attempts.length,
+    });
   }
 
   return {
@@ -345,17 +369,26 @@ async function runPromptQualityPass(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
   analysisLanguage: AnalysisLanguage,
+  correctiveRetry = false,
 ): Promise<RunAnalysisResult> {
   const formattedMessages = formatMessagesForAnalysis(input.messages);
   const humanMessageCount = input.messages.filter(message => message.type === 'user').length;
   const assistantMessageCount = input.messages.filter(message => message.type === 'assistant').length;
   const toolExchangeCount = input.messages.filter(message => Boolean(message.tool_calls)).length;
-  const instructions = buildPromptQualityInstructions(
+  const baseInstructions = buildPromptQualityInstructions(
     input.session.project_name,
     { humanMessageCount, assistantMessageCount, toolExchangeCount },
     sessionMetadata(input),
     { preference: analysisLanguage, messages: input.messages },
   );
+  const instructions = correctiveRetry
+    ? `${baseInstructions}
+
+CORRECTION: Your previous response could not be parsed. Generate the complete
+answer again as one shorter, strict JSON object. Use double-quoted keys and
+strings, include every required field, and output no markdown, comments, or
+explanatory text.`
+    : baseInstructions;
   const conversationBlock = buildCacheableConversationBlock(formattedMessages);
 
   if (!isAnalysisLLMClient(runner)) {
@@ -376,7 +409,10 @@ async function runPromptQualityPass(
     throw new Error('Prompt quality request exceeds the provider context window.');
   }
   const startedAt = Date.now();
-  const response = await runner.chat(preparedRequest.messages, { temperature: 0 });
+  const response = await runner.chat(preparedRequest.messages, {
+    temperature: 0,
+    responseFormat: 'json',
+  });
   return {
     rawJson: response.content,
     durationMs: Date.now() - startedAt,
@@ -389,12 +425,12 @@ async function runPromptQualityPass(
   };
 }
 
-function combinePromptQualityAttempts(
+function combineRunAnalysisResults(
   attempts: RunAnalysisResult[],
 ): RunAnalysisResult {
   const latest = attempts.at(-1);
   if (!latest) {
-    throw new Error('Prompt quality analysis did not produce an attempt.');
+    throw new Error('Analysis did not produce an attempt.');
   }
   return {
     ...latest,
@@ -433,7 +469,7 @@ export async function preparePromptQualityPass(
   const attempts = [await runPromptQualityPass(input, runner, analysisLanguage)];
   let parsed = parsePromptQualityResponse(attempts[0].rawJson);
   if (!parsed.success) {
-    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage));
+    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true));
     parsed = parsePromptQualityResponse(attempts[1].rawJson);
   }
   if (!parsed.success) {
@@ -442,7 +478,7 @@ export async function preparePromptQualityPass(
       + `(response length ${parsed.error.response_length}).`,
     );
   }
-  const result = combinePromptQualityAttempts(attempts);
+  const result = combineRunAnalysisResults(attempts);
   const estimatedCostUsd = isAnalysisLLMClient(runner)
     ? calculateAnalysisCost(result.provider, result.model, {
         inputTokens: result.inputTokens,

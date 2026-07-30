@@ -300,12 +300,12 @@ describe('runMigrations', () => {
     db.close();
   });
 
-  it('latest schema version is V12 after migration', () => {
+  it('latest schema version is V13 after migration', () => {
     const db = new Database(':memory:');
     runMigrations(db);
 
     const row = db.prepare('SELECT MAX(version) AS v FROM schema_version').get() as { v: number };
-    expect(row.v).toBe(12);
+    expect(row.v).toBe(13);
 
     db.close();
   });

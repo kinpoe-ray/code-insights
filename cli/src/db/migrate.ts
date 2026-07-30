@@ -9,6 +9,7 @@ export interface MigrationResult {
   v10Applied: boolean;
   v11Applied: boolean;
   v12Applied: boolean;
+  v13Applied: boolean;
 }
 
 /**
@@ -27,6 +28,7 @@ export interface MigrationResult {
  * Version 10: Add persistent per-database identity metadata
  * Version 11: Make queue reruns durable and scope reflection snapshots by source
  * Version 12: Add durable, resumable full-history analysis campaigns
+ * Version 13: Add unique fencing tokens to history analysis claims
  */
 export function runMigrations(db: Database.Database): MigrationResult {
   // Create schema_version table first if it doesn't exist.
@@ -102,7 +104,16 @@ export function runMigrations(db: Database.Database): MigrationResult {
     v12Applied = true;
   }
 
-  return { v6Applied, v7Applied, v8Applied, v9Applied, v10Applied, v11Applied, v12Applied };
+  let v13Applied = false;
+  if (currentVersion < 13) {
+    applyMigration(db, () => applyV13(db));
+    v13Applied = true;
+  }
+
+  return {
+    v6Applied, v7Applied, v8Applied, v9Applied, v10Applied, v11Applied,
+    v12Applied, v13Applied,
+  };
 }
 
 function getCurrentVersion(db: Database.Database): number {
@@ -120,7 +131,7 @@ function applyMigration(db: Database.Database, apply: () => void): void {
 
 function hasColumn(
   db: Database.Database,
-  table: 'sessions' | 'analysis_usage',
+  table: 'sessions' | 'analysis_usage' | 'analysis_campaign_items',
   column: string,
 ): boolean {
   const columns = db.pragma(`table_info(${table})`) as Array<{ name: string }>;
@@ -401,4 +412,14 @@ function applyV12(db: Database.Database): void {
   `);
 
   db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(12);
+}
+
+function applyV13(db: Database.Database): void {
+  if (
+    hasTable(db, 'analysis_campaign_items')
+    && !hasColumn(db, 'analysis_campaign_items', 'claim_token')
+  ) {
+    db.exec('ALTER TABLE analysis_campaign_items ADD COLUMN claim_token TEXT');
+  }
+  db.prepare('INSERT INTO schema_version (version) VALUES (?)').run(13);
 }

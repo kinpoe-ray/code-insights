@@ -460,8 +460,8 @@ describe('two-pass preparation and publication', () => {
       });
       expect(chat).toHaveBeenCalledTimes(2);
       expect(chat.mock.calls.map(call => call[1])).toEqual([
-        { temperature: 0 },
-        { temperature: 0 },
+        { temperature: 0, responseFormat: 'json' },
+        { temperature: 0, responseFormat: 'json' },
       ]);
     } finally {
       now.mockRestore();
@@ -617,6 +617,87 @@ describe('two-pass preparation and publication', () => {
     });
     expect(runAnalysis).toHaveBeenCalledTimes(2);
     expect(JSON.stringify(stage)).not.toContain('retry-only-sentinel');
+  });
+
+  it('retries malformed session-analysis output once and accounts for both calls', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionAnalysisPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runAnalysis = vi.fn()
+      .mockResolvedValueOnce({
+        rawJson: 'not json at all',
+        durationMs: 7,
+        inputTokens: 10,
+        outputTokens: 20,
+        cacheCreationTokens: 1,
+        cacheReadTokens: 2,
+        provider: 'native',
+        model: 'model-a',
+      })
+      .mockResolvedValueOnce({
+        rawJson: JSON.stringify(sessionResponse),
+        durationMs: 11,
+        inputTokens: 12,
+        outputTokens: 22,
+        cacheCreationTokens: 3,
+        cacheReadTokens: 4,
+        provider: 'native',
+        model: 'model-a',
+      });
+    const runner: AnalysisRunner = {
+      name: 'native-test',
+      runAnalysis,
+    };
+
+    const stage = await prepareSessionAnalysisPass(frozen, runner, 'zh-CN');
+
+    expect(stage.response).toEqual(sessionResponse);
+    expect(stage.usage).toEqual({
+      inputTokens: 22,
+      outputTokens: 42,
+      cacheCreationTokens: 4,
+      cacheReadTokens: 6,
+      estimatedCostUsd: 0,
+      durationMs: 18,
+      chunkCount: 2,
+    });
+    expect(runAnalysis).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws an error_type-labelled failure when session-analysis output stays malformed', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionAnalysisPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runAnalysis = vi.fn()
+      .mockResolvedValue({
+        rawJson: 'still not json',
+        durationMs: 5,
+        inputTokens: 1,
+        outputTokens: 1,
+        provider: 'native',
+        model: 'model-a',
+      });
+    const runner: AnalysisRunner = {
+      name: 'native-test',
+      runAnalysis,
+    };
+
+    const error = await prepareSessionAnalysisPass(frozen, runner, 'zh-CN').then(
+      () => null,
+      failure => failure as Error,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    // The error_type token in the message lets reanalyze's classifyFailure()
+    // tag this as INVALID_MODEL_OUTPUT instead of the generic ANALYSIS_FAILED
+    // fallback, so the alert can name the real cause.
+    expect(error?.message).toMatch(/no_json_found/i);
+    expect(error?.message).not.toContain('still not json');
+    expect(runAnalysis).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a pre-language-policy staged session before starting pass two', async () => {

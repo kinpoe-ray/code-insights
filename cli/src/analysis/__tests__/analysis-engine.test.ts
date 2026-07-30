@@ -125,6 +125,46 @@ describe('AnalysisEngine contract', () => {
     });
   });
 
+  it('retries malformed structured output with corrective JSON instructions', async () => {
+    const requests: Array<{ messages: LLMMessage[]; options: unknown }> = [];
+    const engine = createAnalysisEngine({
+      client: client({
+        chat: async (messages, options) => {
+          requests.push({ messages, options });
+          return {
+            content: requests.length === 1 ? '{"summary" "broken"}' : validResponse,
+            usage: { inputTokens: 10, outputTokens: 5 },
+          };
+        },
+      }),
+    });
+
+    const result = await engine.analyzeSession({
+      session,
+      messages: [message('message-1', 'Analyze this session.')],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.options).toMatchObject({
+      temperature: 0,
+      responseFormat: 'json',
+    });
+    expect(JSON.stringify(requests[1]?.messages)).toContain('CORRECTION:');
+    expect(JSON.stringify(requests[1]?.messages)).toContain('strict JSON object');
+    expect(requests[1]?.options).toMatchObject({
+      temperature: 0,
+      responseFormat: 'json',
+    });
+    if (!result.ok) throw new Error('expected corrected response');
+    expect(result.stats.callCount).toBe(2);
+    expect(result.usage).toMatchObject({
+      inputTokens: 20,
+      outputTokens: 10,
+      callCount: 2,
+    });
+  });
+
   it('budgets the complete request, preserves content blocks, and aggregates chunk plus facet calls', async () => {
     const requests: LLMMessage[][] = [];
     const chunkResponse = (title: string) => JSON.stringify({
@@ -261,16 +301,16 @@ describe('AnalysisEngine contract', () => {
       chunkCount: 2,
       successfulChunks: 1,
       failedChunks: 1,
-      callCount: 2,
+      callCount: 3,
       facetCallCount: 0,
     });
     expect(result.usage).toMatchObject({
-      inputTokens: 300,
-      outputTokens: 30,
+      inputTokens: 600,
+      outputTokens: 60,
       chunkCount: 2,
-      callCount: 2,
+      callCount: 3,
     });
-    expect(callCount).toBe(2);
+    expect(callCount).toBe(3);
   });
 
   it('checks abort before every chunk and returns without merging or making a facet call', async () => {
