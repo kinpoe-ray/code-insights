@@ -319,16 +319,34 @@ export async function prepareSessionAnalysisPass(
       { preference: analysisLanguage, messages: input.messages },
     );
     const formattedMessages = formatMessagesForAnalysis(input.messages);
-    const result = await runGuardedAnalysis(runner, {
+    const analysisParams = {
       systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
       userPrompt: `${buildCacheableConversationBlock(formattedMessages).text}\n${instructions}`,
-    });
-    const parsed = parseAnalysisResponse(result.rawJson);
-    if (!parsed.success) throw new Error(`Session analysis failed: ${parsed.error.error_message}`);
+    };
+    // Retry once on malformed structured output, mirroring the prompt-quality
+    // pass. jsonrepair patches minor damage (trailing commas, truncation); a
+    // second model call covers the structurally broken JSON that weaker models
+    // emit and jsonrepair cannot reconstruct (e.g. missing keys / colons).
+    const attempts: RunAnalysisResult[] = [await runGuardedAnalysis(runner, analysisParams)];
+    let parsed = parseAnalysisResponse(attempts[0].rawJson);
+    if (!parsed.success) {
+      attempts.push(await runGuardedAnalysis(runner, analysisParams));
+      parsed = parseAnalysisResponse(attempts[attempts.length - 1].rawJson);
+    }
+    if (!parsed.success) {
+      throw new Error(
+        `Session analysis failed: ${parsed.error.error_type}: ${parsed.error.error_message}`,
+      );
+    }
+    const combined = combineRunAnalysisResults(attempts);
     response = parsed.data;
-    provider = result.provider;
-    model = result.model;
-    usage = normalizeUsage({ ...result, estimatedCostUsd: 0, chunkCount: 1 });
+    provider = combined.provider;
+    model = combined.model;
+    usage = normalizeUsage({
+      ...combined,
+      estimatedCostUsd: 0,
+      chunkCount: attempts.length,
+    });
   }
 
   return {
@@ -389,12 +407,12 @@ async function runPromptQualityPass(
   };
 }
 
-function combinePromptQualityAttempts(
+function combineRunAnalysisResults(
   attempts: RunAnalysisResult[],
 ): RunAnalysisResult {
   const latest = attempts.at(-1);
   if (!latest) {
-    throw new Error('Prompt quality analysis did not produce an attempt.');
+    throw new Error('Analysis did not produce an attempt.');
   }
   return {
     ...latest,
@@ -442,7 +460,7 @@ export async function preparePromptQualityPass(
       + `(response length ${parsed.error.response_length}).`,
     );
   }
-  const result = combinePromptQualityAttempts(attempts);
+  const result = combineRunAnalysisResults(attempts);
   const estimatedCostUsd = isAnalysisLLMClient(runner)
     ? calculateAnalysisCost(result.provider, result.model, {
         inputTokens: result.inputTokens,
