@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ClaudeInsightConfig } from '../../types.js';
+import { HistoryRefreshClaimLostError } from '../../analysis/history-refresh-db.js';
 import {
   buildReanalyzeCommand,
   type ReanalyzeDependencies,
@@ -29,6 +30,8 @@ interface TestItem {
   inputRevision: string;
   status: ItemStatus;
   sessionStage: unknown | null;
+  claimedAt: string | null;
+  claimToken: string | null;
 }
 
 const config: ClaudeInsightConfig = {
@@ -67,6 +70,8 @@ function item(ordinal: number, overrides: Partial<TestItem> = {}): TestItem {
     inputRevision: `revision-${ordinal + 1}`,
     status: 'pending',
     sessionStage: null,
+    claimedAt: `2026-07-21T00:00:0${ordinal}.000Z`,
+    claimToken: `claim-token-${ordinal}`,
     ...overrides,
   };
 }
@@ -123,6 +128,13 @@ function makeDependencies(overrides: Partial<ReanalyzeDependencies> = {}) {
       campaignId: input.campaignId,
       sessionId: input.sessionId,
       inputRevision: input.inputRevision,
+    })) as never,
+    refreshInput: vi.fn((_db, input) => item(0, {
+      campaignId: input.campaignId,
+      sessionId: input.sessionId,
+      inputRevision: input.inputRevision,
+      messageCount: input.messageCount,
+      status: 'pending',
     })) as never,
     markItemFailed: vi.fn((_db, input) => ({
       outcome: 'failed',
@@ -660,6 +672,7 @@ describe('reanalyze command', () => {
       campaignId: only.campaignId,
       sessionId: only.sessionId,
       inputRevision: only.inputRevision,
+      claimToken: only.claimToken,
     });
     expect(deps.prepareSessionPass).not.toHaveBeenCalled();
     expect(deps.preparePromptQualityPass).not.toHaveBeenCalled();
@@ -768,7 +781,7 @@ describe('reanalyze command', () => {
     expect(deps.acquireLock).not.toHaveBeenCalled();
   });
 
-  it('fails a changed input revision before any paid pass', async () => {
+  it('refreshes a changed input revision before any paid pass', async () => {
     const only = item(0);
     const { deps } = makeDependencies({
       claimNextItem: vi.fn().mockReturnValueOnce(only).mockReturnValueOnce(null) as never,
@@ -781,17 +794,87 @@ describe('reanalyze command', () => {
 
     await parse(deps, ['run', '--batch-size', '1', '--quiet']);
 
-    expect(deps.markItemFailed).toHaveBeenCalledWith(expect.anything(), {
+    expect(deps.refreshInput).toHaveBeenCalledWith(expect.anything(), {
       campaignId: only.campaignId,
       sessionId: only.sessionId,
-      inputRevision: only.inputRevision,
-      error: {
-        code: 'INPUT_CHANGED',
-        message: expect.stringMatching(/changed/i),
-      },
+      previousInputRevision: only.inputRevision,
+      claimToken: only.claimToken,
+      inputRevision: 'a-new-revision',
+      messageCount: only.messageCount,
+      refundAttempt: true,
     });
+    expect(deps.markItemFailed).not.toHaveBeenCalled();
     expect(deps.prepareSessionPass).not.toHaveBeenCalled();
     expect(deps.preparePromptQualityPass).not.toHaveBeenCalled();
+  });
+
+  it('refreshes an input that changes during a paid pass instead of failing permanently', async () => {
+    const only = item(0);
+    const latestInput = {
+      session: { id: only.sessionId, message_count: 11 },
+      messages: [],
+      inputRevision: 'revision-after-paid-pass',
+    };
+    const { deps } = makeDependencies({
+      freezeInput: vi.fn()
+        .mockReturnValueOnce({
+          session: { id: only.sessionId, message_count: only.messageCount },
+          messages: [],
+          inputRevision: only.inputRevision,
+        })
+        .mockReturnValueOnce(latestInput) as never,
+      prepareSessionPass: vi.fn(async () => {
+        throw new Error('History refresh source session changed after campaign creation');
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.refreshInput).toHaveBeenCalledWith(expect.anything(), {
+      campaignId: only.campaignId,
+      sessionId: only.sessionId,
+      previousInputRevision: only.inputRevision,
+      claimToken: only.claimToken,
+      inputRevision: latestInput.inputRevision,
+      messageCount: latestInput.session.message_count,
+      refundAttempt: false,
+    });
+    expect(deps.markItemFailed).not.toHaveBeenCalled();
+    expect(deps.writeError).not.toHaveBeenCalled();
+  });
+
+  it('skips safely when another worker owns the claim before input refresh', async () => {
+    const only = item(0);
+    const { deps } = makeDependencies({
+      freezeInput: vi.fn(() => ({
+        session: { id: only.sessionId, message_count: 11 },
+        messages: [],
+        inputRevision: 'newer-revision',
+      })) as never,
+      refreshInput: vi.fn(() => {
+        throw new HistoryRefreshClaimLostError();
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.markItemFailed).not.toHaveBeenCalled();
+    expect(deps.writeError).not.toHaveBeenCalled();
+  });
+
+  it('continues the batch when ownership is lost while staging', async () => {
+    const { deps } = makeDependencies({
+      stageSessionPass: vi.fn(() => {
+        throw new HistoryRefreshClaimLostError();
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '2', '--quiet']);
+
+    expect(deps.claimNextItem).toHaveBeenCalledTimes(2);
+    expect(deps.prepareSessionPass).toHaveBeenCalledTimes(2);
+    expect(deps.markItemFailed).not.toHaveBeenCalled();
+    expect(deps.writeError).not.toHaveBeenCalled();
   });
 
   it('stages pass one immediately and leaves published results untouched when pass two fails', async () => {
@@ -810,6 +893,7 @@ describe('reanalyze command', () => {
       campaignId: only.campaignId,
       sessionId: only.sessionId,
       inputRevision: only.inputRevision,
+      claimToken: only.claimToken,
       error: {
         code: 'ANALYSIS_FAILED',
         message: 'Analysis failed; previous results were kept.',
@@ -817,6 +901,11 @@ describe('reanalyze command', () => {
     });
     expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls)).not.toContain('secret-api-key');
     expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls)).not.toContain('example.invalid');
+    expect(deps.writeError).toHaveBeenCalledWith(expect.stringMatching(
+      /campaign=campaign-1 session=session-1 code=ANALYSIS_FAILED type=Error/,
+    ));
+    expect(JSON.stringify(vi.mocked(deps.writeError).mock.calls)).not.toContain('secret-api-key');
+    expect(JSON.stringify(vi.mocked(deps.writeError).mock.calls)).not.toContain('example.invalid');
   });
 
   it.each([
@@ -840,12 +929,18 @@ describe('reanalyze command', () => {
       campaignId: only.campaignId,
       sessionId: only.sessionId,
       inputRevision: only.inputRevision,
+      claimToken: only.claimToken,
       error: {
         code: 'INVALID_MODEL_OUTPUT',
         message: 'Model structured output remained invalid after retry; previous results were kept.',
       },
     });
     expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls))
+      .not.toContain('private-response-body');
+    expect(deps.writeError).toHaveBeenCalledWith(expect.stringContaining(
+      `session=${only.sessionId} code=INVALID_MODEL_OUTPUT type=Error parse=${parseCategory}`,
+    ));
+    expect(JSON.stringify(vi.mocked(deps.writeError).mock.calls))
       .not.toContain('private-response-body');
   });
 
@@ -865,6 +960,7 @@ describe('reanalyze command', () => {
       campaignId: 'campaign-1',
       sessionId: 'session-1',
       inputRevision: 'revision-1',
+      claimToken: item(0).claimToken,
       error: {
         code,
         message: expect.not.stringContaining(message),

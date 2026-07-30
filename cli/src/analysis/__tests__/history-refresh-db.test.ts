@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -12,11 +12,13 @@ import {
   getActiveHistoryRefreshCampaign,
   getHistoryRefreshSnapshot,
   getLatestHistoryRefreshCampaign,
+  HistoryRefreshClaimLostError,
   inspectHistoryRefreshCampaign,
   markHistoryRefreshItemFailed,
   pauseHistoryRefreshCampaign,
   previewHistoryRefresh,
   publishHistoryRefreshSuccess,
+  refreshHistoryRefreshInput,
   releaseHistoryRefreshClaim,
   resumeHistoryRefreshCampaign,
   retryFailedHistoryRefreshItems,
@@ -293,6 +295,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: 'first',
       inputRevision: firstClaim!.inputRevision,
+      claimToken: firstClaim!.claimToken!,
       sessionStage: { summary: { title: 'Prepared, not yet visible' } },
       sessionUsage: { inputTokens: 120, outputTokens: 30 },
       now: '2026-07-21T01:01:00.000Z',
@@ -329,6 +332,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: pending.sessionId,
       inputRevision: pending.inputRevision,
+      claimToken: pending.claimToken!,
       sessionStage: { summary: { title: 'Keep this stage' } },
       sessionUsage: { inputTokens: 12 },
     });
@@ -338,6 +342,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: staged.sessionId,
       inputRevision: staged.inputRevision,
+      claimToken: staged.claimToken!,
       now: '2026-07-21T03:00:00.000Z',
     });
 
@@ -367,10 +372,132 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: claimed.sessionId,
       inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
     });
 
     expect(released).toMatchObject({ status: 'pending', claimedAt: null, attempts: 0 });
     expect(claimNextHistoryRefreshItem(db, campaign.id)).toMatchObject({ attempts: 1 });
+    db.close();
+  });
+
+  it('fences a worker whose claim lease was reclaimed by another worker', () => {
+    const db = freshDb();
+    insertSession(db, 'session-1', '2026-07-21T08:00:00Z', 3);
+    const campaign = createHistoryRefreshCampaign(db, {
+      provider: 'anthropic',
+      model: 'glm-5.2',
+      baseUrlFingerprint: 'endpoint-fingerprint',
+      scope: {},
+    });
+    const stale = claimNextHistoryRefreshItem(db, campaign.id, {
+      now: '2026-07-21T01:00:00.000Z',
+      claimLeaseMs: 0,
+    })!;
+    const current = claimNextHistoryRefreshItem(db, campaign.id, {
+      now: '2026-07-21T01:00:00.000Z',
+      claimLeaseMs: 0,
+    })!;
+
+    expect(current.claimedAt).toBe(stale.claimedAt);
+    expect(current.claimToken).not.toBe(stale.claimToken);
+    expect(() => stageHistoryRefreshSession(db, {
+      campaignId: campaign.id,
+      sessionId: stale.sessionId,
+      inputRevision: stale.inputRevision,
+      claimToken: stale.claimToken!,
+      sessionStage: { summary: { title: 'Stale worker output' } },
+      sessionUsage: { inputTokens: 99 },
+    })).toThrow(HistoryRefreshClaimLostError);
+    expect(() => releaseHistoryRefreshClaim(db, {
+      campaignId: campaign.id,
+      sessionId: stale.sessionId,
+      inputRevision: stale.inputRevision,
+      claimToken: stale.claimToken!,
+    })).toThrow(HistoryRefreshClaimLostError);
+    expect(inspectHistoryRefreshCampaign(db, campaign.id).items[0]).toMatchObject({
+      status: 'pending',
+      claimedAt: current.claimedAt,
+      claimToken: current.claimToken,
+      sessionStage: null,
+    });
+
+    stageHistoryRefreshSession(db, {
+      campaignId: campaign.id,
+      sessionId: current.sessionId,
+      inputRevision: current.inputRevision,
+      claimToken: current.claimToken!,
+      sessionStage: { summary: { title: 'Current worker output' } },
+      sessionUsage: { inputTokens: 10 },
+    });
+    const publishOwner = claimNextHistoryRefreshItem(db, campaign.id, {
+      now: '2026-07-21T01:00:00.000Z',
+      claimLeaseMs: 0,
+    })!;
+    const publish = vi.fn();
+    expect(() => publishHistoryRefreshSuccess(db, {
+      campaignId: campaign.id,
+      sessionId: publishOwner.sessionId,
+      inputRevision: publishOwner.inputRevision,
+      claimToken: current.claimToken!,
+      publish,
+    })).toThrow(HistoryRefreshClaimLostError);
+    expect(publish).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it('atomically refreshes changed input and discards stale staged work', () => {
+    const db = freshDb();
+    insertSession(db, 'session-1', '2026-07-21T08:00:00Z', 3);
+    const campaign = createHistoryRefreshCampaign(db, {
+      provider: 'anthropic',
+      model: 'glm-5.2',
+      baseUrlFingerprint: 'endpoint-fingerprint',
+      scope: {},
+    });
+    const firstClaim = claimNextHistoryRefreshItem(db, campaign.id)!;
+    stageHistoryRefreshSession(db, {
+      campaignId: campaign.id,
+      sessionId: firstClaim.sessionId,
+      inputRevision: firstClaim.inputRevision,
+      claimToken: firstClaim.claimToken!,
+      sessionStage: { summary: { title: 'Must not survive an input change' } },
+      sessionUsage: { inputTokens: 12 },
+    });
+    const stagedClaim = claimNextHistoryRefreshItem(db, campaign.id)!;
+
+    db.prepare(`
+      INSERT INTO messages (
+        id, session_id, type, content, tool_calls, tool_results, timestamp
+      ) VALUES ('session-1-message-2', 'session-1', 'assistant',
+                'New content', '[]', '[]', '2026-07-21T08:01:00Z')
+    `).run();
+    db.prepare('UPDATE sessions SET message_count = 4 WHERE id = ?').run('session-1');
+    const latest = freezeSessionAnalysisInput('session-1', db);
+
+    const refreshed = refreshHistoryRefreshInput(db, {
+      campaignId: campaign.id,
+      sessionId: stagedClaim.sessionId,
+      previousInputRevision: stagedClaim.inputRevision,
+      claimToken: stagedClaim.claimToken!,
+      inputRevision: latest.inputRevision,
+      messageCount: latest.session.message_count,
+      refundAttempt: true,
+    });
+
+    expect(refreshed).toMatchObject({
+      status: 'pending',
+      claimedAt: null,
+      attempts: 0,
+      inputRevision: latest.inputRevision,
+      messageCount: 4,
+      sessionStage: null,
+      sessionUsage: null,
+    });
+    expect(claimNextHistoryRefreshItem(db, campaign.id)).toMatchObject({
+      inputRevision: latest.inputRevision,
+      messageCount: 4,
+      attempts: 1,
+    });
     db.close();
   });
 
@@ -389,6 +516,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: claimed.sessionId,
       inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
       sessionStage: { apiKey: 'must-never-be-stored' },
       sessionUsage: { inputTokens: 1 },
     })).toThrow(/credential field/);
@@ -396,6 +524,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: claimed.sessionId,
       inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
       sessionStage: { 'x-api-key': 'alternate-secret' },
       sessionUsage: { inputTokens: 1 },
     })).toThrow(/credential field/);
@@ -403,6 +532,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: claimed.sessionId,
       inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
       sessionStage: { summary: { title: 'Bearer embedded-secret' } },
       sessionUsage: { inputTokens: 1 },
     })).toThrow(/credential value/);
@@ -426,6 +556,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: firstPass.sessionId,
       inputRevision: firstPass.inputRevision,
+      claimToken: firstPass.claimToken!,
       sessionStage: { summary: { title: 'Staged title' } },
       sessionUsage: { inputTokens: 10 },
     });
@@ -435,6 +566,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: secondPass.sessionId,
       inputRevision: secondPass.inputRevision,
+      claimToken: secondPass.claimToken!,
       error: {
         code: 'provider_error',
         message: 'Authorization: Bearer top-secret api_key=also-secret upstream rejected request',
@@ -470,6 +602,7 @@ describe('history refresh campaign store', () => {
         campaignId: campaign.id,
         sessionId: item.sessionId,
         inputRevision: item.inputRevision,
+        claimToken: item.claimToken!,
         error: { code: 'temporary', message: 'temporary provider failure' },
       });
     };
@@ -568,10 +701,18 @@ describe('history refresh campaign store', () => {
     cancelHistoryRefreshCampaign(db, campaign.id, '2026-07-21T09:00:00.000Z');
     const before = inspectHistoryRefreshCampaign(db, campaign.id).items[0];
 
+    expect(releaseHistoryRefreshClaim(db, {
+      campaignId: campaign.id,
+      sessionId: claimed.sessionId,
+      inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
+    })).toEqual(before);
+
     const result = markHistoryRefreshItemFailed(db, {
       campaignId: campaign.id,
       sessionId: claimed.sessionId,
       inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
       error: { code: 'provider_error', message: 'late provider failure' },
       now: '2026-07-21T09:01:00.000Z',
     });
@@ -600,6 +741,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: firstPass.sessionId,
       inputRevision: firstPass.inputRevision,
+      claimToken: firstPass.claimToken!,
       sessionStage: { summary: { title: 'New title' } },
       sessionUsage: { inputTokens: 25, outputTokens: 5 },
     });
@@ -609,6 +751,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: secondPass.sessionId,
       inputRevision: secondPass.inputRevision,
+      claimToken: secondPass.claimToken!,
       publish: (transactionDb) => {
         transactionDb.prepare("DELETE FROM insights WHERE session_id = 'session-1'").run();
         throw new Error('simulated publish failure');
@@ -621,6 +764,7 @@ describe('history refresh campaign store', () => {
       campaignId: campaign.id,
       sessionId: secondPass.sessionId,
       inputRevision: secondPass.inputRevision,
+      claimToken: secondPass.claimToken!,
       now: '2026-07-21T02:00:00.000Z',
       publish: (transactionDb) => {
         transactionDb.prepare("DELETE FROM insights WHERE session_id = 'session-1'").run();

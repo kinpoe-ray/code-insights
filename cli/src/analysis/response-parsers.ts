@@ -164,6 +164,102 @@ function buildResponsePreview(text: string, head = 200, tail = 200): string {
   return `${text.slice(0, head)}\n...[${text.length - head - tail} chars omitted]...\n${text.slice(-tail)}`;
 }
 
+function extractNamedContainer(
+  response: string,
+  field: string,
+  opening: '{' | '[',
+): string | null {
+  const keyPattern = new RegExp(`["']${field}["']\\s*:`, 'i');
+  const keyMatch = keyPattern.exec(response);
+  if (!keyMatch) return null;
+  const start = response.indexOf(opening, keyMatch.index + keyMatch[0].length);
+  if (start === -1) return null;
+
+  const closing = opening === '{' ? '}' : ']';
+  let depth = 0;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (let index = start; index < response.length; index++) {
+    const char = response[index];
+    if (quote !== null) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (char === opening) {
+      depth++;
+    } else if (char === closing) {
+      depth--;
+      if (depth === 0) return response.slice(start, index + 1);
+    }
+  }
+  return null;
+}
+
+function parseRecoverableContainer(response: string, field: string, opening: '{' | '['): unknown {
+  const container = extractNamedContainer(response, field, opening);
+  if (!container) return undefined;
+  try {
+    return JSON.parse(container);
+  } catch {
+    try {
+      return JSON.parse(jsonrepair(container));
+    } catch {
+      return undefined;
+    }
+  }
+}
+
+function salvageAnalysisResponse(response: string): AnalysisResponse | undefined {
+  const summaryValue = parseRecoverableContainer(response, 'summary', '{');
+  const decisionsValue = parseRecoverableContainer(response, 'decisions', '[');
+  const learningsValue = parseRecoverableContainer(response, 'learnings', '[');
+  const facetsValue = parseRecoverableContainer(response, 'facets', '{');
+  if (
+    !isRecord(summaryValue)
+    || !isNonEmptyString(summaryValue.title)
+    || typeof summaryValue.content !== 'string'
+    || !Array.isArray(summaryValue.bullets)
+    || !summaryValue.bullets.every(item => typeof item === 'string')
+    || !Array.isArray(decisionsValue)
+    || !decisionsValue.every(item => (
+      isRecord(item)
+      && isNonEmptyString(item.title)
+      && isNonEmptyString(item.reasoning)
+    ))
+    || !Array.isArray(learningsValue)
+    || !learningsValue.every(item => isRecord(item) && isNonEmptyString(item.title))
+  ) return undefined;
+  const facets = validateAnalysisFacets(facetsValue);
+  if (!facets) return undefined;
+  const outcome = summaryValue.outcome === 'success'
+    || summaryValue.outcome === 'partial'
+    || summaryValue.outcome === 'abandoned'
+    || summaryValue.outcome === 'blocked'
+    ? summaryValue.outcome
+    : undefined;
+
+  const salvaged: AnalysisResponse = {
+    summary: {
+      title: summaryValue.title.trim(),
+      content: summaryValue.content,
+      ...(outcome && { outcome }),
+      bullets: summaryValue.bullets,
+    },
+    decisions: decisionsValue as AnalysisResponse['decisions'],
+    learnings: learningsValue as AnalysisResponse['learnings'],
+    facets,
+  };
+  return salvaged;
+}
+
 export function extractJsonPayload(response: string): string | null {
   const tagged = response.match(/<json>\s*([\s\S]*?)\s*<\/json>/i);
   if (tagged?.[1]) return tagged[1].trim();
@@ -313,12 +409,17 @@ export function parseAnalysisResponse(response: string): ParseResult<AnalysisRes
     try {
       parsed = JSON.parse(jsonrepair(jsonPayload)) as AnalysisResponse;
     } catch (err) {
+      const salvaged = salvageAnalysisResponse(jsonPayload);
+      if (salvaged) {
+        parsed = salvaged;
+      } else {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('Failed to parse analysis response (after jsonrepair):', err);
       return {
         success: false,
         error: { error_type: 'json_parse_error', error_message: msg, response_length, response_preview: preview },
       };
+      }
     }
   }
 

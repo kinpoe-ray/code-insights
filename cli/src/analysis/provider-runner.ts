@@ -127,6 +127,9 @@ function makeOpenAIChat(apiKey: string, model: string): LLMChatFn {
           })),
           temperature: options?.temperature ?? 0.7,
           max_tokens: 8192,
+          ...(options?.responseFormat !== 'text' && {
+            response_format: { type: 'json_object' },
+          }),
         }),
       });
     } catch (error) {
@@ -480,7 +483,14 @@ export class ProviderRunner implements AnalysisRunner, LLMClient {
       { role: 'user', content: params.userPrompt },
     ];
 
-    const response = await this.chat(messages);
+    // Analysis is consumed as structured JSON. Keep generation deterministic
+    // and ask compatible adapters to enable their JSON mode. Anthropic
+    // adapters ignore responseFormat today, but still benefit from the lower
+    // temperature (including Anthropic-compatible endpoints).
+    const response = await this.chat(messages, {
+      temperature: 0,
+      responseFormat: 'json',
+    });
 
     return {
       rawJson: response.content,

@@ -460,8 +460,8 @@ describe('two-pass preparation and publication', () => {
       });
       expect(chat).toHaveBeenCalledTimes(2);
       expect(chat.mock.calls.map(call => call[1])).toEqual([
-        { temperature: 0 },
-        { temperature: 0 },
+        { temperature: 0, responseFormat: 'json' },
+        { temperature: 0, responseFormat: 'json' },
       ]);
     } finally {
       now.mockRestore();

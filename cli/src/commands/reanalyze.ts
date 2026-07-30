@@ -13,11 +13,13 @@ import {
   createHistoryRefreshCampaign,
   getActiveHistoryRefreshCampaign,
   getLatestHistoryRefreshCampaign,
+  HistoryRefreshClaimLostError,
   inspectHistoryRefreshCampaign,
   markHistoryRefreshItemFailed,
   pauseHistoryRefreshCampaign,
   previewHistoryRefresh,
   publishHistoryRefreshSuccess,
+  refreshHistoryRefreshInput,
   releaseHistoryRefreshClaim,
   resumeHistoryRefreshCampaign,
   retryFailedHistoryRefreshItems,
@@ -139,6 +141,7 @@ export interface ReanalyzeDependencies {
   ) => HistoryRefreshCampaignItem | null;
   stageSessionPass: typeof stageHistoryRefreshSession;
   releaseClaim: typeof releaseHistoryRefreshClaim;
+  refreshInput: typeof refreshHistoryRefreshInput;
   markItemFailed: typeof markHistoryRefreshItemFailed;
   publishSuccess: typeof publishHistoryRefreshSuccess;
   freezeInput: (sessionId: string) => FrozenSessionAnalysisInput;
@@ -198,6 +201,7 @@ const DEFAULT_DEPENDENCIES: ReanalyzeDependencies = {
   claimNextItem: claimNextHistoryRefreshItem,
   stageSessionPass: stageHistoryRefreshSession,
   releaseClaim: releaseHistoryRefreshClaim,
+  refreshInput: refreshHistoryRefreshInput,
   markItemFailed: markHistoryRefreshItemFailed,
   publishSuccess: publishHistoryRefreshSuccess,
   freezeInput: freezeSessionAnalysisInput,
@@ -407,11 +411,14 @@ function releaseItemClaim(
   deps: ReanalyzeDependencies,
   db: Database.Database,
   item: HistoryRefreshCampaignItem,
+  claimToken = item.claimToken,
 ): void {
+  if (!claimToken) throw new Error('Cannot release a history refresh item without a claim token');
   deps.releaseClaim(db, {
     campaignId: item.campaignId,
     sessionId: item.sessionId,
     inputRevision: item.inputRevision,
+    claimToken,
   });
 }
 
@@ -462,6 +469,16 @@ function classifyFailure(error: unknown): {
     safeMessage: 'Analysis failed; previous results were kept.',
     stopReason: null,
   };
+}
+
+function failureDiagnostic(error: unknown, classifiedCode: string): string {
+  const errorName = error instanceof Error && /^[A-Za-z][A-Za-z0-9]*$/.test(error.name)
+    ? error.name
+    : 'UnknownError';
+  const message = error instanceof Error ? error.message : String(error);
+  const parseType = message.match(/\b(no_json_found|json_parse_error|invalid_structure)\b/i)?.[1]
+    ?.toLowerCase();
+  return `code=${classifiedCode} type=${errorName}${parseType ? ` parse=${parseType}` : ''}`;
 }
 
 function emitRunResult(
@@ -579,20 +596,23 @@ async function runCommand(
       attempted++;
 
       let hasClaim = true;
+      const initialClaimToken = claimed.claimToken;
+      if (!initialClaimToken) throw new Error('Claimed history refresh item has no claim token');
+      let claimToken: string = initialClaimToken;
       try {
         const input = deps.freezeInput(claimed.sessionId);
         if (
           input.inputRevision !== claimed.inputRevision
           || input.session.message_count !== claimed.messageCount
         ) {
-          deps.markItemFailed(db, {
+          deps.refreshInput(db, {
             campaignId: campaign.id,
             sessionId: claimed.sessionId,
-            inputRevision: claimed.inputRevision,
-            error: {
-              code: 'INPUT_CHANGED',
-              message: 'Session changed after campaign creation; previous results were kept.',
-            },
+            previousInputRevision: claimed.inputRevision,
+            claimToken,
+            inputRevision: input.inputRevision,
+            messageCount: input.session.message_count,
+            refundAttempt: true,
           });
           hasClaim = false;
           continue;
@@ -602,7 +622,7 @@ async function runCommand(
         // paused the campaign after this item was claimed.
         const beforeFirstPaidPass = currentStopReason(deps, db, campaign.id, deadlineMs);
         if (beforeFirstPaidPass || !currentTargetMatches(deps, campaign)) {
-          releaseItemClaim(deps, db, claimed);
+          releaseItemClaim(deps, db, claimed, claimToken);
           hasClaim = false;
           stopReason = beforeFirstPaidPass ?? 'configuration_mismatch';
           break;
@@ -620,7 +640,7 @@ async function runCommand(
           // Pause/deadline may still preserve this completed pass-one stage.
           const afterSessionPass = deps.inspectCampaign(db, campaign.id).campaign.status;
           if (afterSessionPass === 'cancelled' || !currentTargetMatches(deps, campaign)) {
-            releaseItemClaim(deps, db, claimed);
+            releaseItemClaim(deps, db, claimed, claimToken);
             hasClaim = false;
             stopReason = afterSessionPass === 'cancelled'
               ? 'cancelled'
@@ -632,6 +652,7 @@ async function runCommand(
             campaignId: campaign.id,
             sessionId: claimed.sessionId,
             inputRevision: claimed.inputRevision,
+            claimToken,
             sessionStage,
             sessionUsage: sessionStage.usage,
           });
@@ -658,6 +679,9 @@ async function runCommand(
             break;
           }
           hasClaim = true;
+          const reclaimedToken = stagedClaim.claimToken;
+          if (!reclaimedToken) throw new Error('Reclaimed history refresh item has no claim token');
+          claimToken = reclaimedToken;
         } else {
           sessionStage = claimed.sessionStage as PreparedSessionPass;
         }
@@ -666,7 +690,7 @@ async function runCommand(
         // pause/deadline race immediately before pass two as well.
         const beforePromptQuality = currentStopReason(deps, db, campaign.id, deadlineMs);
         if (beforePromptQuality || !currentTargetMatches(deps, campaign)) {
-          releaseItemClaim(deps, db, claimed);
+          releaseItemClaim(deps, db, claimed, claimToken);
           hasClaim = false;
           stopReason = beforePromptQuality ?? 'configuration_mismatch';
           break;
@@ -683,7 +707,7 @@ async function runCommand(
         // or a provider/model/endpoint configuration change.
         const beforePublish = deps.inspectCampaign(db, campaign.id).campaign.status;
         if (beforePublish === 'cancelled' || !currentTargetMatches(deps, campaign)) {
-          releaseItemClaim(deps, db, claimed);
+          releaseItemClaim(deps, db, claimed, claimToken);
           hasClaim = false;
           stopReason = beforePublish === 'cancelled'
             ? 'cancelled'
@@ -697,6 +721,7 @@ async function runCommand(
           campaignId: campaign.id,
           sessionId: claimed.sessionId,
           inputRevision: claimed.inputRevision,
+          claimToken,
           publish: publishDb => deps.publishTwoPass(
             input,
             sessionStage,
@@ -713,24 +738,57 @@ async function runCommand(
           break;
         }
       } catch (error) {
+        if (error instanceof HistoryRefreshClaimLostError) {
+          hasClaim = false;
+          continue;
+        }
         const campaignAfterError = deps.inspectCampaign(db, campaign.id).campaign.status;
         if (campaignAfterError === 'cancelled') {
           if (hasClaim) {
             // cancel already releases leases; releaseClaim is deliberately
             // idempotent so this also closes the final race before publish.
-            releaseItemClaim(deps, db, claimed);
+            releaseItemClaim(deps, db, claimed, claimToken);
             hasClaim = false;
           }
           stopReason = 'cancelled';
           break;
         }
         const failure = classifyFailure(error);
+        if (hasClaim && failure.code === 'INPUT_CHANGED') {
+          try {
+            const latestInput = deps.freezeInput(claimed.sessionId);
+            deps.refreshInput(db, {
+              campaignId: campaign.id,
+              sessionId: claimed.sessionId,
+              previousInputRevision: claimed.inputRevision,
+              claimToken,
+              inputRevision: latestInput.inputRevision,
+              messageCount: latestInput.session.message_count,
+              refundAttempt: false,
+            });
+            hasClaim = false;
+            continue;
+          } catch (refreshError) {
+            if (refreshError instanceof HistoryRefreshClaimLostError) {
+              hasClaim = false;
+              continue;
+            }
+            // Preserve the original INPUT_CHANGED classification. A second
+            // concurrent change is safely recorded instead of publishing a
+            // result for either stale revision.
+          }
+        }
+        deps.writeError(
+          `[Code Insights] Reanalysis failure campaign=${campaign.id} `
+          + `session=${claimed.sessionId} ${failureDiagnostic(error, failure.code)}\n`,
+        );
         const failureWasClaimed = hasClaim;
         if (hasClaim) {
           const markResult = deps.markItemFailed(db, {
             campaignId: campaign.id,
             sessionId: claimed.sessionId,
             inputRevision: claimed.inputRevision,
+            claimToken,
             error: { code: failure.code, message: failure.safeMessage },
           });
           hasClaim = false;

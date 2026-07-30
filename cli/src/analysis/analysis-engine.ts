@@ -88,6 +88,42 @@ export interface AnalysisFailure {
   usage: AnalysisUsage;
 }
 
+const STRUCTURED_ANALYSIS_OPTIONS = {
+  temperature: 0,
+  responseFormat: 'json' as const,
+};
+
+function buildStructuredOutputRetry(
+  messages: LLMMessage[],
+  errorType: string,
+): LLMMessage[] {
+  const retryInstruction = [
+    '',
+    'CORRECTION: Your previous response could not be parsed as valid JSON',
+    `(${errorType}). Generate the complete answer again as one shorter, strict`,
+    'JSON object. Use double-quoted keys and strings, include every required',
+    'field, and output no markdown, comments, or explanatory text.',
+  ].join(' ');
+  let lastUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if (messages[index]?.role === 'user') {
+      lastUserIndex = index;
+      break;
+    }
+  }
+  if (lastUserIndex === -1) return messages;
+
+  return messages.map((message, index) => {
+    if (index !== lastUserIndex) return message;
+    return {
+      ...message,
+      content: typeof message.content === 'string'
+        ? `${message.content}\n${retryInstruction}`
+        : [...message.content, { type: 'text', text: retryInstruction }],
+    };
+  });
+}
+
 export type AnalysisOutcome = AnalysisSuccess | AnalysisFailure;
 
 export interface AnalysisEngine {
@@ -429,12 +465,13 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
           currentChunk: index + 1,
           totalChunks: chunkPlan.chunks.length,
         });
+        const request = buildPreparedRequest(preparedPrompt, chunkPlan.chunks[index]);
         callCount++;
         let response;
         try {
           response = await client.chat(
-            buildPreparedRequest(preparedPrompt, chunkPlan.chunks[index]),
-            { signal: options.signal },
+            request,
+            { ...STRUCTURED_ANALYSIS_OPTIONS, signal: options.signal },
           );
         } catch (error) {
           return thrownOutcome(error);
@@ -444,7 +481,24 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
         usage.cacheCreationTokens += response.usage?.cacheCreationTokens ?? 0;
         usage.cacheReadTokens += response.usage?.cacheReadTokens ?? 0;
         if (options.signal?.aborted) return abortedOutcome();
-        const parsed = parseAnalysisResponse(response.content);
+        let parsed = parseAnalysisResponse(response.content);
+        if (!parsed.success) {
+          callCount++;
+          try {
+            response = await client.chat(
+              buildStructuredOutputRetry(request, parsed.error.error_type),
+              { ...STRUCTURED_ANALYSIS_OPTIONS, signal: options.signal },
+            );
+          } catch (error) {
+            return thrownOutcome(error);
+          }
+          usage.inputTokens += response.usage?.inputTokens ?? 0;
+          usage.outputTokens += response.usage?.outputTokens ?? 0;
+          usage.cacheCreationTokens += response.usage?.cacheCreationTokens ?? 0;
+          usage.cacheReadTokens += response.usage?.cacheReadTokens ?? 0;
+          if (options.signal?.aborted) return abortedOutcome();
+          parsed = parseAnalysisResponse(response.content);
+        }
         if (parsed.success) {
           parsedResponses.push(parsed.data);
         } else {
@@ -496,7 +550,7 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
           try {
             facetResponse = await client.chat(
               buildPreparedRequest(facetPrompt, facetConversation),
-              { signal: options.signal },
+              { ...STRUCTURED_ANALYSIS_OPTIONS, signal: options.signal },
             );
           } catch (error) {
             if (error instanceof Error && error.name === 'AbortError') {

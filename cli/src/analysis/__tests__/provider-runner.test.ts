@@ -525,7 +525,7 @@ describe('ProviderRunner.runAnalysis() — llamacpp', () => {
 
     const body = JSON.parse(init.body as string);
     expect(body.model).toBe('gemma-4-12b');
-    expect(body.temperature).toBe(0.3);
+    expect(body.temperature).toBe(0);
     expect(body.response_format).toEqual({ type: 'json_object' });
     expect(body.messages).toEqual([
       { role: 'system', content: 'sys' },
@@ -591,6 +591,23 @@ describe('ProviderRunner.runAnalysis() — llamacpp', () => {
       expect(String(error)).not.toContain(secret);
     }
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('ProviderRunner structured analysis options', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('uses deterministic JSON options for configured-provider analysis', async () => {
+    mockFetch.mockResolvedValueOnce(makeFetchResponse({
+      choices: [{ message: { content: '{"summary":{"title":"L","content":"C","bullets":[]}}' } }],
+    }));
+
+    const runner = new ProviderRunner(makeConfig({ provider: 'openai', model: 'gpt-4o' }));
+    await runner.runAnalysis({ systemPrompt: 'sys', userPrompt: 'user' });
+
+    const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
+    expect(body.temperature).toBe(0);
+    expect(body.response_format).toEqual({ type: 'json_object' });
   });
 });
 

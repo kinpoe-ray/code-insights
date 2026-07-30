@@ -35,7 +35,7 @@ describe('runMigrations — idempotency', () => {
       .all() as Array<{ version: number }>;
 
     // One row per version, no duplicates
-    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(rows.map(r => r.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
     db.close();
   });
 });
@@ -159,7 +159,7 @@ describe('runMigrations — interrupted historical migrations', () => {
       auto_compact_count: 0,
       slash_commands: '[]',
     });
-    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+    expect(versions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
 
     db.close();
   });
@@ -424,7 +424,7 @@ describe('runMigrations — V11 queue durability and reflect source scope', () =
     ]);
     expect(
       db.prepare('SELECT MAX(version) FROM schema_version').pluck().get(),
-    ).toBe(12);
+    ).toBe(13);
     db.close();
   });
 
@@ -534,7 +534,7 @@ describe('runMigrations — V11 queue durability and reflect source scope', () =
     });
     expect(
       db.prepare('SELECT MAX(version) FROM schema_version').pluck().get(),
-    ).toBe(12);
+    ).toBe(13);
     db.close();
   });
 });
@@ -582,6 +582,7 @@ describe('runMigrations — V12 history refresh campaigns', () => {
       'input_revision', 'status', 'session_stage_json',
       'session_usage_json', 'error_code', 'safe_error', 'attempts',
       'claimed_at', 'staged_at', 'failed_at', 'succeeded_at', 'updated_at',
+      'claim_token',
     ]);
     expect(snapshotColumns).toEqual([
       'campaign_id', 'session_id', 'insights_json', 'facet_json',
@@ -592,10 +593,37 @@ describe('runMigrations — V12 history refresh campaigns', () => {
     ]));
 
     expect(campaignColumns.some(name => /key|secret|token/i.test(name))).toBe(false);
-    expect(itemColumns.some(name => /key|secret|token/i.test(name))).toBe(false);
+    expect(itemColumns.filter(name => name !== 'claim_token')
+      .some(name => /key|secret|token/i.test(name))).toBe(false);
     expect(snapshotColumns.some(name => /key|secret|token/i.test(name))).toBe(false);
+    expect(db.prepare('SELECT MAX(version) FROM schema_version').pluck().get()).toBe(13);
+
+    db.close();
+  });
+});
+
+describe('runMigrations — V13 history refresh claim fencing', () => {
+  it('upgrades a V12 database and is idempotent', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    db.exec(`
+      DELETE FROM schema_version WHERE version = 13;
+      ALTER TABLE analysis_campaign_items DROP COLUMN claim_token;
+    `);
     expect(db.prepare('SELECT MAX(version) FROM schema_version').pluck().get()).toBe(12);
 
+    const first = runMigrations(db);
+    const second = runMigrations(db);
+    const columns = db.prepare(
+      "SELECT name FROM pragma_table_info('analysis_campaign_items') ORDER BY cid",
+    ).pluck().all() as string[];
+
+    expect(first.v13Applied).toBe(true);
+    expect(second.v13Applied).toBe(false);
+    expect(columns.filter(name => name === 'claim_token')).toEqual(['claim_token']);
+    expect(db.prepare(
+      'SELECT COUNT(*) FROM schema_version WHERE version = 13',
+    ).pluck().get()).toBe(1);
     db.close();
   });
 });

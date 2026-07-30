@@ -304,7 +304,13 @@ export async function prepareSessionAnalysisPass(
       messages: input.messages,
     });
     if (!outcome.ok || outcome.completeness !== 'complete') {
-      const message = outcome.ok ? 'Analysis result was incomplete.' : outcome.error.message;
+      const message = outcome.ok
+        ? 'Analysis result was incomplete. json_parse_error'
+        : [
+            outcome.error.message,
+            outcome.error.parseErrorType,
+            outcome.error.code === 'PARTIAL_RESPONSE' ? 'json_parse_error' : undefined,
+          ].filter(Boolean).join(' ');
       throw new Error(`Session analysis failed: ${message}`);
     }
     response = outcome.response;
@@ -363,17 +369,26 @@ async function runPromptQualityPass(
   input: FrozenSessionAnalysisInput,
   runner: AnalysisRunner,
   analysisLanguage: AnalysisLanguage,
+  correctiveRetry = false,
 ): Promise<RunAnalysisResult> {
   const formattedMessages = formatMessagesForAnalysis(input.messages);
   const humanMessageCount = input.messages.filter(message => message.type === 'user').length;
   const assistantMessageCount = input.messages.filter(message => message.type === 'assistant').length;
   const toolExchangeCount = input.messages.filter(message => Boolean(message.tool_calls)).length;
-  const instructions = buildPromptQualityInstructions(
+  const baseInstructions = buildPromptQualityInstructions(
     input.session.project_name,
     { humanMessageCount, assistantMessageCount, toolExchangeCount },
     sessionMetadata(input),
     { preference: analysisLanguage, messages: input.messages },
   );
+  const instructions = correctiveRetry
+    ? `${baseInstructions}
+
+CORRECTION: Your previous response could not be parsed. Generate the complete
+answer again as one shorter, strict JSON object. Use double-quoted keys and
+strings, include every required field, and output no markdown, comments, or
+explanatory text.`
+    : baseInstructions;
   const conversationBlock = buildCacheableConversationBlock(formattedMessages);
 
   if (!isAnalysisLLMClient(runner)) {
@@ -394,7 +409,10 @@ async function runPromptQualityPass(
     throw new Error('Prompt quality request exceeds the provider context window.');
   }
   const startedAt = Date.now();
-  const response = await runner.chat(preparedRequest.messages, { temperature: 0 });
+  const response = await runner.chat(preparedRequest.messages, {
+    temperature: 0,
+    responseFormat: 'json',
+  });
   return {
     rawJson: response.content,
     durationMs: Date.now() - startedAt,
@@ -451,7 +469,7 @@ export async function preparePromptQualityPass(
   const attempts = [await runPromptQualityPass(input, runner, analysisLanguage)];
   let parsed = parsePromptQualityResponse(attempts[0].rawJson);
   if (!parsed.success) {
-    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage));
+    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true));
     parsed = parsePromptQualityResponse(attempts[1].rawJson);
   }
   if (!parsed.success) {
