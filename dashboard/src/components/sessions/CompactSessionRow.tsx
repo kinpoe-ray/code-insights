@@ -1,6 +1,6 @@
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { SESSION_CHARACTER_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
+import { SESSION_CHARACTER_COLORS, SOURCE_TOOL_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
 import { formatDuration, cn } from '@/lib/utils';
 import { Sparkles, Target, Loader2 } from 'lucide-react';
 import type { Session } from '@/lib/types';
@@ -47,6 +47,7 @@ interface CompactSessionRowProps {
   insightCounts?: Record<string, number>;
   outcome?: string;
   promptQualityScore?: number;
+  isAnalyzed?: boolean;
   missingFacets?: boolean;
   isQueued?: boolean;
   onClick: () => void;
@@ -59,11 +60,12 @@ export function CompactSessionRow({
   insightCounts,
   outcome,
   promptQualityScore,
+  isAnalyzed = false,
   missingFacets,
   isQueued = false,
   onClick,
 }: CompactSessionRowProps) {
-  const { t } = useLocale();
+  const { t, formatDate } = useLocale();
   const startedAt = new Date(session.started_at);
   const endedAt = new Date(session.ended_at);
   const title = session.custom_title
@@ -83,29 +85,77 @@ export function CompactSessionRow({
         .filter(([type]) => type !== 'summary')
         .reduce((sum, [, n]) => sum + n, 0)
     : 0;
+  const startedTime = formatDate(startedAt, { hour: '2-digit', minute: '2-digit' });
 
   return (
     <button
       onClick={onClick}
       aria-current={isActive ? 'true' : undefined}
       className={cn(
-        'w-full text-left px-3 py-2.5 transition-colors border-l-2',
+        'w-full border-b border-b-border/60 border-l-2 px-4 py-3.5 text-left transition-colors',
         isActive
-          ? 'bg-accent/60 border-primary'
-          : 'border-transparent hover:bg-accent/40'
+          ? 'border-l-orange-500 bg-accent/60'
+          : 'border-l-transparent hover:bg-accent/35'
       )}
     >
-      {/* Title */}
-      <p className="text-sm font-medium line-clamp-2 leading-snug">{title}</p>
+      <div className="flex items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-2 text-sm font-semibold leading-snug">{title}</p>
 
-      {/* Badges */}
-      <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+          <div className="mt-1.5 flex min-w-0 items-center gap-1.5 overflow-hidden text-[11px] text-muted-foreground">
+            <span className="shrink-0">{startedTime}</span>
+            {sourceLabel && (
+              <>
+                <span className="text-muted-foreground/30">&middot;</span>
+                <Badge
+                  variant="outline"
+                  className={cn(
+                    'h-5 max-w-28 shrink-0 px-1.5 py-0 text-[10px] font-normal',
+                    SOURCE_TOOL_COLORS[session.source_tool ?? ''] ?? 'bg-muted text-muted-foreground'
+                  )}
+                >
+                  <span className="truncate">{sourceLabel}</span>
+                </Badge>
+              </>
+            )}
+            {session.session_character && characterColor && (
+              <>
+                <span className="text-muted-foreground/30">&middot;</span>
+                <Badge
+                  variant="outline"
+                  className={cn('h-5 max-w-24 shrink-0 px-1.5 py-0 text-[10px] font-normal', characterColor)}
+                >
+                  <span className="truncate">{t(CHARACTER_LABEL_KEYS[session.session_character])}</span>
+                </Badge>
+              </>
+            )}
+            {showProject && (
+              <>
+                <span className="text-muted-foreground/30">&middot;</span>
+                <span className="truncate">{session.project_name}</span>
+              </>
+            )}
+          </div>
+        </div>
+
         {isQueued && (
-          <Badge variant="outline" className="text-[10px] px-1.5 py-0 text-blue-600 border-blue-300 gap-0.5">
+          <Badge variant="outline" className="shrink-0 gap-0.5 border-blue-300 px-1.5 py-0 text-[10px] text-blue-600">
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t('sessions.rowAnalyzing')}
           </Badge>
         )}
+      </div>
+
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        <span>{formatDuration(startedAt, endedAt)}</span>
+        <span className="text-muted-foreground/30">&middot;</span>
+        <span>{t('sessions.rowMessages', { count: session.message_count })}</span>
+        <span className="text-muted-foreground/30">&middot;</span>
+        <span className={cn('flex items-center gap-1', isAnalyzed ? 'text-emerald-600' : 'text-muted-foreground/70')}>
+          <span className={cn('h-1.5 w-1.5 rounded-full', isAnalyzed ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
+          {isAnalyzed ? t('sessions.rowAnalyzed') : t('sessions.rowNotAnalyzed')}
+        </span>
+
         {outcome && OUTCOME_DOT[outcome] && (
           <Tooltip>
             <TooltipTrigger asChild>
@@ -115,30 +165,6 @@ export function CompactSessionRow({
               {OUTCOME_LABEL_KEYS[outcome] ? t(OUTCOME_LABEL_KEYS[outcome]) : OUTCOME_DOT[outcome].label}
             </TooltipContent>
           </Tooltip>
-        )}
-        {session.session_character && characterColor && (
-          <Badge variant="outline" className={`text-[10px] px-1.5 py-0 capitalize ${characterColor}`}>
-            {t(CHARACTER_LABEL_KEYS[session.session_character])}
-          </Badge>
-        )}
-      </div>
-
-      {/* Metadata: source . messages . duration . cost . insights */}
-      <div className="flex items-center gap-1.5 mt-1.5 text-[11px] text-muted-foreground/70 flex-wrap">
-        {sourceLabel && (
-          <>
-            <span className="text-muted-foreground">{sourceLabel}</span>
-            <span className="text-muted-foreground/30">&middot;</span>
-          </>
-        )}
-        <span>{t('sessions.rowMessages', { count: session.message_count })}</span>
-        <span className="text-muted-foreground/30">&middot;</span>
-        <span>{formatDuration(startedAt, endedAt)}</span>
-        {session.estimated_cost_usd != null && (
-          <>
-            <span className="text-muted-foreground/30">&middot;</span>
-            <span>${session.estimated_cost_usd.toFixed(2)}</span>
-          </>
         )}
         {insightTotal > 0 && (
           <>
@@ -172,14 +198,12 @@ export function CompactSessionRow({
             </span>
           </>
         )}
+        {session.estimated_cost_usd != null && (
+          <span className="ml-auto shrink-0 tabular-nums text-muted-foreground">
+            ${session.estimated_cost_usd.toFixed(2)}
+          </span>
+        )}
       </div>
-
-      {/* Project name (only when "All Projects" selected) */}
-      {showProject && (
-        <p className="text-[10px] text-muted-foreground/60 mt-1 truncate">
-          {session.project_name}
-        </p>
-      )}
     </button>
   );
 }

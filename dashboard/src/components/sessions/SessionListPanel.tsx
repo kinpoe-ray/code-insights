@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import {
@@ -15,9 +16,10 @@ import {
 } from '@/components/ui/popover';
 import { CompactSessionRow } from './CompactSessionRow';
 import { parseJsonField } from '@/lib/types';
-import type { Session, Insight, InsightMetadata } from '@/lib/types';
+import type { Session, Insight, InsightMetadata, Project } from '@/lib/types';
 import { extractPQScore } from '@/lib/score-utils';
-import { SearchX, Terminal, EyeOff, CalendarDays } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { SearchX, Terminal, EyeOff, CalendarDays, Search, SlidersHorizontal } from 'lucide-react';
 import { useDeletedSessionCount } from '@/hooks/useSessions';
 import { useQueuedSessionIds } from '@/hooks/useAnalysisQueue';
 import { SaveFilterPopover } from '@/components/filters/SaveFilterPopover';
@@ -75,7 +77,9 @@ function localDateKey(value: string | Date): string {
 interface SessionListPanelProps {
   sessions: Session[];
   insights: Insight[];
+  projects: Project[];
   selectedSessionId: string;
+  selectedProject: string;
   showProject: boolean;
   projectId?: string;
   filters: {
@@ -94,6 +98,7 @@ interface SessionListPanelProps {
   ) => void;
   onSetFilters: (updates: Record<string, string>) => void;
   onClearFilters: () => void;
+  onSelectProject: (projectId: string) => void;
   onSelectSession: (sessionId: string) => void;
   loading: boolean;
   missingFacetIds?: Set<string>;
@@ -102,19 +107,23 @@ interface SessionListPanelProps {
 export function SessionListPanel({
   sessions,
   insights,
+  projects,
   selectedSessionId,
+  selectedProject,
   showProject,
   projectId,
   filters,
   onFilterChange,
   onSetFilters,
   onClearFilters,
+  onSelectProject,
   onSelectSession,
   loading,
   missingFacetIds,
 }: SessionListPanelProps) {
   const { t, formatDate } = useLocale();
   const [customDateOpen, setCustomDateOpen] = useState(false);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const { savedFilters, saveFilter, deleteFilter } = useSavedFilters('sessions');
 
   const { data: deletedCount = 0 } = useDeletedSessionCount(projectId);
@@ -239,9 +248,9 @@ export function SessionListPanel({
     (!!filters.outcome && filters.outcome !== 'all') ||
     filters.source !== 'all';
 
-  const allFiltersForSave = { ...filters } as Record<string, string>;
+  const allFiltersForSave = { ...filters, project: selectedProject } as Record<string, string>;
   const defaultFilterValues: Record<string, string> = {
-    q: '', character: 'all', status: 'all', dateRange: 'all', dateFrom: '', dateTo: '', outcome: 'all', source: 'all',
+    q: '', project: 'all', character: 'all', status: 'all', dateRange: 'all', dateFrom: '', dateTo: '', outcome: 'all', source: 'all',
   };
 
   const dateRangeLabel = useMemo(() => {
@@ -258,143 +267,191 @@ export function SessionListPanel({
 
   return (
     <div className="flex flex-col h-full">
-      {/* Search + filters */}
-      <div className="shrink-0 p-3 space-y-2 border-b">
-        {/* Row 1: Saved filters + search */}
-        <div className="flex gap-2 items-center">
-          <SavedFiltersDropdown
-            savedFilters={savedFilters}
-            onApply={(f) => onSetFilters(f)}
-            onDelete={deleteFilter}
-          />
-          <Input
-            placeholder={t('sessions.searchPlaceholder')}
-            value={filters.q}
-            onChange={(e) => onFilterChange('q', e.target.value)}
-            className="h-8 text-xs flex-1"
-          />
-        </div>
-
-        {/* Row 2: Character + Status */}
-        <div className="flex gap-2">
-          <Select
-            value={filters.character}
-            onValueChange={(v) => onFilterChange('character', v)}
-          >
-            <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder={t('sessions.filters.type')} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{t('sessions.filters.allTypes')}</SelectItem>
-              {SESSION_CHARACTERS.map((c) => (
-                <SelectItem key={c} value={c} className="capitalize text-xs">
-                  {t(CHARACTER_LABEL_KEYS[c])}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Select
-            value={filters.status}
-            onValueChange={(v) => onFilterChange('status', v)}
-          >
-            <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder={t('sessions.filters.status')} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">{t('sessions.filters.allStatus')}</SelectItem>
-              <SelectItem value="analyzed">{t('sessions.filters.analyzed')}</SelectItem>
-              <SelectItem value="unanalyzed">{t('sessions.filters.notAnalyzed')}</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Row 3: Date range + Outcome + Save */}
-        <div className="flex gap-2 items-center">
-          {/* Date range with custom escape hatch */}
-          <Popover open={customDateOpen} onOpenChange={setCustomDateOpen}>
-            <PopoverTrigger asChild>
-              <Button variant="outline" size="sm" className="h-7 text-xs gap-1 flex-1 justify-start px-2">
-                <CalendarDays className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
-                <span className="truncate">{dateRangeLabel}</span>
-              </Button>
-            </PopoverTrigger>
-            <PopoverContent align="start" className="w-52 p-1">
-              {DATE_PRESETS.map((preset) => {
-                if (preset.value === 'custom') {
-                  return (
-                    <div key="custom" className="border-t mt-1 pt-1">
-                      <div className="text-xs text-muted-foreground px-2 py-1">{t('sessions.filters.customRange')}</div>
-                      <div className="px-2 space-y-1.5 pb-1">
-                        <Input
-                          placeholder={t('sessions.filters.fromDate')}
-                          value={filters.dateFrom}
-                          onChange={(e) => {
-                            onFilterChange('dateFrom', e.target.value);
-                            onFilterChange('dateRange', 'custom');
-                          }}
-                          className="h-7 text-xs"
-                        />
-                        <Input
-                          placeholder={t('sessions.filters.toDate')}
-                          value={filters.dateTo}
-                          onChange={(e) => {
-                            onFilterChange('dateTo', e.target.value);
-                            onFilterChange('dateRange', 'custom');
-                          }}
-                          className="h-7 text-xs"
-                        />
-                      </div>
-                    </div>
-                  );
-                }
-                const isActive = filters.dateRange === preset.value || (!filters.dateRange && preset.value === 'all');
-                return (
-                  <button
-                    key={preset.value}
-                    onClick={() => {
-                      onFilterChange('dateRange', preset.value);
-                      onFilterChange('dateFrom', '');
-                      onFilterChange('dateTo', '');
-                      setCustomDateOpen(false);
-                    }}
-                    className={`w-full text-xs text-left px-3 py-1.5 rounded hover:bg-accent transition-colors ${
-                      isActive ? 'font-medium text-foreground' : 'text-muted-foreground'
-                    }`}
+      {/* Session passport discovery controls */}
+      <div className="shrink-0 p-4 space-y-3 border-b bg-background">
+        <div className="flex items-center gap-2">
+          <h1 className="shrink-0 text-lg font-semibold tracking-tight">{t('sessions.listTitle')}</h1>
+          <div className="relative min-w-24 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              placeholder={t('sessions.searchPlaceholder')}
+              value={filters.q}
+              onChange={(e) => onFilterChange('q', e.target.value)}
+              className="h-9 pl-8 text-xs"
+            />
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <SavedFiltersDropdown
+              savedFilters={savedFilters}
+              onApply={(f) => onSetFilters(f)}
+              onDelete={deleteFilter}
+            />
+            <Popover open={moreFiltersOpen} onOpenChange={setMoreFiltersOpen}>
+              <PopoverTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className={cn(
+                    'h-9 w-9',
+                    (filters.status !== 'all' || filters.outcome !== 'all') && 'border-primary text-primary'
+                  )}
+                >
+                  <SlidersHorizontal className="h-3.5 w-3.5" />
+                  <span className="sr-only">{t('sessions.filters.more')}</span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-72 space-y-3 p-3">
+                <div>
+                  <div className="mb-1.5 text-xs font-medium">{t('sessions.filters.status')}</div>
+                  <Select
+                    value={filters.status}
+                    onValueChange={(v) => onFilterChange('status', v)}
                   >
-                    {isActive ? '✓ ' : ''}{t(preset.labelKey)}
-                  </button>
-                );
-              })}
-            </PopoverContent>
-          </Popover>
+                    <SelectTrigger className="w-full text-xs">
+                      <SelectValue placeholder={t('sessions.filters.status')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="all">{t('sessions.filters.allStatus')}</SelectItem>
+                      <SelectItem value="analyzed">{t('sessions.filters.analyzed')}</SelectItem>
+                      <SelectItem value="unanalyzed">{t('sessions.filters.notAnalyzed')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <div className="mb-1.5 text-xs font-medium">{t('sessions.filters.outcome')}</div>
+                  <Select
+                    value={filters.outcome || 'all'}
+                    onValueChange={(v) => onFilterChange('outcome', v)}
+                  >
+                    <SelectTrigger className="w-full text-xs">
+                      <SelectValue placeholder={t('sessions.filters.outcome')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {OUTCOME_OPTIONS.map((o) => (
+                        <SelectItem key={o.value} value={o.value} className="text-xs">
+                          {t(o.labelKey)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              </PopoverContent>
+            </Popover>
+            <SaveFilterPopover
+              activeFilters={allFiltersForSave}
+              defaultFilterValues={defaultFilterValues}
+              onSave={saveFilter}
+            />
+          </div>
+        </div>
 
+        <div className="grid grid-cols-2 xl:grid-cols-4 gap-2">
+          <FilterField label={t('sessions.filters.field.dateRange')}>
+            <Popover open={customDateOpen} onOpenChange={setCustomDateOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 w-full justify-between gap-1 px-2 text-xs font-normal">
+                  <span className="flex min-w-0 items-center gap-1.5">
+                    <CalendarDays className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                    <span className="truncate">{dateRangeLabel}</span>
+                  </span>
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="start" className="w-52 p-1">
+                {DATE_PRESETS.map((preset) => {
+                  if (preset.value === 'custom') {
+                    return (
+                      <div key="custom" className="border-t mt-1 pt-1">
+                        <div className="text-xs text-muted-foreground px-2 py-1">{t('sessions.filters.customRange')}</div>
+                        <div className="px-2 space-y-1.5 pb-1">
+                          <Input
+                            placeholder={t('sessions.filters.fromDate')}
+                            value={filters.dateFrom}
+                            onChange={(e) => {
+                              onFilterChange('dateFrom', e.target.value);
+                              onFilterChange('dateRange', 'custom');
+                            }}
+                            className="h-7 text-xs"
+                          />
+                          <Input
+                            placeholder={t('sessions.filters.toDate')}
+                            value={filters.dateTo}
+                            onChange={(e) => {
+                              onFilterChange('dateTo', e.target.value);
+                              onFilterChange('dateRange', 'custom');
+                            }}
+                            className="h-7 text-xs"
+                          />
+                        </div>
+                      </div>
+                    );
+                  }
+                  const isActive = filters.dateRange === preset.value || (!filters.dateRange && preset.value === 'all');
+                  return (
+                    <button
+                      key={preset.value}
+                      onClick={() => {
+                        onFilterChange('dateRange', preset.value);
+                        onFilterChange('dateFrom', '');
+                        onFilterChange('dateTo', '');
+                        setCustomDateOpen(false);
+                      }}
+                      className={`w-full text-xs text-left px-3 py-1.5 rounded hover:bg-accent transition-colors ${
+                        isActive ? 'font-medium text-foreground' : 'text-muted-foreground'
+                      }`}
+                    >
+                      {isActive ? '✓ ' : ''}{t(preset.labelKey)}
+                    </button>
+                  );
+                })}
+              </PopoverContent>
+            </Popover>
+          </FilterField>
+
+          <FilterField label={t('sessions.filters.field.project')}>
           <Select
-            value={filters.outcome || 'all'}
-            onValueChange={(v) => onFilterChange('outcome', v)}
+              value={selectedProject}
+              onValueChange={onSelectProject}
           >
-            <SelectTrigger className="h-7 text-xs flex-1">
-              <SelectValue placeholder={t('sessions.filters.outcome')} />
+              <SelectTrigger className="h-7 w-full border-0 bg-transparent px-2 text-xs shadow-none focus-visible:ring-0">
+                <SelectValue placeholder={t('sessions.allProjects')} />
             </SelectTrigger>
             <SelectContent>
-              {OUTCOME_OPTIONS.map((o) => (
-                <SelectItem key={o.value} value={o.value} className="text-xs">
-                  {t(o.labelKey)}
+                <SelectItem value="all">{t('sessions.allProjects')}</SelectItem>
+                {projects.map((project) => (
+                  <SelectItem key={project.id} value={project.id} className="text-xs">
+                    {project.name}
                 </SelectItem>
               ))}
             </SelectContent>
           </Select>
+          </FilterField>
 
+          <FilterField label={t('sessions.filters.field.source')}>
           <SourceToolSelect
             value={filters.source || 'all'}
             onValueChange={(v) => onFilterChange('source', v)}
-            className="h-7 text-xs flex-1"
+              className="h-7 w-full border-0 bg-transparent px-2 text-xs shadow-none focus-visible:ring-0"
           />
+          </FilterField>
 
-          <SaveFilterPopover
-            activeFilters={allFiltersForSave}
-            defaultFilterValues={defaultFilterValues}
-            onSave={saveFilter}
-          />
+          <FilterField label={t('sessions.filters.mode')}>
+            <Select
+              value={filters.character}
+              onValueChange={(v) => onFilterChange('character', v)}
+            >
+              <SelectTrigger className="h-7 w-full border-0 bg-transparent px-2 text-xs shadow-none focus-visible:ring-0">
+                <SelectValue placeholder={t('sessions.filters.mode')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t('sessions.filters.allModes')}</SelectItem>
+                {SESSION_CHARACTERS.map((c) => (
+                  <SelectItem key={c} value={c} className="capitalize text-xs">
+                    {t(CHARACTER_LABEL_KEYS[c])}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </FilterField>
         </div>
       </div>
 
@@ -446,6 +503,7 @@ export function SessionListPanel({
                     insightCounts={insightCountsBySession.get(session.id)}
                     outcome={sessionOutcomes.get(session.id)}
                     promptQualityScore={promptQualityScores.get(session.id)}
+                    isAnalyzed={analyzedSessionIds.has(session.id)}
                     missingFacets={analyzedSessionIds.has(session.id) && (missingFacetIds?.has(session.id) ?? false)}
                     isQueued={queuedSessionIds.has(session.id)}
                     onClick={() => onSelectSession(session.id)}
@@ -464,6 +522,17 @@ export function SessionListPanel({
           <span>{t('sessions.hiddenCount', { count: deletedCount })}</span>
         </div>
       )}
+    </div>
+  );
+}
+
+function FilterField({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="min-w-0 rounded-md border bg-muted/10 px-1.5 py-1">
+      <div className="px-2 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </div>
+      {children}
     </div>
   );
 }

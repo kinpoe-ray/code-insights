@@ -94,11 +94,11 @@ function StatCell({
   sublabel?: string;
 }) {
   return (
-    <div className="rounded-lg border px-3 py-2 text-center">
-      <div className="text-lg font-semibold tabular-nums leading-tight">{value}</div>
-      <div className="text-[11px] text-muted-foreground uppercase tracking-wide">{label}</div>
+    <div className="rounded-xl border bg-muted/5 px-3 py-4 text-center">
+      <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="mt-1 text-2xl font-semibold tabular-nums leading-tight">{value}</div>
       {sublabel && (
-        <div className="text-[10px] text-muted-foreground/60 leading-tight">{sublabel}</div>
+        <div className="mt-1 text-[10px] leading-tight text-muted-foreground/60">{sublabel}</div>
       )}
     </div>
   );
