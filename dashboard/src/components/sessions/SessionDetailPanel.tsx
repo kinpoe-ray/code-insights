@@ -3,10 +3,9 @@ import { useSession, useDeleteSession } from '@/hooks/useSessions';
 import { useInsights } from '@/hooks/useInsights';
 import { useMessages } from '@/hooks/useMessages';
 import { cn } from '@/lib/utils';
-import { SESSION_CHARACTER_COLORS, SOURCE_TOOL_COLORS, OUTCOME_DOT } from '@/lib/constants/colors';
 import { parseJsonField } from '@/lib/types';
 import { getScoreTier, extractPQScore } from '@/lib/score-utils';
-import type { Insight, InsightMetadata, Session } from '@/lib/types';
+import type { Insight } from '@/lib/types';
 import { Badge } from '@/components/ui/badge';
 import { ErrorCard } from '@/components/ErrorCard';
 import { Button } from '@/components/ui/button';
@@ -42,16 +41,16 @@ import { PromptQualityAnalyzeButton } from '@/components/sessions/PromptQualityA
 import { RenameSessionDialog } from '@/components/sessions/RenameSessionDialog';
 import { VitalsStrip } from '@/components/sessions/VitalsStrip';
 import { AnalysisCostLine } from '@/components/sessions/AnalysisCostLine';
+import { SessionIdentityStrip } from '@/components/sessions/SessionIdentityStrip';
+import { SessionMetadataPanel } from '@/components/sessions/SessionMetadataPanel';
 import { ChatConversation } from '@/components/chat/conversation/ChatConversation';
 import { ConversationSearch } from '@/components/chat/conversation/ConversationSearch';
 import {
   AlertTriangle,
-  Clock,
   Pencil,
   FileText,
   Download,
   BookOpen,
-  GitBranch,
   GitCommit,
   GitPullRequest,
   BarChart2,
@@ -62,24 +61,6 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useLocale } from '@/i18n/LocaleProvider';
-import type { MessageKey } from '@/i18n/messages/catalog';
-
-const CHARACTER_LABEL_KEYS: Record<NonNullable<Session['session_character']>, MessageKey> = {
-  deep_focus: 'sessions.character.deepFocus',
-  bug_hunt: 'sessions.character.bugHunt',
-  feature_build: 'sessions.character.featureBuild',
-  exploration: 'sessions.character.exploration',
-  refactor: 'sessions.character.refactor',
-  learning: 'sessions.character.learning',
-  quick_task: 'sessions.character.quickTask',
-};
-
-const OUTCOME_LABEL_KEYS: Record<string, MessageKey> = {
-  success: 'sessions.outcome.success',
-  partial: 'sessions.outcome.partial',
-  abandoned: 'sessions.outcome.abandoned',
-  blocked: 'sessions.outcome.blocked',
-};
 
 interface SessionDetailPanelProps {
   sessionId: string;
@@ -87,7 +68,7 @@ interface SessionDetailPanelProps {
 }
 
 export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelProps) {
-  const { t, formatDate } = useLocale();
+  const { t } = useLocale();
   const { data: session, isLoading: loading, error } = useSession(sessionId);
   const { data: insights = [] } = useInsights({ sessionId });
   const messagesQuery = useMessages(sessionId);
@@ -203,10 +184,6 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
     : null;
 
   const summaryInsight = insights.find((i) => i.type === 'summary');
-  const summaryMetadata = summaryInsight
-    ? parseJsonField<InsightMetadata>(summaryInsight.metadata, {})
-    : {};
-  const sessionOutcome = summaryMetadata.outcome;
   const summaryText = session.summary || summaryInsight?.content;
   const summaryBulletsRaw = summaryInsight
     ? parseJsonField<string[]>(summaryInsight.bullets, [])
@@ -227,31 +204,11 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
         t('sessions.detail.sessionSummary')
       : t('sessions.detail.sessionSummary'));
 
-  const startedAt = new Date(session.started_at);
-  const endedAt = new Date(session.ended_at);
-  const characterColor = session.session_character
-    ? SESSION_CHARACTER_COLORS[session.session_character]
-    : null;
-  const characterLabel = session.session_character
-    ? t(CHARACTER_LABEL_KEYS[session.session_character])
-    : null;
   const sessionTitle = session.custom_title
     || session.generated_title
     || session.summary
     || t('sessions.untitled');
-  const sameDay =
-    startedAt.getFullYear() === endedAt.getFullYear()
-    && startedAt.getMonth() === endedAt.getMonth()
-    && startedAt.getDate() === endedAt.getDate();
-  const dateTimeOptions: Intl.DateTimeFormatOptions = {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  };
-  const dateRange = sameDay
-    ? `${formatDate(startedAt, dateTimeOptions)} – ${formatDate(endedAt, { hour: 'numeric', minute: '2-digit' })}`
-    : `${formatDate(startedAt, dateTimeOptions)} – ${formatDate(endedAt, dateTimeOptions)}`;
+  const isAnalyzed = insights.length > 0;
 
   function handleExport(format: 'plain' | 'obsidian' | 'notion') {
     exportSession(session!, insights, summaryText, format);
@@ -262,26 +219,18 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="shrink-0 border-b px-6 py-3 space-y-2">
+      <div className="shrink-0 border-b px-6 py-4 space-y-3">
         <div className="flex items-center gap-2 flex-wrap">
           <h1 className="text-lg font-semibold leading-tight">{sessionTitle}</h1>
-          {sessionOutcome && OUTCOME_DOT[sessionOutcome] && (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className={cn('w-2 h-2 rounded-full shrink-0', OUTCOME_DOT[sessionOutcome].color)} />
-              </TooltipTrigger>
-              <TooltipContent side="bottom" className="text-xs">
-                {OUTCOME_LABEL_KEYS[sessionOutcome]
-                  ? t(OUTCOME_LABEL_KEYS[sessionOutcome])
-                  : OUTCOME_DOT[sessionOutcome].label}
-              </TooltipContent>
-            </Tooltip>
-          )}
-          {characterLabel && characterColor && (
-            <Badge variant="outline" className={cn('text-xs shrink-0', characterColor)}>
-              {characterLabel}
-            </Badge>
-          )}
+          <span
+            className={cn(
+              'flex shrink-0 items-center gap-1.5 text-xs',
+              isAnalyzed ? 'text-emerald-600' : 'text-muted-foreground'
+            )}
+          >
+            <span className={cn('h-1.5 w-1.5 rounded-full', isAnalyzed ? 'bg-emerald-500' : 'bg-muted-foreground/40')} />
+            {isAnalyzed ? t('sessions.rowAnalyzed') : t('sessions.rowNotAnalyzed')}
+          </span>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -369,62 +318,42 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
           </div>
         </div>
 
-        <div className="flex items-center gap-2 text-xs text-muted-foreground flex-wrap">
-          <Clock className="h-3.5 w-3.5" />
-          <span>{dateRange}</span>
-          <span>&middot;</span>
-          {session.git_remote_url ? (
+        <SessionIdentityStrip session={session} />
+
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {session.tool_call_count > 0 && (
+            <span className="flex items-center gap-1">
+              <Wrench className="h-3 w-3" />
+              {t('sessions.detail.tools', { count: session.tool_call_count })}
+            </span>
+          )}
+          {session.git_remote_url && (
             <a
               href={session.git_remote_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="hover:text-foreground underline-offset-2 hover:underline"
+              className="underline-offset-2 hover:text-foreground hover:underline"
             >
-              {session.project_name}
+              {t('sessions.detail.openRepository')}
             </a>
-          ) : (
-            <span>{session.project_name}</span>
           )}
-          {session.git_branch && (
-            <>
-              <span>&middot;</span>
-              <span className="flex items-center gap-1">
-                <GitBranch className="h-3 w-3" />
-                <span className="font-mono text-[11px] truncate max-w-[160px]">{session.git_branch}</span>
-              </span>
-            </>
-          )}
-          {session.tool_call_count > 0 && (
-            <>
-              <span>&middot;</span>
-              <span className="flex items-center gap-1">
-                <Wrench className="h-3 w-3" />
-                {t('sessions.detail.tools', { count: session.tool_call_count })}
-              </span>
-            </>
-          )}
-          {session.source_tool && (
-            <>
-              <span>&middot;</span>
-              <Badge
-                variant="outline"
-                className={cn(
-                  'text-xs capitalize',
-                  SOURCE_TOOL_COLORS[session.source_tool] ?? 'bg-muted text-muted-foreground'
-                )}
-              >
-                {session.source_tool}
-              </Badge>
-            </>
+          {session.device_hostname && (
+            <span>{t('sessions.detail.deviceLabel', { device: session.device_hostname })}</span>
           )}
         </div>
       </div>
 
-      {/* Tabs: Insights | Prompt Quality | Conversation */}
+      {/* Tabs: analysis, source conversation, passport metadata, and prompt quality */}
       <Tabs defaultValue="insights" className="flex flex-col flex-1 overflow-hidden pt-2">
         <TabsList variant="line" className="shrink-0 w-full justify-start gap-4 px-6 border-b">
           <TabsTrigger value="insights" className="px-0">
             {t('sessions.detail.tabs.insights')}{nonPromptInsights.length > 0 && ` (${nonPromptInsights.length})`}
+          </TabsTrigger>
+          <TabsTrigger value="conversation" className="px-0">
+            {t('sessions.detail.tabs.conversation', { count: session.message_count })}
+          </TabsTrigger>
+          <TabsTrigger value="metadata" className="px-0">
+            {t('sessions.detail.tabs.metadata')}
           </TabsTrigger>
           <TabsTrigger value="prompt-quality" className="px-0">
             <span className="flex items-center gap-1.5" aria-label={promptQualityScore != null ? t('sessions.detail.promptQualityAria', { score: promptQualityScore }) : t('sessions.detail.tabs.promptQuality')}>
@@ -438,9 +367,6 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
                 </span>
               )}
             </span>
-          </TabsTrigger>
-          <TabsTrigger value="conversation" className="px-0">
-            {t('sessions.detail.tabs.conversation', { count: session.message_count })}
           </TabsTrigger>
         </TabsList>
 
@@ -655,6 +581,10 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
               searchQuery={searchQuery}
             />
           </div>
+        </TabsContent>
+
+        <TabsContent value="metadata" className="flex-1 overflow-y-auto mt-0 p-5">
+          <SessionMetadataPanel session={session} />
         </TabsContent>
       </Tabs>
 

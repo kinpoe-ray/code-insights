@@ -4,7 +4,6 @@ import { useSessions } from '@/hooks/useSessions';
 import { useProjects } from '@/hooks/useProjects';
 import { useInsights } from '@/hooks/useInsights';
 import { useFilterParams } from '@/hooks/useFilterParams';
-import { ProjectNav } from '@/components/sessions/ProjectNav';
 import { SessionListPanel } from '@/components/sessions/SessionListPanel';
 import { SessionDetailPanel } from '@/components/sessions/SessionDetailPanel';
 import { Button } from '@/components/ui/button';
@@ -14,9 +13,8 @@ import {
   SheetDescription,
   SheetHeader,
   SheetTitle,
-  SheetTrigger,
 } from '@/components/ui/sheet';
-import { ArrowLeft, ChevronDown, MousePointerClick } from 'lucide-react';
+import { ArrowLeft, MousePointerClick } from 'lucide-react';
 import { useLocale } from '@/i18n/LocaleProvider';
 
 const lgQuery = typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)') : null;
@@ -103,62 +101,21 @@ export default function SessionsPage() {
     setFilters({ q: '', character: 'all', status: 'all', dateRange: 'all', dateFrom: '', dateTo: '', outcome: 'all', source: 'all' });
   }, [setFilters]);
 
-  const selectedProjectName = useMemo(() => {
-    if (filters.project === 'all') return t('sessions.allProjects');
-    return projects.find((p) => p.id === filters.project)?.name ?? t('sessions.projectFallback');
-  }, [filters.project, projects, t]);
-
   const showProject = filters.project === 'all';
   const isLg = useSyncExternalStore(subscribeLg, getIsLg);
 
   return (
     <div className="flex h-[calc(100vh-3.5rem)]">
-      {/* Panel A: Project Nav — visible at xl, Sheet at lg, hidden below */}
-      <aside className="hidden xl:flex w-[220px] shrink-0 border-r bg-background overflow-y-auto">
-        <div className="w-full">
-          <ProjectNav
-            projects={projects}
-            selectedProject={filters.project}
-            selectedSource={filters.source}
-            onSelectProject={handleSelectProject}
-            onSelectSource={(source) => setFilter('source', source)}
-          />
-        </div>
-      </aside>
-
-      {/* Panel B: Session List */}
-      <div className="w-full lg:w-80 shrink-0 lg:border-r bg-background flex flex-col overflow-hidden">
-        {/* Project selector for lg (Sheet trigger) and below xl */}
-        <div className="xl:hidden shrink-0 px-3 pt-3 pb-1">
-          <Sheet>
-            <SheetTrigger asChild>
-              <Button variant="outline" size="sm" className="w-full justify-between text-xs h-8">
-                <span className="truncate">{selectedProjectName}</span>
-                <ChevronDown className="h-3 w-3 shrink-0 ml-1" />
-              </Button>
-            </SheetTrigger>
-            <SheetContent side="left" className="w-[260px] p-0">
-              <SheetHeader className="px-4 py-3 border-b">
-                <SheetTitle className="text-sm font-semibold">{t('sessions.projects')}</SheetTitle>
-                <SheetDescription className="sr-only">{t('sessions.selectProject')}</SheetDescription>
-              </SheetHeader>
-              <ProjectNav
-                projects={projects}
-                selectedProject={filters.project}
-                selectedSource={filters.source}
-                onSelectProject={handleSelectProject}
-                onSelectSource={(source) => setFilter('source', source)}
-              />
-            </SheetContent>
-          </Sheet>
-        </div>
-
+      {/* Session passport list — projects are a first-class filter, not a separate navigation wall. */}
+      <div className="w-full lg:w-[430px] xl:w-[520px] shrink-0 lg:border-r bg-background flex flex-col overflow-hidden">
         <SessionListPanel
           sessions={sessions}
           insights={insights}
+          projects={projects}
           selectedSessionId={filters.session}
+          selectedProject={filters.project}
           showProject={showProject}
-          projectId={filters.project || undefined}
+          projectId={filters.project !== 'all' ? filters.project : undefined}
           filters={{
             q: filters.q,
             character: filters.character,
@@ -172,6 +129,7 @@ export default function SessionsPage() {
           onFilterChange={handleFilterChange}
           onSetFilters={handleSetFilters}
           onClearFilters={handleClearFilters}
+          onSelectProject={handleSelectProject}
           onSelectSession={handleSelectSession}
           loading={loading}
           missingFacetIds={missingFacetIds}

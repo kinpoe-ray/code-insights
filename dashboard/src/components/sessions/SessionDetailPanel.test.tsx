@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
 import { describe, expect, it, vi } from 'vitest';
 import { LocaleProvider, useLocale } from '@/i18n/LocaleProvider';
@@ -94,6 +95,7 @@ function LanguageSwitch() {
 describe('Session detail language', () => {
   it('localizes detail navigation and dates while preserving session values', async () => {
     localStorage.setItem('code-insights.locale', 'en-US');
+    const user = userEvent.setup();
     const { SessionDetailPanel } = await import('./SessionDetailPanel');
 
     render(
@@ -116,13 +118,18 @@ describe('Session detail language', () => {
     expect(screen.getByRole('tab', { name: '洞察' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '提示词质量' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: '对话（8）' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: '元数据' })).toBeInTheDocument();
     expect(screen.getByText(/日/)).toHaveTextContent('7月');
     expect(screen.getByText('深度专注')).toBeInTheDocument();
     expect(screen.getByText('2 次工具调用')).toBeInTheDocument();
     expect(screen.getByText('此会话尚未分析')).toBeInTheDocument();
     expect(screen.getByText('alpha')).toBeInTheDocument();
     expect(screen.getByText('feature/stable-key')).toBeInTheDocument();
-    expect(screen.getByText('codex-cli')).toBeInTheDocument();
+    expect(screen.getByText('Codex CLI')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: '元数据' }));
+    expect(screen.getByText('会话 ID')).toBeInTheDocument();
+    expect(screen.getByText('session-1')).toBeInTheDocument();
     expect(session.id).toBe('session-1');
   }, 20_000);
 });
