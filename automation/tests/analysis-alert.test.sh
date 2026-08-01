@@ -34,6 +34,7 @@ CREATE TABLE analysis_campaign_items (
   status TEXT NOT NULL,
   error_code TEXT,
   safe_error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 3,
   PRIMARY KEY (campaign_id, session_id)
 );
 SQL
@@ -131,13 +132,25 @@ VALUES
   ('campaign-1', 'session-pending', 'pending', NULL, NULL);
 SQL
 
+"$SQLITE_BIN" "$DB" "
+  UPDATE analysis_campaign_items SET attempts = 1
+  WHERE campaign_id = 'campaign-1' AND session_id = 'session-failed';
+"
+
 run_alert detected
 
+[[ ! -e "$SEND_LOG" ]] || fail 'transient first failure sent a notification'
+"$SQLITE_BIN" "$DB" "
+  UPDATE analysis_campaign_items SET attempts = 3
+  WHERE campaign_id = 'campaign-1' AND session_id = 'session-failed';
+"
+run_alert terminal-detected
+
 [[ "$(grep -c '^SEND|' "$SEND_LOG")" -eq 1 ]] \
-  || fail 'current campaign failure did not send exactly one notification'
+  || fail 'terminal campaign failure did not send exactly one notification'
 grep -Fq '|Test Contact|Code Insights 自动分析失败：当前任务发现 1 条失败。' "$SEND_LOG" \
   || fail 'detected notification was not concise and factual'
-grep -Fq '模型返回的结构化结果在自动重试后仍无法解析。' "$SEND_LOG" \
+grep -Fq '模型返回的结构化结果连续 3 次仍无法解析。' "$SEND_LOG" \
   || fail 'detected notification omitted the confirmed error-code cause'
 if grep -Fq 'private raw detail' "$SEND_LOG"; then
   fail 'notification leaked safe_error detail'
@@ -765,6 +778,32 @@ set -e
 if grep -Fq 'Alert outbox is full.' "$TMP_ROOT/full-outbox.err"; then
   fail 'full outbox remained permanently blocked before delivery'
 fi
+
+# Authentication and rate-limit failures require immediate action, so they
+# alert on their first attempt. An ordinary first failure in the same campaign
+# remains transient and is excluded from that notification.
+"$SQLITE_BIN" "$DB" <<'SQL'
+INSERT INTO analysis_campaigns
+  (id, provider, model, pipeline_revision, status, total_items)
+VALUES
+  ('campaign-urgent', 'anthropic', 'glm-5.2', 'two-pass-v5', 'active', 3);
+INSERT INTO analysis_campaign_items
+  (campaign_id, session_id, status, error_code, safe_error, attempts)
+VALUES
+  ('campaign-urgent', 'auth-first', 'failed', 'AUTHENTICATION', 'private', 1),
+  ('campaign-urgent', 'rate-first', 'failed', 'RATE_LIMIT', 'private', 1),
+  ('campaign-urgent', 'ordinary-first', 'failed', 'INVALID_MODEL_OUTPUT', 'private', 1);
+SQL
+urgent_send_count_before=$(grep -c '^SEND|' "$SEND_LOG")
+CAMPAIGN_ID=campaign-urgent run_alert urgent-first-attempt
+[[ "$(grep -c '^SEND|' "$SEND_LOG")" -eq "$((urgent_send_count_before + 1))" ]] \
+  || fail 'first-attempt authentication and rate-limit failures did not send one notification'
+grep -Fq '当前任务发现 2 条失败。' "$SEND_LOG" \
+  || fail 'urgent notification included a suppressed ordinary first failure'
+grep -Fq '模型服务鉴权失败（1 条）' "$SEND_LOG" \
+  || fail 'urgent notification omitted first-attempt authentication failure'
+grep -Fq '模型服务触发限流（1 条）' "$SEND_LOG" \
+  || fail 'urgent notification omitted first-attempt rate-limit failure'
 
 # A stale lock whose PID has been reused is reclaimed only when the recorded
 # process start identity no longer matches the live process.

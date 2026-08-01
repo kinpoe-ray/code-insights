@@ -944,6 +944,57 @@ describe('reanalyze command', () => {
       .not.toContain('private-response-body');
   });
 
+  it('keeps parse classification when the corrective request fails at the provider', async () => {
+    const only = item(0);
+    const { deps } = makeDependencies({
+      preparePromptQualityPass: vi.fn(async () => {
+        throw new Error('Structured output retry failed: no_json_found; provider request failed (HTTP 502)');
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.markItemFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      sessionId: only.sessionId,
+      error: expect.objectContaining({ code: 'INVALID_MODEL_OUTPUT' }),
+    }));
+  });
+
+  it('classifies a first-attempt provider failure without retaining request details', async () => {
+    const { deps } = makeDependencies({
+      prepareSessionPass: vi.fn(async () => {
+        throw new Error('provider request failed at https://private.example?key=secret (HTTP 502)');
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.markItemFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      error: {
+        code: 'PROVIDER_ERROR',
+        message: 'Provider request failed (HTTP 502); previous results were kept.',
+      },
+    }));
+    expect(JSON.stringify(vi.mocked(deps.markItemFailed).mock.calls)).not.toMatch(/private\.example|secret/);
+  });
+
+  it('classifies the configured provider safe network failure message', async () => {
+    const { deps } = makeDependencies({
+      preparePromptQualityPass: vi.fn(async () => {
+        throw new Error('OpenAI request could not be completed.');
+      }) as never,
+    });
+
+    await parse(deps, ['run', '--batch-size', '1', '--quiet']);
+
+    expect(deps.markItemFailed).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      error: {
+        code: 'PROVIDER_ERROR',
+        message: 'Provider request failed; previous results were kept.',
+      },
+    }));
+  });
+
   it.each([
     ['HTTP 429 too many requests', 'RATE_LIMIT', 'rate_limited'],
     ['HTTP 401 invalid API key', 'AUTHENTICATION', 'authentication'],

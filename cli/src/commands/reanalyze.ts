@@ -428,6 +428,7 @@ function classifyFailure(error: unknown): {
     | 'AUTHENTICATION'
     | 'INPUT_CHANGED'
     | 'INVALID_MODEL_OUTPUT'
+    | 'PROVIDER_ERROR'
     | 'ANALYSIS_FAILED';
   safeMessage: string;
   stopReason: CampaignStopReason | null;
@@ -461,6 +462,14 @@ function classifyFailure(error: unknown): {
     return {
       code: 'INVALID_MODEL_OUTPUT',
       safeMessage: 'Model structured output remained invalid after retry; previous results were kept.',
+      stopReason: null,
+    };
+  }
+  if (/\b(?:HTTP\s+\d{3}|provider request|upstream request|network error|request could not be completed)\b/i.test(message)) {
+    const status = message.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+    return {
+      code: 'PROVIDER_ERROR',
+      safeMessage: `Provider request failed${status ? ` (HTTP ${status})` : ''}; previous results were kept.`,
       stopReason: null,
     };
   }

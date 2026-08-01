@@ -237,6 +237,15 @@ function runGuardedAnalysis(
   });
 }
 
+function correctiveRetryFailure(parseErrorType: string, error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  const httpStatus = message.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
+  return new Error(
+    `Structured output retry failed: ${parseErrorType}; provider request failed`
+    + (httpStatus ? ` (HTTP ${httpStatus})` : ''),
+  );
+}
+
 function commonStageFields(
   input: FrozenSessionAnalysisInput,
   provider: string,
@@ -336,7 +345,12 @@ export async function prepareSessionAnalysisPass(
     const attempts: RunAnalysisResult[] = [await runGuardedAnalysis(runner, analysisParams)];
     let parsed = parseAnalysisResponse(attempts[0].rawJson);
     if (!parsed.success) {
-      attempts.push(await runGuardedAnalysis(runner, analysisParams));
+      const firstParseErrorType = parsed.error.error_type;
+      try {
+        attempts.push(await runGuardedAnalysis(runner, analysisParams));
+      } catch (error) {
+        throw correctiveRetryFailure(firstParseErrorType, error);
+      }
       parsed = parseAnalysisResponse(attempts[attempts.length - 1].rawJson);
     }
     if (!parsed.success) {
@@ -469,7 +483,12 @@ export async function preparePromptQualityPass(
   const attempts = [await runPromptQualityPass(input, runner, analysisLanguage)];
   let parsed = parsePromptQualityResponse(attempts[0].rawJson);
   if (!parsed.success) {
-    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true));
+    const firstParseErrorType = parsed.error.error_type;
+    try {
+      attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true));
+    } catch (error) {
+      throw correctiveRetryFailure(firstParseErrorType, error);
+    }
     parsed = parsePromptQualityResponse(attempts[1].rawJson);
   }
   if (!parsed.success) {

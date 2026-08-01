@@ -104,6 +104,8 @@ export interface ClaimHistoryRefreshOptions {
   claimLeaseMs?: number;
   /** Maximum complete attempts for one session. Continuing pass two is not a new attempt. */
   maxAttempts?: number;
+  /** Failed work must age this long before another scheduled run may retry it. */
+  retryCooldownMs?: number;
 }
 
 export interface StageHistoryRefreshSessionInput {
@@ -773,9 +775,10 @@ export function claimNextHistoryRefreshItem(
   campaignId: string,
   options: ClaimHistoryRefreshOptions = {},
 ): HistoryRefreshCampaignItem | null {
-  const now = options.now ?? new Date().toISOString();
-  const nowMs = Date.parse(now);
+  const requestedNow = options.now ?? new Date().toISOString();
+  const nowMs = Date.parse(requestedNow);
   if (!Number.isFinite(nowMs)) throw new Error('History refresh claim time must be ISO-8601');
+  const now = new Date(nowMs).toISOString();
   const claimLeaseMs = options.claimLeaseMs ?? 30 * 60 * 1000;
   if (!Number.isFinite(claimLeaseMs) || claimLeaseMs < 0) {
     throw new Error('History refresh claim lease must be non-negative');
@@ -784,7 +787,12 @@ export function claimNextHistoryRefreshItem(
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error('History refresh max attempts must be a positive integer');
   }
+  const retryCooldownMs = options.retryCooldownMs ?? 6 * 60 * 60 * 1000;
+  if (!Number.isFinite(retryCooldownMs) || retryCooldownMs < 0) {
+    throw new Error('History refresh retry cooldown must be non-negative');
+  }
   const staleBefore = new Date(nowMs - claimLeaseMs).toISOString();
+  const retryBefore = new Date(nowMs - retryCooldownMs).toISOString();
   const statuses = options.retryFailed
     ? "('pending', 'session_staged', 'failed')"
     : "('pending', 'session_staged')";
@@ -804,9 +812,17 @@ export function claimNextHistoryRefreshItem(
         AND status IN ${statuses}
         AND attempts < ?
         AND (claimed_at IS NULL OR claimed_at <= ?)
-      ORDER BY CASE WHEN status = 'failed' THEN 1 ELSE 0 END, ordinal ASC
+        AND (
+          status <> 'failed'
+          OR julianday(COALESCE(failed_at, updated_at)) <= julianday(?)
+        )
+      ORDER BY CASE
+        WHEN status = 'session_staged' THEN 0
+        WHEN status = 'failed' THEN 1
+        ELSE 2
+      END, ordinal ASC
       LIMIT 1
-    `).get(campaignId, maxAttempts, staleBefore) as CampaignItemRow | undefined;
+    `).get(campaignId, maxAttempts, staleBefore, retryBefore) as CampaignItemRow | undefined;
     if (!candidate) return null;
 
     const retryStatus = candidate.status === 'failed'

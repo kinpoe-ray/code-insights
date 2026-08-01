@@ -566,6 +566,27 @@ describe('two-pass preparation and publication', () => {
     expect(chat).toHaveBeenCalledOnce();
   });
 
+  it('preserves configured-provider parse evidence when its corrective request fails', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionAnalysisPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const chat = vi.fn()
+      .mockResolvedValueOnce({ content: 'not json', usage: {} })
+      .mockRejectedValueOnce(new Error('private provider failure'));
+    const runner = configuredRunner(chat);
+
+    const error = await prepareSessionAnalysisPass(frozen, runner, 'zh-CN').then(
+      () => null,
+      failure => failure as Error,
+    );
+
+    expect(error?.message).toMatch(/no_json_found/i);
+    expect(error?.message).not.toContain('private provider failure');
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it('retries malformed non-LLM runner output once and accounts for both calls', async () => {
     const {
       loadFrozenSessionInput,
@@ -698,6 +719,32 @@ describe('two-pass preparation and publication', () => {
     expect(error?.message).toMatch(/no_json_found/i);
     expect(error?.message).not.toContain('still not json');
     expect(runAnalysis).toHaveBeenCalledTimes(2);
+  });
+
+  it('preserves the first parse type when the corrective retry has a provider failure', async () => {
+    const {
+      loadFrozenSessionInput,
+      prepareSessionAnalysisPass,
+    } = await import('../two-pass-analysis.js');
+    const frozen = loadFrozenSessionInput('sess1');
+    const runAnalysis = vi.fn()
+      .mockResolvedValueOnce({
+        rawJson: 'not json', durationMs: 1, inputTokens: 1, outputTokens: 1,
+        provider: 'native', model: 'glm-5.2',
+      })
+      .mockRejectedValueOnce(new Error(
+        'provider request failed at https://private.example?key=secret (HTTP 502)',
+      ));
+
+    const error = await prepareSessionAnalysisPass(
+      frozen,
+      { name: 'native-test', runAnalysis },
+      'zh-CN',
+    ).then(() => null, failure => failure as Error);
+
+    expect(error?.message).toContain('no_json_found');
+    expect(error?.message).toContain('HTTP 502');
+    expect(error?.message).not.toMatch(/private\.example|secret/);
   });
 
   it('rejects a pre-language-policy staged session before starting pass two', async () => {

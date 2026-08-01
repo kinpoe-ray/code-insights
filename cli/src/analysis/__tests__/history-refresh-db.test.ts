@@ -578,7 +578,10 @@ describe('history refresh campaign store', () => {
     expect(failed.safeError).toContain('[REDACTED]');
     expect(failed.safeError).not.toMatch(/top-secret|also-secret/);
     expect(claimNextHistoryRefreshItem(db, campaign.id)).toBeNull();
-    expect(claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true })).toMatchObject({
+    expect(claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      retryCooldownMs: 0,
+    })).toMatchObject({
       sessionId: 'session-1',
       status: 'session_staged',
       attempts: 2,
@@ -587,7 +590,7 @@ describe('history refresh campaign store', () => {
     db.close();
   });
 
-  it('processes fresh work before bounded retries and stops after three claims', () => {
+  it('cools failed work across runs, then prioritizes bounded retries', () => {
     const db = freshDb();
     insertSession(db, 'first', '2026-07-19T08:00:00Z', 3);
     insertSession(db, 'second', '2026-07-20T08:00:00Z', 3);
@@ -597,6 +600,7 @@ describe('history refresh campaign store', () => {
       baseUrlFingerprint: 'endpoint-fingerprint',
       scope: {},
     });
+    let failedAt = '2026-07-20T00:00:00.000Z';
     const fail = (item: NonNullable<ReturnType<typeof claimNextHistoryRefreshItem>>) => {
       markHistoryRefreshItemFailed(db, {
         campaignId: campaign.id,
@@ -604,22 +608,40 @@ describe('history refresh campaign store', () => {
         inputRevision: item.inputRevision,
         claimToken: item.claimToken!,
         error: { code: 'temporary', message: 'temporary provider failure' },
+        now: failedAt,
       });
     };
 
-    const firstAttempt = claimNextHistoryRefreshItem(db, campaign.id)!;
+    const firstAttempt = claimNextHistoryRefreshItem(db, campaign.id, {
+      now: '2026-07-20T00:00:00.000Z',
+    })!;
     fail(firstAttempt);
 
-    const freshWork = claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true });
+    const freshWork = claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T05:59:59.999Z',
+    });
     expect(freshWork?.sessionId).toBe('second');
 
-    const retryTwo = claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true })!;
+    const retryTwo = claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T06:00:00.000Z',
+    })!;
     expect(retryTwo).toMatchObject({ sessionId: 'first', attempts: 2 });
+    failedAt = '2026-07-20T06:00:00.000Z';
     fail(retryTwo);
-    const retryThree = claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true })!;
+    expect(claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T11:59:59.999Z',
+    })?.sessionId).toBe('second');
+    const retryThree = claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T12:00:00.000Z',
+    })!;
     expect(retryThree).toMatchObject({ sessionId: 'first', attempts: 3 });
     fail(retryThree);
-    expect(claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true })).toBeNull();
+    expect(claimNextHistoryRefreshItem(db, campaign.id, { retryFailed: true })?.sessionId)
+      .toBe('second');
 
     const reset = retryFailedHistoryRefreshItems(
       db,
@@ -637,6 +659,52 @@ describe('history refresh campaign store', () => {
     expect(claimNextHistoryRefreshItem(db, campaign.id)).toMatchObject({
       sessionId: 'first',
       attempts: 1,
+    });
+
+    db.close();
+  });
+
+  it('retries legacy null and offset failed timestamps by instant rather than text order', () => {
+    const db = freshDb();
+    insertSession(db, 'legacy-null', '2026-07-19T08:00:00Z', 3);
+    insertSession(db, 'offset-time', '2026-07-20T08:00:00Z', 3);
+    const campaign = createHistoryRefreshCampaign(db, {
+      provider: 'anthropic',
+      model: 'glm-5.2',
+      baseUrlFingerprint: 'endpoint-fingerprint',
+      scope: {},
+    });
+    const fail = (sessionId: string, now: string) => {
+      const claimed = claimNextHistoryRefreshItem(db, campaign.id, { now })!;
+      expect(claimed.sessionId).toBe(sessionId);
+      markHistoryRefreshItemFailed(db, {
+        campaignId: campaign.id,
+        sessionId,
+        inputRevision: claimed.inputRevision,
+        claimToken: claimed.claimToken!,
+        error: { code: 'temporary', message: 'temporary provider failure' },
+        now,
+      });
+    };
+
+    fail('legacy-null', '2026-07-20T06:00:00.000Z');
+    fail('offset-time', '2026-07-20T14:00:00+08:00');
+    db.prepare(`
+      UPDATE analysis_campaign_items
+      SET failed_at = NULL, updated_at = '2026-07-20T06:00:00.000Z'
+      WHERE campaign_id = ? AND session_id = 'legacy-null'
+    `).run(campaign.id);
+
+    expect(claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T12:00:00.000Z',
+    })?.sessionId).toBe('legacy-null');
+    expect(claimNextHistoryRefreshItem(db, campaign.id, {
+      retryFailed: true,
+      now: '2026-07-20T20:00:00+08:00',
+    })).toMatchObject({
+      sessionId: 'offset-time',
+      claimedAt: '2026-07-20T12:00:00.000Z',
     });
 
     db.close();

@@ -39,6 +39,7 @@ CREATE TABLE analysis_campaign_items (
   status TEXT NOT NULL,
   error_code TEXT,
   safe_error TEXT,
+  attempts INTEGER NOT NULL DEFAULT 3,
   PRIMARY KEY (campaign_id, session_id)
 );
 INSERT INTO analysis_campaigns
@@ -112,7 +113,8 @@ case "${1:-}" in
       UPDATE analysis_campaign_items
       SET status = 'failed',
           error_code = 'INVALID_MODEL_OUTPUT',
-          safe_error = 'private model response'
+          safe_error = 'private model response',
+          attempts = 3
       WHERE campaign_id = '$campaign_id'
         AND session_id = '$session_id';
     "

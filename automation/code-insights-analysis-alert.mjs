@@ -560,7 +560,7 @@ function readCampaign(sqliteBin, dbPath, campaignId) {
   }
 
   const items = sqliteJson(sqliteBin, dbPath, `
-    SELECT session_id, status, COALESCE(error_code, '') AS error_code
+    SELECT session_id, status, COALESCE(error_code, '') AS error_code, attempts
     FROM analysis_campaign_items
     WHERE campaign_id = '${campaignId}'
     ORDER BY session_id ASC;
@@ -570,6 +570,8 @@ function readCampaign(sqliteBin, dbPath, campaignId) {
       typeof item.session_id !== 'string'
       || !ITEM_STATUSES.has(item.status)
       || typeof item.error_code !== 'string'
+      || !Number.isSafeInteger(item.attempts)
+      || item.attempts < 0
     ) {
       fail('Analysis campaign item has an invalid shape.', 74);
     }
@@ -585,6 +587,7 @@ function readCampaign(sqliteBin, dbPath, campaignId) {
       sessionId: item.session_id,
       status: item.status,
       errorCode: item.error_code || 'ANALYSIS_FAILED',
+      attempts: item.attempts,
     })),
   };
 }
@@ -625,7 +628,8 @@ function countsFor(campaign) {
 
 function describeCause(errorCodes) {
   const labels = {
-    INVALID_MODEL_OUTPUT: '模型返回的结构化结果在自动重试后仍无法解析',
+    INVALID_MODEL_OUTPUT: '模型返回的结构化结果连续 3 次仍无法解析',
+    PROVIDER_ERROR: '模型服务请求连续 3 次仍失败',
     RATE_LIMIT: '模型服务触发限流',
     AUTHENTICATION: '模型服务鉴权失败',
     INPUT_CHANGED: '会话内容在任务创建后发生变化',
@@ -651,7 +655,10 @@ function describeSolution(errorCodes) {
     return '旧分析结果已保留；请基于最新会话内容重新建立任务后重试。';
   }
   if (codes.has('INVALID_MODEL_OUTPUT')) {
-    return '旧分析结果已保留，失败项会在后续任务中安全重试；若重复出现，再收紧输出约束或切换模型。';
+    return '旧分析结果已保留；系统已完成 3 次跨任务安全重试，请查看脱敏日志进一步定位。';
+  }
+  if (codes.has('PROVIDER_ERROR')) {
+    return '旧分析结果已保留；系统已完成 3 次跨任务安全重试，请检查模型服务可用性。';
   }
   return '旧分析结果已保留；请查看脱敏日志确认原因后再重试。';
 }
@@ -768,6 +775,10 @@ function planEvaluation(state, campaign) {
   const newFailures = CURRENT_STATUSES.has(campaign.status)
     ? campaign.items.filter(item => (
       item.status === 'failed'
+      && (
+        item.attempts >= 3
+        || ['AUTHENTICATION', 'RATE_LIMIT'].includes(normalizeErrorCode(item.errorCode))
+      )
       && !covered.has(failureSignature(campaign.id, {
         sessionId: item.sessionId,
         errorCode: normalizeErrorCode(item.errorCode),

@@ -165,6 +165,34 @@ describe('AnalysisEngine contract', () => {
     });
   });
 
+  it('preserves the first parse type when the corrective provider request fails', async () => {
+    let callCount = 0;
+    const engine = createAnalysisEngine({
+      client: client({
+        chat: async () => {
+          callCount++;
+          if (callCount === 1) return { content: 'not json' };
+          throw new Error('private provider failure');
+        },
+      }),
+    });
+
+    const result = await engine.analyzeSession({
+      session,
+      messages: [message('message-1', 'Analyze this session.')],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected provider failure after parse retry');
+    expect(result.error).toMatchObject({
+      kind: 'provider',
+      code: 'PROVIDER_REQUEST_FAILED',
+      parseErrorType: 'no_json_found',
+    });
+    expect(JSON.stringify(result)).not.toContain('private provider failure');
+    expect(result.stats.callCount).toBe(2);
+  });
+
   it('budgets the complete request, preserves content blocks, and aggregates chunk plus facet calls', async () => {
     const requests: LLMMessage[][] = [];
     const chunkResponse = (title: string) => JSON.stringify({
@@ -458,6 +486,26 @@ describe('AnalysisEngine contract', () => {
       outputTokens: 0,
       callCount: 1,
     });
+  });
+
+  it('retains only a safe HTTP status from an initial provider failure', async () => {
+    const engine = createAnalysisEngine({
+      client: client({
+        chat: async () => {
+          throw new Error('request to https://private.example?key=secret failed (HTTP 502)');
+        },
+      }),
+    });
+
+    const result = await engine.analyzeSession({
+      session,
+      messages: [message('message-1', 'Analyze this session.')],
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('expected provider failure');
+    expect(result.error.message).toBe('The analysis provider request failed (HTTP 502).');
+    expect(JSON.stringify(result)).not.toMatch(/private\.example|secret/);
   });
 
   it('reports only a safe response length when provider output cannot be parsed', async () => {

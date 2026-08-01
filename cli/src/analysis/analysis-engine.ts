@@ -434,8 +434,13 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
         warnings: chunkPlan.warnings,
         usage: buildCurrentUsage(),
       });
-      const thrownOutcome = (error: unknown): AnalysisFailure => {
+      const thrownOutcome = (
+        error: unknown,
+        priorParseErrorType?: AnalysisFailure['error']['parseErrorType'],
+      ): AnalysisFailure => {
         const aborted = error instanceof Error && error.name === 'AbortError';
+        const providerMessage = error instanceof Error ? error.message : String(error);
+        const httpStatus = providerMessage.match(/\bHTTP\s+(\d{3})\b/i)?.[1];
         return {
           ok: false,
           completeness: parsedResponses.length > 0 ? 'partial' : 'none',
@@ -444,7 +449,8 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
             code: aborted ? 'ANALYSIS_ABORTED' : 'PROVIDER_REQUEST_FAILED',
             message: aborted
               ? 'Analysis cancelled.'
-              : 'The analysis provider request failed.',
+              : `The analysis provider request failed${httpStatus ? ` (HTTP ${httpStatus})` : ''}.`,
+            ...(!aborted && priorParseErrorType && { parseErrorType: priorParseErrorType }),
           },
           stats: {
             chunkCount: chunkPlan.chunks.length,
@@ -483,6 +489,7 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
         if (options.signal?.aborted) return abortedOutcome();
         let parsed = parseAnalysisResponse(response.content);
         if (!parsed.success) {
+          const firstParseErrorType = parsed.error.error_type;
           callCount++;
           try {
             response = await client.chat(
@@ -490,7 +497,7 @@ export function createAnalysisEngine(dependencies: AnalysisEngineDependencies): 
               { ...STRUCTURED_ANALYSIS_OPTIONS, signal: options.signal },
             );
           } catch (error) {
-            return thrownOutcome(error);
+            return thrownOutcome(error, firstParseErrorType);
           }
           usage.inputTokens += response.usage?.inputTokens ?? 0;
           usage.outputTokens += response.usage?.outputTokens ?? 0;
