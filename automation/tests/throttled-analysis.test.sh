@@ -48,6 +48,17 @@ CREATE TABLE analysis_usage (
   session_message_count INTEGER,
   PRIMARY KEY (session_id, analysis_type)
 );
+CREATE TABLE analysis_campaigns (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL
+);
+CREATE TABLE analysis_campaign_items (
+  campaign_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (campaign_id, session_id)
+);
 INSERT INTO sessions VALUES ('dry-run-session', 'codex-cli', datetime('now', '-1 day'), 3, NULL);
 INSERT INTO messages VALUES (1, 'dry-run-session');
 INSERT INTO sessions VALUES ('complete-session', 'claude-code', datetime('now', '-2 days'), 4, NULL);
@@ -76,6 +87,12 @@ INSERT INTO sessions VALUES ('default-window-inside', 'copilot', datetime('now',
 INSERT INTO messages VALUES (9, 'default-window-inside');
 INSERT INTO sessions VALUES ('default-window-outside', 'copilot', datetime('now', '-15 days'), 3, NULL);
 INSERT INTO messages VALUES (10, 'default-window-outside');
+INSERT INTO sessions VALUES ('campaign-exhausted', 'copilot-cli', datetime('now', '-1 day'), 3, NULL);
+INSERT INTO messages VALUES (13, 'campaign-exhausted');
+INSERT INTO sessions VALUES ('campaign-external', 'copilot-cli', datetime('now', '-2 days'), 3, NULL);
+INSERT INTO messages VALUES (14, 'campaign-external');
+INSERT INTO analysis_campaigns VALUES ('active-campaign', 'active');
+INSERT INTO analysis_campaign_items VALUES ('active-campaign', 'campaign-exhausted', 'failed', 3);
 SQL
 
 # Dry-run is a read-only preview and must work before the executable that can
@@ -95,6 +112,17 @@ assert_not_contains "$TMP_ROOT/dry-run.log" 'complete-session'
 assert_contains "$TMP_ROOT/dry-run.log" 'Dry run: no analysis calls made.'
 [[ ! -e "$TMP_ROOT/analysis.log" ]] || fail 'dry-run created an analysis log'
 [[ ! -e "$TMP_ROOT/failures.log" ]] || fail 'dry-run created a failure log'
+
+# Exhausted members of an active campaign stay isolated for explicit retry,
+# while an otherwise eligible session outside that campaign remains selectable.
+HOME="$TMP_ROOT/home" PATH='/usr/bin:/bin' \
+  CODE_INSIGHTS_DB="$DB" \
+  CODE_INSIGHTS_LOG="$TMP_ROOT/analysis.log" \
+  CODE_INSIGHTS_FAIL_LOG="$TMP_ROOT/failures.log" \
+  "$SCRIPT" --source copilot-cli --dry-run --batch-size 10 --delay 0 \
+    > "$TMP_ROOT/campaign-isolation.log" 2>&1
+assert_not_contains "$TMP_ROOT/campaign-isolation.log" 'campaign-exhausted'
+assert_contains "$TMP_ROOT/campaign-isolation.log" 'campaign-external'
 
 # Omitting all date controls preserves the rolling 14-day default.
 HOME="$TMP_ROOT/home" PATH='/usr/bin:/bin' \

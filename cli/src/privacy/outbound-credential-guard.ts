@@ -543,6 +543,12 @@ function collectUnquotedAuthorizationSpans(
         quote = character;
         continue;
       }
+      if (
+        character === ']'
+        && isPlaceholder(text.slice(credentialStart, cursor + 1))
+      ) {
+        continue;
+      }
       if (character === '}' || character === ']') {
         credentialEnd = cursor;
         break;

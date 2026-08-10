@@ -175,6 +175,15 @@ QUERY="
     AND s.message_count >= 3
     $DATE_SQL
     AND EXISTS (SELECT 1 FROM messages m WHERE m.session_id = s.id)
+    AND NOT EXISTS (
+      SELECT 1
+      FROM analysis_campaigns campaign
+      JOIN analysis_campaign_items campaign_item
+        ON campaign_item.campaign_id = campaign.id
+      WHERE campaign.status IN ('active', 'paused')
+        AND campaign_item.session_id = s.id
+        AND campaign_item.status <> 'succeeded'
+    )
     $COMPLETION_SQL
     $SOURCE_SQL
   ORDER BY julianday(s.started_at) DESC

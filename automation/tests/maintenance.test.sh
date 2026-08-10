@@ -54,6 +54,8 @@ case "${1:-}" in
       if [[ -n "${HISTORY_REFRESH_STATUS:-}" ]]; then
         printf '{"active":false,"status":"%s","processed":1,"stopReason":"%s"}\n' \
           "$HISTORY_REFRESH_STATUS" "$HISTORY_REFRESH_STATUS"
+      elif [[ "${HISTORY_REFRESH_EXHAUSTED:-0}" == '1' ]]; then
+        printf '{"active":true,"status":"active","processed":0,"remaining":21,"failed":21,"exhaustedFailed":21,"stopReason":"failed_items"}\n'
       elif [[ "${HISTORY_REFRESH_ACTIVE:-0}" == '1' ]]; then
         printf '{"active":true,"status":"active","processed":2,"stopReason":"batch_limit"}\n'
       else
@@ -264,6 +266,20 @@ assert_contains "$CALL_LOG" 'code-insights reanalyze run --batch-size 5 --retry-
   || fail 'active history refresh also started legacy analysis'
 assert_not_contains "$CALL_LOG" 'code-insights reflect'
 assert_contains "$TMP_ROOT/history-refresh.log" 'Durable history reanalysis remains active'
+
+# Exhausted campaign failures remain isolated for explicit recovery, but they
+# must not starve ordinary analysis outside the campaign. Reflection stays
+# paused so it never synthesizes a partially refreshed history generation.
+: > "$CALL_LOG"
+rm -f "$ANALYZE_COUNT_FILE" "$REFLECTED_FILE"
+HISTORY_REFRESH_EXHAUSTED=1 FACET_COUNT=9 SNAPSHOT_COUNT=8 CURL_STATUS=0 \
+  "$SCRIPT" run > "$TMP_ROOT/history-refresh-exhausted.log" 2>&1
+[[ "$(grep -c 'code-insights reanalyze run' "$CALL_LOG")" -eq 1 ]] \
+  || fail 'exhausted history refresh was advanced more than once'
+assert_contains "$CALL_LOG" 'analyze --days 36500 --batch-size 5 --delay 0'
+assert_not_contains "$CALL_LOG" 'code-insights reflect'
+assert_contains "$TMP_ROOT/history-refresh-exhausted.log" \
+  'Durable history reanalysis has 21 exhausted failed item(s); campaign-external analysis will continue, but reflection remains paused.'
 
 # A campaign completed by this batch reports active=false, so maintenance
 # continues legacy analysis/reflection in the same window instead of waiting

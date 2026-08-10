@@ -221,6 +221,15 @@ run_history_refresh() {
   fi
   if grep -Fq '"active":true' <<< "$output"; then
     HISTORY_REFRESH_WAS_ACTIVE=1
+    if grep -Fq '"stopReason":"failed_items"' <<< "$output"; then
+      local failed_count exhausted_count
+      failed_count=$(sed -nE 's/.*"failed":([0-9]+).*/\1/p' <<< "$output" | tail -n 1)
+      exhausted_count=$(sed -nE 's/.*"exhaustedFailed":([0-9]+).*/\1/p' <<< "$output" | tail -n 1)
+      if is_uint "$failed_count" && is_uint "$exhausted_count" \
+        && [[ "$failed_count" -gt 0 && "$exhausted_count" -eq "$failed_count" ]]; then
+        HISTORY_REFRESH_EXHAUSTED_FAILED="$exhausted_count"
+      fi
+    fi
     return 0
   fi
   if grep -Fq '"active":false' <<< "$output"; then
@@ -477,14 +486,19 @@ if maintenance_stop_requested; then
 fi
 
 HISTORY_REFRESH_WAS_ACTIVE=0
+HISTORY_REFRESH_EXHAUSTED_FAILED=0
 run_history_refresh
 history_refresh_status=$?
 if [[ "$history_refresh_status" -ne 0 ]]; then
   exit "$history_refresh_status"
 fi
 if [[ "$HISTORY_REFRESH_WAS_ACTIVE" -eq 1 ]]; then
-  log 'Durable history reanalysis remains active; legacy analysis and reflection were skipped.'
-  exit 0
+  if [[ "$HISTORY_REFRESH_EXHAUSTED_FAILED" -gt 0 ]]; then
+    log "Durable history reanalysis has $HISTORY_REFRESH_EXHAUSTED_FAILED exhausted failed item(s); campaign-external analysis will continue, but reflection remains paused."
+  else
+    log 'Durable history reanalysis remains active; legacy analysis and reflection were skipped.'
+    exit 0
+  fi
 fi
 
 drain_analysis
@@ -500,6 +514,11 @@ fi
 if maintenance_stop_requested; then
   log_maintenance_stop
   exit 0
+fi
+if [[ "$HISTORY_REFRESH_EXHAUSTED_FAILED" -gt 0 ]]; then
+  log 'Weekly reflection remains paused until the durable history reanalysis campaign is resolved.'
+  log "Code Insights maintenance finished with status $overall_status."
+  exit "$overall_status"
 fi
 refresh_previous_week
 reflect_status=$?

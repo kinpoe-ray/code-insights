@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
+import { redactCredentialText } from '../privacy/outbound-credential-guard.js';
 import { ANALYSIS_VERSION } from './analysis-db.js';
 import type { SQLiteMessageRow } from './prompt-types.js';
 import {
@@ -35,6 +36,7 @@ export interface HistoryRefreshPreview {
 
 export type HistoryRefreshCampaignStatus = 'active' | 'paused' | 'completed' | 'cancelled';
 export type HistoryRefreshItemStatus = 'pending' | 'session_staged' | 'failed' | 'succeeded';
+export const DEFAULT_HISTORY_REFRESH_MAX_ATTEMPTS = 3;
 
 export interface HistoryRefreshCampaignSpec {
   provider: string;
@@ -261,9 +263,8 @@ function jsonWithoutSecrets(
   const visit = (candidate: unknown, path: string): void => {
     if (typeof candidate === 'string' && scanCredentialValues) {
       if (
-        /\bBearer\s+[^\s,;]+/i.test(candidate)
+        redactCredentialText(candidate) !== candidate
         || /\bsk-[A-Za-z0-9._-]{6,}/.test(candidate)
-        || /\b(?:x[-_]?api[-_]?key|api[-_]?key|authorization|access[-_]?token|refresh[-_]?token)\s*[:=]\s*[^\s,;]+/i.test(candidate)
       ) {
         throw new Error(`${label} contains a credential value at ${path}`);
       }
@@ -783,7 +784,7 @@ export function claimNextHistoryRefreshItem(
   if (!Number.isFinite(claimLeaseMs) || claimLeaseMs < 0) {
     throw new Error('History refresh claim lease must be non-negative');
   }
-  const maxAttempts = options.maxAttempts ?? 3;
+  const maxAttempts = options.maxAttempts ?? DEFAULT_HISTORY_REFRESH_MAX_ATTEMPTS;
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
     throw new Error('History refresh max attempts must be a positive integer');
   }

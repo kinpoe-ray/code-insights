@@ -536,8 +536,53 @@ describe('history refresh campaign store', () => {
       sessionStage: { summary: { title: 'Bearer embedded-secret' } },
       sessionUsage: { inputTokens: 1 },
     })).toThrow(/credential value/);
+    expect(() => stageHistoryRefreshSession(db, {
+      campaignId: campaign.id,
+      sessionId: claimed.sessionId,
+      inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
+      sessionStage: {
+        summary: { title: 'Authorization: Bearer [REDACTED:authorization]trailing-secret' },
+      },
+      sessionUsage: { inputTokens: 1 },
+    })).toThrow(/credential value/);
     expect(JSON.stringify(inspectHistoryRefreshCampaign(db, campaign.id)))
       .not.toMatch(/must-never-be-stored|alternate-secret|embedded-secret/);
+
+    db.close();
+  });
+
+  it('allows canonical redaction placeholders in durable staged text', () => {
+    const db = freshDb();
+    insertSession(db, 'session-1', '2026-07-21T08:00:00Z', 3);
+    const campaign = createHistoryRefreshCampaign(db, {
+      provider: 'anthropic',
+      model: 'glm-5.2',
+      baseUrlFingerprint: 'endpoint-fingerprint',
+      scope: {},
+    });
+    const claimed = claimNextHistoryRefreshItem(db, campaign.id)!;
+
+    expect(() => stageHistoryRefreshSession(db, {
+      campaignId: campaign.id,
+      sessionId: claimed.sessionId,
+      inputRevision: claimed.inputRevision,
+      claimToken: claimed.claimToken!,
+      sessionStage: {
+        summary: {
+          title: 'Authorization: Bearer [REDACTED:authorization]',
+          description: 'api-key: [REDACTED:credential-assignment]',
+        },
+      },
+      sessionUsage: { inputTokens: 1 },
+    })).not.toThrow();
+    expect(inspectHistoryRefreshCampaign(db, campaign.id).items[0].sessionStage)
+      .toMatchObject({
+        summary: {
+          title: 'Authorization: Bearer [REDACTED:authorization]',
+          description: 'api-key: [REDACTED:credential-assignment]',
+        },
+      });
 
     db.close();
   });

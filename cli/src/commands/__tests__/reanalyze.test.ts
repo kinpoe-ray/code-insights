@@ -30,6 +30,7 @@ interface TestItem {
   inputRevision: string;
   status: ItemStatus;
   sessionStage: unknown | null;
+  attempts: number;
   claimedAt: string | null;
   claimToken: string | null;
 }
@@ -70,6 +71,7 @@ function item(ordinal: number, overrides: Partial<TestItem> = {}): TestItem {
     inputRevision: `revision-${ordinal + 1}`,
     status: 'pending',
     sessionStage: null,
+    attempts: 0,
     claimedAt: `2026-07-21T00:00:0${ordinal}.000Z`,
     claimToken: `claim-token-${ordinal}`,
     ...overrides,
@@ -632,6 +634,34 @@ describe('reanalyze command', () => {
     )).toBe(true);
   });
 
+  it('reports exhausted failures without starting another paid pass', async () => {
+    const exhausted = item(0, { status: 'failed', attempts: 3 });
+    const { deps, output } = makeDependencies({
+      getActive: vi.fn(() => campaign({ totalItems: 1 }) as never),
+      claimNextItem: vi.fn(() => null),
+      inspectCampaign: vi.fn(() => ({
+        campaign: campaign({ totalItems: 1 }),
+        counts: { pending: 0, session_staged: 0, failed: 1, succeeded: 0 },
+        items: [exhausted],
+      })) as never,
+    });
+
+    await parse(deps, ['run', '--retry-failed', '--json']);
+
+    expect(deps.claimNextItem).toHaveBeenCalledOnce();
+    expect(deps.prepareSessionPass).not.toHaveBeenCalled();
+    expect(deps.preparePromptQualityPass).not.toHaveBeenCalled();
+    expect(lastJson<ReanalyzeRunResult>(output)).toMatchObject({
+      active: true,
+      status: 'active',
+      processed: 0,
+      remaining: 1,
+      failed: 1,
+      exhaustedFailed: 1,
+      stopReason: 'failed_items',
+    });
+  });
+
   it.each([
     ['global pause', { isMaintenancePaused: vi.fn(() => true) }, 'global_paused'],
     ['campaign pause', { inspectCampaign: vi.fn(() => ({
@@ -1033,6 +1063,7 @@ describe('reanalyze command', () => {
       processed: 0,
       remaining: 0,
       failed: 0,
+      exhaustedFailed: 0,
       stopReason: 'no_active_campaign',
     });
     expect(process.exitCode).toBeUndefined();

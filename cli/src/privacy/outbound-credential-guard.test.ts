@@ -514,6 +514,19 @@ describe('guardOutboundCredentials credential families', () => {
 });
 
 describe('guardOutboundCredentials precision and reporting', () => {
+  it('does not re-redact canonical authorization placeholders', () => {
+    const safe = [
+      'Authorization: Bearer [REDACTED:authorization]',
+      'Proxy-Authorization: Basic [REDACTED:authorization]',
+      'curl uses Bearer [REDACTED:authorization]',
+    ].join('\n');
+
+    const result = guardText(safe);
+
+    expect(result.content).toBe(safe);
+    expect(result.report).toEqual([]);
+  });
+
   it('does not redact UUIDs, hashes, SRI values, email addresses, or placeholders', () => {
     const safe = [
       '550e8400-e29b-41d4-a716-446655440000',

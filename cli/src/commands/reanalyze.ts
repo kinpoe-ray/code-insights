@@ -11,6 +11,7 @@ import {
   cancelHistoryRefreshCampaign,
   claimNextHistoryRefreshItem,
   createHistoryRefreshCampaign,
+  DEFAULT_HISTORY_REFRESH_MAX_ATTEMPTS,
   getActiveHistoryRefreshCampaign,
   getLatestHistoryRefreshCampaign,
   HistoryRefreshClaimLostError,
@@ -69,6 +70,8 @@ export interface ReanalyzeRunResult {
   /** Campaign members not yet succeeded, including failed members. */
   remaining: number;
   failed: number;
+  /** Failed members that exhausted the automatic retry budget. */
+  exhaustedFailed: number;
   stopReason: CampaignStopReason;
 }
 
@@ -291,12 +294,17 @@ function targetMatches(campaign: HistoryRefreshCampaign, target: CampaignTarget)
 function progressFromInspection(inspection: HistoryRefreshCampaignInspection): {
   remaining: number;
   failed: number;
+  exhaustedFailed: number;
 } {
   return {
     remaining: inspection.counts.pending
       + inspection.counts.session_staged
       + inspection.counts.failed,
     failed: inspection.counts.failed,
+    exhaustedFailed: inspection.items.filter(item => (
+      item.status === 'failed'
+      && item.attempts >= DEFAULT_HISTORY_REFRESH_MAX_ATTEMPTS
+    )).length,
   };
 }
 
@@ -528,6 +536,7 @@ async function runCommand(
       processed: 0,
       remaining: 0,
       failed: 0,
+      exhaustedFailed: 0,
       stopReason: 'no_active_campaign',
     }, options);
     return;
