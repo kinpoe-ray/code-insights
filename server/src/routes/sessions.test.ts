@@ -48,16 +48,32 @@ function seedSession(
     ended_at: '2025-06-15T11:00:00Z',
     message_count: 5,
     source_tool: 'claude-code',
+    session_character: null,
   };
   const row = { ...defaults, ...overrides };
   testDb.prepare(`
     INSERT INTO sessions (id, project_id, project_name, project_path,
-      started_at, ended_at, message_count, source_tool)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      started_at, ended_at, message_count, source_tool, session_character)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id, projectId, row.project_name, row.project_path,
-    row.started_at, row.ended_at, row.message_count, row.source_tool,
+    row.started_at, row.ended_at, row.message_count, row.source_tool, row.session_character,
   );
+}
+
+function seedInsight(
+  id: string,
+  sessionId: string,
+  projectId: string,
+  type: string,
+  metadata: string | null = null,
+) {
+  testDb.prepare(`
+    INSERT INTO insights (
+      id, session_id, project_id, project_name, type, title, content,
+      summary, confidence, metadata, timestamp
+    ) VALUES (?, ?, ?, 'test-project', ?, ?, 'content', '', 90, ?, datetime('now'))
+  `).run(id, sessionId, projectId, type, `Insight ${id}`, metadata);
 }
 
 // ──────────────────────────────────────────────────────
@@ -76,10 +92,12 @@ describe('Sessions routes', () => {
   describe('GET /api/sessions', () => {
     it('returns empty array when no sessions exist', async () => {
       const app = createApp();
-      const res = await app.request('/api/sessions');
+      const res = await app.request('/api/sessions?includeSignals=true');
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.sessions).toEqual([]);
+      expect(body.signals).toEqual([]);
+      expect(body.total).toBe(0);
     });
 
     it('returns seeded sessions', async () => {
@@ -92,6 +110,7 @@ describe('Sessions routes', () => {
       expect(res.status).toBe(200);
       const body = await res.json();
       expect(body.sessions).toHaveLength(2);
+      expect(body.total).toBe(2);
     });
 
     it('filters by projectId', async () => {
@@ -119,6 +138,90 @@ describe('Sessions routes', () => {
       const body = await res.json();
       expect(body.sessions).toHaveLength(1);
       expect(body.sessions[0].id).toBe('sess-cur');
+    });
+
+    it('returns compact analysis signals without returning insight content', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-1', 'proj-1');
+      seedSession('sess-2', 'proj-1', { started_at: '2025-06-14T10:00:00Z' });
+      seedInsight('summary-1', 'sess-1', 'proj-1', 'summary', JSON.stringify({ outcome: 'success' }));
+      seedInsight('decision-1', 'sess-1', 'proj-1', 'decision');
+      seedInsight('pq-1', 'sess-1', 'proj-1', 'prompt_quality', JSON.stringify({ efficiencyScore: 73 }));
+
+      const app = createApp();
+      const res = await app.request('/api/sessions?includeSignals=true');
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body.sessions).toHaveLength(2);
+      expect(body.signals).toEqual([{
+        session_id: 'sess-1',
+        insight_counts: {
+          summary: 1,
+          decision: 1,
+          learning: 0,
+          technique: 0,
+          prompt_quality: 1,
+        },
+        outcome: 'success',
+        prompt_quality_score: 73,
+        is_analyzed: true,
+      }]);
+      expect(JSON.stringify(body.signals)).not.toContain('content');
+    });
+
+    it('omits signals by default and safely ignores malformed metadata', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-1', 'proj-1');
+      seedInsight('pq-1', 'sess-1', 'proj-1', 'prompt_quality', '{not-json');
+
+      const app = createApp();
+      const defaultRes = await app.request('/api/sessions');
+      expect(await defaultRes.json()).not.toHaveProperty('signals');
+
+      const signalsRes = await app.request('/api/sessions?includeSignals=true');
+      expect(signalsRes.status).toBe(200);
+      const body = await signalsRes.json();
+      expect(body.signals[0]).toMatchObject({
+        session_id: 'sess-1',
+        prompt_quality_score: null,
+        is_analyzed: false,
+      });
+    });
+
+    it('returns exact totals alongside a bounded page', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-1', 'proj-1');
+      seedSession('sess-2', 'proj-1', { started_at: '2025-06-14T10:00:00Z' });
+
+      const app = createApp();
+      const res = await app.request('/api/sessions?limit=1&offset=1');
+      const body = await res.json();
+
+      expect(body).toMatchObject({ total: 2, limit: 1, offset: 1 });
+      expect(body.sessions).toHaveLength(1);
+    });
+
+    it('applies analysis, character, and outcome filters before pagination', async () => {
+      seedProject('proj-1', 'alpha');
+      seedSession('sess-1', 'proj-1', { session_character: 'bug_hunt' });
+      seedSession('sess-2', 'proj-1', { session_character: 'feature_build' });
+      seedSession('sess-3', 'proj-1', { session_character: 'bug_hunt' });
+      seedInsight('summary-1', 'sess-1', 'proj-1', 'summary', JSON.stringify({ outcome: 'success' }));
+      seedInsight('summary-2', 'sess-2', 'proj-1', 'summary', JSON.stringify({ outcome: 'blocked' }));
+
+      const app = createApp();
+      const res = await app.request('/api/sessions?status=analyzed&character=bug_hunt&outcome=success');
+      const body = await res.json();
+
+      expect(body.total).toBe(1);
+      expect(body.sessions.map((session: { id: string }) => session.id)).toEqual(['sess-1']);
+    });
+
+    it('rejects unsupported status and outcome filters', async () => {
+      const app = createApp();
+      expect((await app.request('/api/sessions?status=pending')).status).toBe(400);
+      expect((await app.request('/api/sessions?outcome=unknown')).status).toBe(400);
     });
   });
 

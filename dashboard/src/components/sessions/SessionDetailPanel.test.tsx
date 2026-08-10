@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router';
@@ -5,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { LocaleProvider, useLocale } from '@/i18n/LocaleProvider';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import type { Session } from '@/lib/types';
+import type { SessionOnboardingStep } from '@/hooks/useSessionOnboarding';
 
 const session: Session = {
   id: 'session-1',
@@ -92,6 +94,28 @@ function LanguageSwitch() {
   );
 }
 
+function OnboardingHarness({
+  SessionDetailPanel,
+}: {
+  SessionDetailPanel: typeof import('./SessionDetailPanel').SessionDetailPanel;
+}) {
+  const [step, setStep] = useState<SessionOnboardingStep>(2);
+  return (
+    <>
+      <output data-testid="onboarding-step">{step}</output>
+      <SessionDetailPanel
+        sessionId="session-1"
+        onboardingStep={step}
+        onOnboardingStepChange={(nextStep) => setStep(nextStep)}
+        onDismissOnboarding={() => setStep(0)}
+        onCompleteOnboarding={() => setStep(0)}
+        onRestartOnboarding={() => setStep(1)}
+        showOnboardingReplay={step === 0}
+      />
+    </>
+  );
+}
+
 describe('Session detail language', () => {
   it('localizes detail navigation and dates while preserving session values', async () => {
     localStorage.setItem('code-insights.locale', 'en-US');
@@ -131,5 +155,46 @@ describe('Session detail language', () => {
     expect(screen.getByText('会话 ID')).toBeInTheDocument();
     expect(screen.getByText('session-1')).toBeInTheDocument();
     expect(session.id).toBe('session-1');
+  }, 20_000);
+
+  it('moves the tour from the outcome through evidence and prompt improvement', async () => {
+    localStorage.setItem('code-insights.locale', 'en-US');
+    const user = userEvent.setup();
+    const { SessionDetailPanel } = await import('./SessionDetailPanel');
+
+    render(
+      <MemoryRouter>
+        <LocaleProvider>
+          <TooltipProvider>
+            <OnboardingHarness SessionDetailPanel={SessionDetailPanel} />
+          </TooltipProvider>
+        </LocaleProvider>
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByRole('dialog', { name: 'Read the outcome before the process' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Verify in the conversation' }));
+
+    expect(screen.getByTestId('onboarding-step')).toHaveTextContent('3');
+    expect(screen.getByRole('tab', { name: 'Conversation (8)' })).toHaveAttribute('data-state', 'active');
+    expect(screen.getByText('The conversation is evidence, not a replacement for the summary')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Verify the extracted story' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Review prompt quality' }));
+
+    expect(screen.getByTestId('onboarding-step')).toHaveTextContent('4');
+    expect(screen.getByRole('tab', { name: 'Prompt Quality' })).toHaveAttribute('data-state', 'active');
+    expect(screen.getByRole('dialog', { name: 'Choose one improvement for next time' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Finish this review' }));
+
+    expect(screen.getByTestId('onboarding-step')).toHaveTextContent('0');
+    expect(screen.getByRole('button', { name: 'Session tour' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Session tour' }));
+
+    expect(screen.getByTestId('onboarding-step')).toHaveTextContent('1');
+    expect(screen.getByRole('tab', { name: 'Insights' })).toHaveAttribute('data-state', 'active');
   }, 20_000);
 });

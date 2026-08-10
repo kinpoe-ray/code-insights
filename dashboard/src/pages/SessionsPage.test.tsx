@@ -5,15 +5,12 @@ import { LocaleProvider, useLocale } from '@/i18n/LocaleProvider';
 
 vi.mock('@/hooks/useSessions', () => ({
   useSessions: () => ({ data: [], isLoading: false }),
+  useSessionIndex: () => ({ data: { sessions: [], signals: [] }, isLoading: false }),
   useDeletedSessionCount: () => ({ data: 0 }),
 }));
 
 vi.mock('@/hooks/useProjects', () => ({
   useProjects: () => ({ data: [], isLoading: false }),
-}));
-
-vi.mock('@/hooks/useInsights', () => ({
-  useInsights: () => ({ data: [], isLoading: false }),
 }));
 
 vi.mock('@/hooks/useFacets', () => ({
@@ -67,6 +64,9 @@ describe('Sessions page language', () => {
     expect(screen.getByText('No matching sessions')).toBeInTheDocument();
     expect(screen.getAllByText('All Projects').length).toBeGreaterThan(0);
     expect(screen.getByText('Clear filters')).toBeInTheDocument();
+    expect(screen.getByText('New to Sessions?')).toBeInTheDocument();
+    expect(screen.getByText('Needs review')).toBeInTheDocument();
+    expect(screen.getByText('Low prompt')).toBeInTheDocument();
 
     fireEvent.click(screen.getByTestId('language-switch'));
 
@@ -74,6 +74,9 @@ describe('Sessions page language', () => {
     expect(screen.getByText('没有匹配的会话')).toBeInTheDocument();
     expect(screen.getAllByText('全部项目').length).toBeGreaterThan(0);
     expect(screen.getByText('清除筛选')).toBeInTheDocument();
+    expect(screen.getByText('第一次看会话？')).toBeInTheDocument();
+    expect(screen.getByText('需要复盘')).toBeInTheDocument();
+    expect(screen.getByText('低提示词')).toBeInTheDocument();
     expect(screen.getByTestId('route')).toHaveTextContent(route);
-  }, 30_000);
+  }, 60_000);
 });

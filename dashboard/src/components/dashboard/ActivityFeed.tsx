@@ -1,7 +1,7 @@
 import { Link } from 'react-router';
 import { formatDistanceToNow } from 'date-fns';
 import { enUS, zhCN } from 'date-fns/locale';
-import { MessageSquare, FileText, GitCommit, BookOpen, Target, Activity } from 'lucide-react';
+import { MessageSquare, FileText, GitCommit, BookOpen, Target, Activity, ChevronRight } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { useLocale } from '@/i18n/LocaleProvider';
 import { INSIGHT_TYPE_COLORS, SOURCE_TOOL_COLORS } from '@/lib/constants/colors';
@@ -53,7 +53,7 @@ export function ActivityFeed({ sessions, insights, limit = 7 }: ActivityFeedProp
   }
 
   return (
-    <div className="space-y-0 divide-y divide-border">
+    <div className="space-y-0 divide-y divide-border/55">
       {feedItems.map((item) =>
         item.kind === 'session' ? (
           <SessionFeedItem key={`s-${item.session.id}`} session={item.session} />
@@ -77,36 +77,39 @@ function SessionFeedItem({ session }: { session: Session }) {
 
   return (
     <Link to={`/sessions?session=${session.id}`} className="block group">
-      <div className="py-1.5 px-1 hover:bg-accent transition-all duration-200 rounded-sm">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className="shrink-0 h-5 w-5 rounded bg-primary/10 group-hover:bg-primary/15 flex items-center justify-center transition-colors">
-              <MessageSquare className="h-3 w-3 text-primary/70" />
-            </div>
-            <p className="text-sm font-medium line-clamp-1 group-hover:text-primary transition-colors min-w-0">
-              {displayTitle}
-            </p>
+      <div className="-mx-2 flex items-center gap-3 rounded-xl px-2 py-3 transition-colors duration-150 hover:bg-muted/55">
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-primary/9 text-primary transition-colors group-hover:bg-primary/13">
+          <MessageSquare className="h-4 w-4" strokeWidth={1.8} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-1 text-sm font-medium leading-5 transition-colors group-hover:text-primary">
+            {displayTitle}
+          </p>
+          <div className="mt-1 flex min-w-0 items-center gap-2 text-xs text-muted-foreground">
             {session.source_tool && (
               <Badge
                 variant="outline"
-                className={`text-xs capitalize shrink-0 ${SOURCE_TOOL_COLORS[session.source_tool] ?? 'bg-muted text-muted-foreground'}`}
+                className={`h-5 shrink-0 rounded-md px-1.5 text-[10px] capitalize ${SOURCE_TOOL_COLORS[session.source_tool] ?? 'bg-muted text-muted-foreground'}`}
               >
                 {session.source_tool}
               </Badge>
             )}
-            <span className="text-xs text-muted-foreground shrink-0 whitespace-nowrap">
-              &middot; {t('dashboard.feed.sessionMeta', {
+            <span className="truncate">
+              {t('dashboard.feed.sessionMeta', {
                 messages: session.message_count,
                 minutes: durationMin,
               })}
             </span>
           </div>
-          <span className="text-xs text-muted-foreground shrink-0">
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="hidden sm:inline">
             {formatDistanceToNow(startedAt, {
               addSuffix: true,
               locale: locale === 'zh-CN' ? zhCN : enUS,
             })}
           </span>
+          <ChevronRight className="h-3.5 w-3.5" />
         </div>
       </div>
     </Link>
@@ -121,25 +124,28 @@ function InsightFeedItem({ insight }: { insight: Insight }) {
 
   return (
     <Link to={`/sessions?session=${insight.session_id}`} className="block group">
-      <div className="py-1.5 px-1 hover:bg-accent transition-all duration-200 rounded-sm">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <div className={`shrink-0 h-5 w-5 rounded flex items-center justify-center transition-colors ${colorClass}`}>
-              <Icon className="h-3 w-3" />
-            </div>
-            <p className="text-sm font-medium line-clamp-1 group-hover:text-primary transition-colors min-w-0">
-              {insight.title}
-            </p>
-            <Badge variant="outline" className={`text-xs shrink-0 ${colorClass}`}>
+      <div className="-mx-2 flex items-center gap-3 rounded-xl px-2 py-3 transition-colors duration-150 hover:bg-muted/55">
+        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors ${colorClass}`}>
+          <Icon className="h-4 w-4" strokeWidth={1.8} />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-1 text-sm font-medium leading-5 transition-colors group-hover:text-primary">
+            {insight.title}
+          </p>
+          <div className="mt-1">
+            <Badge variant="outline" className={`h-5 shrink-0 rounded-md px-1.5 text-[10px] ${colorClass}`}>
               {label}
             </Badge>
           </div>
-          <span className="text-xs text-muted-foreground shrink-0">
+        </div>
+        <div className="flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+          <span className="hidden sm:inline">
             {formatDistanceToNow(new Date(insight.timestamp), {
               addSuffix: true,
               locale: locale === 'zh-CN' ? zhCN : enUS,
             })}
           </span>
+          <ChevronRight className="h-3.5 w-3.5" />
         </div>
       </div>
     </Link>

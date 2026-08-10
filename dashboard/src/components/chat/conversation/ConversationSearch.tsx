@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
-import { Search, ChevronUp, ChevronDown, X, Loader2 } from 'lucide-react';
+import { Search, ChevronUp, ChevronDown, X, Loader2, ListTree } from 'lucide-react';
 import type { Message } from '@/lib/types';
 import { useLocale } from '@/i18n/LocaleProvider';
 
@@ -11,6 +11,9 @@ interface ConversationSearchProps {
   onSearchQueryChange?: (query: string) => void;
   fetchAllMessages?: () => void;
   isLoadingAll?: boolean;
+  outlineCount?: number;
+  outlineOpen?: boolean;
+  onToggleOutline?: () => void;
 }
 
 export function ConversationSearch({
@@ -19,6 +22,9 @@ export function ConversationSearch({
   onSearchQueryChange,
   fetchAllMessages,
   isLoadingAll,
+  outlineCount = 0,
+  outlineOpen = false,
+  onToggleOutline,
 }: ConversationSearchProps) {
   const { t } = useLocale();
   const [query, setQuery] = useState('');
@@ -83,7 +89,7 @@ export function ConversationSearch({
         placeholder={t('chat.search.placeholder')}
         value={query}
         onChange={(e) => handleInputChange(e.target.value)}
-        className="h-8 text-sm"
+        className="h-8 min-w-0 text-sm"
       />
       {isLoadingAll && <Loader2 aria-label={t('chat.search.loading')} className="h-4 w-4 animate-spin text-muted-foreground shrink-0" />}
       {debouncedQuery && (
@@ -103,6 +109,24 @@ export function ConversationSearch({
             <X className="h-4 w-4" />
           </Button>
         </>
+      )}
+      {onToggleOutline && (
+        <Button
+          type="button"
+          variant={outlineOpen ? 'secondary' : 'outline'}
+          size="sm"
+          className="h-8 shrink-0 gap-1.5 px-2.5 text-xs"
+          aria-controls="conversation-outline"
+          aria-expanded={outlineOpen}
+          aria-label={t('chat.outline.toggle', { count: outlineCount })}
+          onClick={onToggleOutline}
+        >
+          <ListTree className="h-3.5 w-3.5" />
+          <span className="hidden xl:inline">{t('chat.outline.title')}</span>
+          <span className="font-tabular rounded-md bg-muted px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground">
+            {outlineCount}
+          </span>
+        </Button>
       )}
     </div>
   );

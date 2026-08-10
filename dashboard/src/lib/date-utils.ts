@@ -57,3 +57,11 @@ export function formatRelativeDate(iso: string): string {
   const days = Math.floor(hours / 24);
   return `${days}d ago`;
 }
+
+/** SQLite's datetime('now') uses a UTC string without a trailing Z. */
+export function parseStoredTimestamp(value: string): Date {
+  if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value)) {
+    return new Date(`${value.replace(' ', 'T')}Z`);
+  }
+  return new Date(value);
+}

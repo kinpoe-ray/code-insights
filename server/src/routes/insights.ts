@@ -23,7 +23,7 @@ const VALID_TYPES = ['summary', 'decision', 'learning', 'technique', 'prompt_qua
 
 app.get('/', (c) => {
   const db = getDb();
-  const { projectId, sessionId, type, limit, offset, q } = c.req.query();
+  const { projectId, sessionId, type, sourceTool, limit, offset, q } = c.req.query();
 
   const conditions: string[] = ['s.deleted_at IS NULL'];
   const params: (string | number)[] = [];
@@ -37,8 +37,20 @@ app.get('/', (c) => {
     params.push(sessionId);
   }
   if (type) {
-    conditions.push('i.type = ?');
-    params.push(type);
+    const requestedTypes = [...new Set(type.split(',').map((value) => value.trim()).filter(Boolean))];
+    const invalidTypes = requestedTypes.filter(
+      (value) => !VALID_TYPES.includes(value as typeof VALID_TYPES[number]),
+    );
+    if (requestedTypes.length === 0 || invalidTypes.length > 0) {
+      return c.json({ error: `type must contain only: ${VALID_TYPES.join(', ')}` }, 400);
+    }
+    const placeholders = requestedTypes.map(() => '?').join(', ');
+    conditions.push(`i.type IN (${placeholders})`);
+    params.push(...requestedTypes);
+  }
+  if (sourceTool) {
+    conditions.push('s.source_tool = ?');
+    params.push(sourceTool);
   }
   if (q) {
     const likeParam = `%${escapeLike(q)}%`;
@@ -47,6 +59,15 @@ app.get('/', (c) => {
   }
 
   const where = `WHERE ${conditions.join(' AND ')}`;
+  const totalRow = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM insights i
+    JOIN sessions s ON i.session_id = s.id
+    ${where}
+  `).get(...params) as { count: number };
+
+  const pageLimit = Math.min(parseIntParam(limit, 5000), 5000);
+  const pageOffset = parseIntParam(offset, 0);
   const insights = db.prepare(`
     SELECT i.id, i.session_id, i.project_id, i.project_name, i.type, i.title, i.content,
            i.summary, i.bullets, i.confidence, i.source, i.metadata, i.timestamp,
@@ -56,9 +77,14 @@ app.get('/', (c) => {
     ${where}
     ORDER BY i.timestamp DESC
     LIMIT ? OFFSET ?
-  `).all(...params, parseIntParam(limit, 5000), parseIntParam(offset, 0));
+  `).all(...params, pageLimit, pageOffset);
 
-  return c.json({ insights });
+  return c.json({
+    insights,
+    total: totalRow.count,
+    limit: pageLimit,
+    offset: pageOffset,
+  });
 });
 
 app.post('/', async (c) => {

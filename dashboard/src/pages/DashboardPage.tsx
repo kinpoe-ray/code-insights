@@ -1,22 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router';
-import { useDashboardStats } from '@/hooks/useAnalytics';
+import { ArrowRight, Database, Sparkles } from 'lucide-react';
+import { useAnalyticsOverview } from '@/hooks/useAnalytics';
 import { useSessions } from '@/hooks/useSessions';
 import { useInsights } from '@/hooks/useInsights';
-import { useProjects } from '@/hooks/useProjects';
 import { StatsHero } from '@/components/dashboard/StatsHero';
 import { DashboardActivityChart } from '@/components/dashboard/DashboardActivityChart';
 import { ActivityFeed } from '@/components/dashboard/ActivityFeed';
 import { BulkAnalyzeButton } from '@/components/analysis/BulkAnalyzeButton';
 import { StatsHeroSkeleton } from '@/components/skeletons/StatsHeroSkeleton';
 import { ErrorCard } from '@/components/ErrorCard';
+import { PageHeader, PageShell } from '@/components/layout/PageShell';
+import { DashboardOnboardingChecklist } from '@/components/onboarding/ProductOnboarding';
 import { Card, CardContent, CardHeader } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useLocale } from '@/i18n/LocaleProvider';
-import type { DailyStats } from '@/lib/types';
-import { Sparkles, ArrowRight } from 'lucide-react';
-
-type DashboardRange = '7d' | '30d' | '90d' | 'all';
+import { parseStoredTimestamp } from '@/lib/date-utils';
+import type { AnalyticsRange } from '@/lib/types';
 
 function getGreetingKey() {
   const hour = new Date().getHours();
@@ -25,189 +25,184 @@ function getGreetingKey() {
   return 'dashboard.greeting.evening' as const;
 }
 
+function percent(covered: number, total: number) {
+  return total > 0 ? Math.round((covered / total) * 100) : 0;
+}
+
 export default function DashboardPage() {
-  const [range, setRange] = useState<DashboardRange>('7d');
-  const { t, formatDate } = useLocale();
+  const [range, setRange] = useState<AnalyticsRange>('7d');
+  const { t, formatDate, formatRelativeDate } = useLocale();
 
-  const { data: dashStats, isLoading: statsLoading, isError: statsError, refetch: refetchStats } = useDashboardStats(range);
-  const { data: sessions = [], isLoading: sessionsLoading, isError: sessionsError, refetch: refetchSessions } = useSessions({ limit: 500 });
-  const { data: insights = [], isLoading: insightsLoading } = useInsights();
-  const { data: projects = [] } = useProjects();
+  const {
+    data: overview,
+    isLoading: overviewLoading,
+    isError: overviewError,
+    refetch: refetchOverview,
+  } = useAnalyticsOverview(range);
+  const {
+    data: sessions = [],
+    isLoading: sessionsLoading,
+    isError: sessionsError,
+    refetch: refetchSessions,
+  } = useSessions({ limit: 10 });
+  const {
+    data: insights = [],
+    isLoading: insightsLoading,
+  } = useInsights({ limit: 12 });
 
-  const loading = statsLoading || sessionsLoading || insightsLoading;
-  const hasError = statsError || sessionsError;
-
-  const todayLabel = formatDate(new Date(), {
-    month: 'long',
-    day: 'numeric',
-  });
-
-  // Sessions not yet analyzed
-  const analyzedSessionIds = new Set(insights.map((i) => i.session_id));
-  const unanalyzedSessions = sessions.filter((s) => !analyzedSessionIds.has(s.id));
-
-  // Build daily stats for activity chart
-  const dailyStats: DailyStats[] = useMemo(() => {
-    const now = Date.now();
-    const rangeDays = range === '7d' ? 7 : range === '30d' ? 30 : range === '90d' ? 90 : Infinity;
-    const cutoff = rangeDays === Infinity ? 0 : now - rangeDays * 86_400_000;
-
-    const grouped: Record<string, { session_count: number; insight_count: number }> = {};
-    for (const s of sessions) {
-      if (new Date(s.started_at).getTime() < cutoff) continue;
-      const date = s.started_at.slice(0, 10);
-      if (!grouped[date]) grouped[date] = { session_count: 0, insight_count: 0 };
-      grouped[date].session_count++;
-    }
-    for (const i of insights) {
-      if (new Date(i.timestamp).getTime() < cutoff) continue;
-      const date = i.timestamp.slice(0, 10);
-      if (!grouped[date]) grouped[date] = { session_count: 0, insight_count: 0 };
-      grouped[date].insight_count++;
-    }
-    return Object.entries(grouped)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, counts]) => ({
-        date,
-        session_count: counts.session_count,
-        message_count: 0,
-        insight_count: counts.insight_count,
-      }));
-  }, [sessions, insights, range]);
-
-  // Compute stats for hero — all from dashStats (range-filtered)
-  const totalTokens = dashStats
-    ? (dashStats.total_input_tokens ?? 0) +
-      (dashStats.total_output_tokens ?? 0) +
-      (dashStats.cache_creation_tokens ?? 0) +
-      (dashStats.cache_read_tokens ?? 0)
+  const feedLoading = sessionsLoading || insightsLoading;
+  const todayLabel = formatDate(new Date(), { month: 'long', day: 'numeric' });
+  const latestSync = overview?.coverage.latest_sync_at
+    ? parseStoredTimestamp(overview.coverage.latest_sync_at)
+    : null;
+  const analysisCoverage = overview
+    ? percent(overview.coverage.analyzed_sessions, overview.summary.session_count)
+    : 0;
+  const usageCoverage = overview
+    ? percent(overview.coverage.usage_covered_sessions, overview.summary.session_count)
+    : 0;
+  const totalTokens = overview
+    ? overview.summary.total_input_tokens
+      + overview.summary.total_output_tokens
+      + overview.summary.cache_creation_tokens
+      + overview.summary.cache_read_tokens
     : 0;
 
-  const totalCost = dashStats?.estimated_cost_usd ?? 0;
-
-  const tokenBreakdown = dashStats
-    ? {
-        inputTokens: dashStats.total_input_tokens ?? 0,
-        outputTokens: dashStats.total_output_tokens ?? 0,
-        cacheCreationTokens: dashStats.cache_creation_tokens ?? 0,
-        cacheReadTokens: dashStats.cache_read_tokens ?? 0,
-      }
-    : undefined;
-
   return (
-    <div className="p-3 lg:p-4 space-y-2">
-      {/* Greeting header */}
-      <div className="flex items-start justify-between">
-        <div>
-          <h1 className="text-lg font-bold">{t(getGreetingKey())}</h1>
-          {!loading && (
-            <p className="text-muted-foreground text-xs animate-in fade-in slide-in-from-bottom-2 duration-300">
-              {t('dashboard.loaded', { sessions: sessions.length, projects: projects.length })}
-            </p>
-          )}
-        </div>
-        <span className="text-sm text-muted-foreground">{todayLabel}</span>
-      </div>
+    <PageShell className="space-y-6">
+      <PageHeader
+        eyebrow={todayLabel}
+        title={t(getGreetingKey())}
+        subtitle={overview
+          ? t('dashboard.scopeSummary', {
+              sessions: overview.summary.session_count,
+              insights: overview.summary.insight_count,
+              projects: overview.summary.active_projects,
+            })
+          : t('dashboard.subtitle')}
+        meta={overview ? (
+          <Link
+            to="/analytics"
+            className="inline-flex flex-wrap items-center gap-2 rounded-full bg-muted/75 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-3 focus-visible:ring-ring/35"
+          >
+            <Database className="h-3.5 w-3.5 text-primary" />
+            <span>{t('dashboard.coverageSummary', { analysis: analysisCoverage, usage: usageCoverage })}</span>
+            {latestSync && (
+              <>
+                <span aria-hidden="true">·</span>
+                <span>{t('dashboard.lastSync', { time: formatRelativeDate(latestSync) })}</span>
+              </>
+            )}
+            <ArrowRight className="h-3 w-3" />
+          </Link>
+        ) : undefined}
+      />
 
-      {/* Error state */}
-      {hasError && !loading && (
+      <DashboardOnboardingChecklist />
+
+      {overviewError && !overviewLoading && (
         <ErrorCard
           message={t('dashboard.error.load')}
-          onRetry={() => { refetchStats(); refetchSessions(); }}
+          onRetry={() => { void refetchOverview(); }}
         />
       )}
 
-      {/* All-time stats hero */}
-      {loading ? (
+      {overviewLoading || !overview ? (
         <StatsHeroSkeleton />
       ) : (
-        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 delay-75">
-          <StatsHero
-            totalSessions={dashStats?.session_count ?? sessions.length}
-            totalMessages={dashStats?.total_messages ?? 0}
-            totalToolCalls={dashStats?.total_tool_calls ?? 0}
-            totalDurationMin={dashStats?.total_duration_min ?? 0}
-            totalProjects={dashStats?.active_projects ?? projects.length}
-            isExact={true}
-            totalTokens={totalTokens > 0 ? totalTokens : undefined}
-            totalCost={totalCost > 0 ? totalCost : undefined}
-            tokenBreakdown={tokenBreakdown}
-          />
-        </div>
+        <StatsHero
+          totalSessions={overview.summary.session_count}
+          totalMessages={overview.summary.total_messages}
+          totalToolCalls={overview.summary.total_tool_calls}
+          totalDurationMin={overview.summary.total_duration_min}
+          totalProjects={overview.summary.active_projects}
+          isExact
+          totalTokens={totalTokens}
+          totalCost={overview.summary.estimated_cost_usd}
+          usageCoverage={{
+            covered: overview.coverage.usage_covered_sessions,
+            total: overview.summary.session_count,
+          }}
+          tokenBreakdown={{
+            inputTokens: overview.summary.total_input_tokens,
+            outputTokens: overview.summary.total_output_tokens,
+            cacheCreationTokens: overview.summary.cache_creation_tokens,
+            cacheReadTokens: overview.summary.cache_read_tokens,
+          }}
+        />
       )}
 
-      {/* Activity chart */}
-      {loading ? (
+      {overviewLoading || !overview ? (
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-1">
-            <Skeleton className="h-4 w-16" />
-            <div className="flex gap-1">
-              <Skeleton className="h-7 w-8 rounded" />
-              <Skeleton className="h-7 w-10 rounded" />
-              <Skeleton className="h-7 w-10 rounded" />
-              <Skeleton className="h-7 w-8 rounded" />
+          <CardHeader className="flex flex-row items-center justify-between pb-2">
+            <div>
+              <Skeleton className="h-4 w-24" />
+              <Skeleton className="mt-2 h-3 w-56" />
             </div>
+            <Skeleton className="h-8 w-40 rounded-xl" />
           </CardHeader>
           <CardContent>
-            <Skeleton className="h-[200px] w-full rounded" />
+            <Skeleton className="h-[230px] w-full rounded-xl" />
           </CardContent>
         </Card>
       ) : (
-        <div className="animate-in fade-in slide-in-from-bottom-2 duration-300 delay-150">
-          <DashboardActivityChart data={dailyStats} range={range} onRangeChange={setRange} />
-        </div>
+        <DashboardActivityChart data={overview.daily} range={range} onRangeChange={setRange} />
       )}
 
-      {/* Needs Attention banner */}
-      {unanalyzedSessions.length > 0 && (
-        <Card className="border-amber-500/20 bg-amber-500/5 hover:shadow-md transition-shadow animate-in fade-in slide-in-from-bottom-2 duration-300 delay-75">
-          <CardContent className="flex items-center justify-between py-2.5">
-            <div className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-amber-600" />
+      {overview && overview.unanalyzed_session_ids.length > 0 && (
+        <Card className="overflow-hidden border-amber-500/25 bg-amber-500/[0.045]">
+          <CardContent className="flex flex-col gap-4 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
+            <div className="flex min-w-0 items-start gap-3">
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] bg-amber-500/12 text-amber-700 dark:text-amber-300">
+                <Sparkles className="h-4 w-4" />
+              </div>
               <div>
-                <p className="text-sm font-medium">
-                  {t('dashboard.unanalyzed.count', { sessions: unanalyzedSessions.length })}
+                <p className="text-sm font-semibold">
+                  {t('dashboard.unanalyzed.count', { sessions: overview.unanalyzed_session_ids.length })}
                 </p>
-                <p className="text-xs text-muted-foreground">
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">
                   {t('dashboard.unanalyzed.description')}
                 </p>
               </div>
             </div>
-            <BulkAnalyzeButton sessions={unanalyzedSessions} />
+            <BulkAnalyzeButton sessionIds={overview.unanalyzed_session_ids} onComplete={() => { void refetchOverview(); }} />
           </CardContent>
         </Card>
       )}
 
-      {/* Unified activity feed */}
-      <div
-        className={
-          loading ? '' : 'animate-in fade-in slide-in-from-bottom-2 duration-300 delay-300'
-        }
-      >
-        <div className="flex items-center justify-between mb-1">
-          <h2 className="text-xs font-semibold">{t('dashboard.recentActivity')}</h2>
+      <section>
+        <div className="mb-3 flex items-end justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold tracking-[-0.02em]">{t('dashboard.recentActivity')}</h2>
+            <p className="mt-1 text-xs text-muted-foreground">{t('dashboard.recentActivityDescription')}</p>
+          </div>
           <Link
             to="/sessions"
-            className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+            className="flex shrink-0 items-center gap-1 text-xs font-medium text-primary transition-opacity hover:opacity-75"
           >
             {t('dashboard.viewAll')}
             <ArrowRight className="h-3 w-3" />
           </Link>
         </div>
         <Card>
-          <CardContent className="px-4 py-2">
-            {loading ? (
-              <div className="divide-y divide-border">
-                {[...Array(4)].map((_, i) => (
-                  <div key={i} className="py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <Skeleton className="h-6 w-6 rounded-md shrink-0" />
-                        <Skeleton className="h-4 w-48" />
-                        <Skeleton className="h-3.5 w-20" />
+          <CardContent className="px-4 py-2 sm:px-5">
+            {sessionsError && !feedLoading ? (
+              <ErrorCard
+                message={t('dashboard.error.load')}
+                onRetry={() => { void refetchSessions(); }}
+              />
+            ) : feedLoading ? (
+              <div className="divide-y divide-border/55">
+                {[...Array(5)].map((_, index) => (
+                  <div key={index} className="flex items-center justify-between gap-3 py-3">
+                    <div className="flex min-w-0 items-center gap-3">
+                      <Skeleton className="h-8 w-8 shrink-0 rounded-[10px]" />
+                      <div>
+                        <Skeleton className="h-4 w-56 max-w-full" />
+                        <Skeleton className="mt-2 h-3 w-28" />
                       </div>
-                      <Skeleton className="h-3.5 w-16 shrink-0" />
                     </div>
+                    <Skeleton className="h-3 w-14 shrink-0" />
                   </div>
                 ))}
               </div>
@@ -216,7 +211,7 @@ export default function DashboardPage() {
             )}
           </CardContent>
         </Card>
-      </div>
-    </div>
+      </section>
+    </PageShell>
   );
 }

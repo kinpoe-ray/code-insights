@@ -25,54 +25,63 @@
   --color-border: hsl(var(--border));
   --color-input: hsl(var(--input));
   --color-ring: hsl(var(--ring));
+  --color-canvas: hsl(var(--canvas));
+  --color-elevated: hsl(var(--elevated));
   --radius: var(--radius);
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
 }
 
-/* shadcn/ui CSS variables — New York variant, Zinc base */
+/* Calm, system-native surfaces with Apple-like optical hierarchy. */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
+    color-scheme: light;
+    --canvas: 240 20% 97%;
+    --elevated: 0 0% 100%;
+    --background: 240 20% 97%;
+    --foreground: 240 4% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
+    --card-foreground: 240 4% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
+    --popover-foreground: 240 4% 12%;
+    --primary: 211 100% 45%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 14% 93%;
+    --secondary-foreground: 240 4% 16%;
+    --muted: 240 12% 94%;
+    --muted-foreground: 240 3% 43%;
+    --accent: 211 100% 96%;
+    --accent-foreground: 211 100% 36%;
+    --destructive: 3 78% 54%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
-    --radius: 0.5rem;
+    --border: 240 6% 86%;
+    --input: 240 6% 84%;
+    --ring: 211 100% 45%;
+    --radius: 0.875rem;
   }
 
   .dark {
-    --background: 240 10% 3.9%;
+    color-scheme: dark;
+    --canvas: 240 4% 5%;
+    --elevated: 240 4% 11%;
+    --background: 240 4% 5%;
     --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
+    --card: 240 4% 11%;
     --card-foreground: 0 0% 98%;
-    --popover: 240 10% 3.9%;
+    --popover: 240 4% 13%;
     --popover-foreground: 0 0% 98%;
-    --primary: 0 0% 98%;
-    --primary-foreground: 240 5.9% 10%;
-    --secondary: 240 3.7% 15.9%;
+    --primary: 211 100% 62%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 240 4% 18%;
     --secondary-foreground: 0 0% 98%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --accent: 240 3.7% 15.9%;
-    --accent-foreground: 0 0% 98%;
-    --destructive: 0 62.8% 30.6%;
+    --muted: 240 4% 17%;
+    --muted-foreground: 240 5% 66%;
+    --accent: 211 60% 18%;
+    --accent-foreground: 211 100% 75%;
+    --destructive: 3 70% 50%;
     --destructive-foreground: 0 0% 98%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
-    --ring: 240 4.9% 83.9%;
+    --border: 240 4% 24%;
+    --input: 240 4% 27%;
+    --ring: 211 100% 62%;
   }
 }
 
@@ -80,8 +89,69 @@
   * {
     border-color: hsl(var(--border));
   }
+  html {
+    min-width: 320px;
+    background: hsl(var(--canvas));
+    text-rendering: optimizeLegibility;
+  }
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
+    min-height: 100vh;
+    font-family: var(--font-sans);
+    font-size: 15px;
+    line-height: 1.45;
+    letter-spacing: -0.008em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  button,
+  a,
+  input,
+  select,
+  textarea {
+    -webkit-tap-highlight-color: transparent;
+  }
+  ::selection {
+    background: hsl(var(--primary) / 0.2);
+  }
+  :focus-visible {
+    scroll-margin: 5rem;
+  }
+}
+
+@layer utilities {
+  .font-tabular {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+
+  .app-material {
+    background: hsl(var(--background) / 0.82);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+  }
+
+  .hairline {
+    border-color: hsl(var(--border) / 0.72);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .app-material {
+    background: hsl(var(--background));
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
   }
 }

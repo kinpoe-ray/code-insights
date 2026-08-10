@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -15,9 +15,16 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover';
 import { CompactSessionRow } from './CompactSessionRow';
-import { parseJsonField } from '@/lib/types';
-import type { Session, Insight, InsightMetadata, Project } from '@/lib/types';
-import { extractPQScore } from '@/lib/score-utils';
+import {
+  SessionOnboardingCoach,
+  SessionOnboardingWelcome,
+  SessionReviewPresetBar,
+  getReviewPresetCounts,
+  matchesReviewPreset,
+  type ReviewPreset,
+} from './SessionOnboarding';
+import type { Session, SessionListSignal, Project } from '@/lib/types';
+import type { SessionOnboardingStep } from '@/hooks/useSessionOnboarding';
 import { cn } from '@/lib/utils';
 import { SearchX, Terminal, EyeOff, CalendarDays, Search, SlidersHorizontal } from 'lucide-react';
 import { useDeletedSessionCount } from '@/hooks/useSessions';
@@ -29,6 +36,7 @@ import { useSavedFilters } from '@/hooks/useSavedFilters';
 import { subDays, startOfDay, formatISO } from 'date-fns';
 import { useLocale } from '@/i18n/LocaleProvider';
 import type { MessageKey } from '@/i18n/messages/catalog';
+import { buildProjectLabels } from '@/lib/project-labels';
 
 const SESSION_CHARACTERS = [
   'deep_focus',
@@ -76,7 +84,7 @@ function localDateKey(value: string | Date): string {
 
 interface SessionListPanelProps {
   sessions: Session[];
-  insights: Insight[];
+  signals: SessionListSignal[];
   projects: Project[];
   selectedSessionId: string;
   selectedProject: string;
@@ -102,11 +110,22 @@ interface SessionListPanelProps {
   onSelectSession: (sessionId: string) => void;
   loading: boolean;
   missingFacetIds?: Set<string>;
+  totalSessions: number;
+  hasMore: boolean;
+  onLoadMore: () => void;
+  reviewPreset: ReviewPreset;
+  onReviewPresetChange: (value: ReviewPreset) => void;
+  onboardingStep: SessionOnboardingStep;
+  onboardingTargetSessionId?: string;
+  showOnboardingWelcome: boolean;
+  onStartOnboarding: () => void;
+  onHideOnboardingWelcome: () => void;
+  onDismissOnboarding: () => void;
 }
 
 export function SessionListPanel({
   sessions,
-  insights,
+  signals,
   projects,
   selectedSessionId,
   selectedProject,
@@ -120,55 +139,62 @@ export function SessionListPanel({
   onSelectSession,
   loading,
   missingFacetIds,
+  totalSessions,
+  hasMore,
+  onLoadMore,
+  reviewPreset,
+  onReviewPresetChange,
+  onboardingStep,
+  onboardingTargetSessionId,
+  showOnboardingWelcome,
+  onStartOnboarding,
+  onHideOnboardingWelcome,
+  onDismissOnboarding,
 }: SessionListPanelProps) {
-  const { t, formatDate } = useLocale();
+  const { t, formatDate, formatNumber } = useLocale();
   const [customDateOpen, setCustomDateOpen] = useState(false);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
+  const sessionListRef = useRef<HTMLDivElement>(null);
   const { savedFilters, saveFilter, deleteFilter } = useSavedFilters('sessions');
+  const projectLabels = useMemo(() => buildProjectLabels(projects), [projects]);
 
   const { data: deletedCount = 0 } = useDeletedSessionCount(projectId);
   const queuedSessionIds = useQueuedSessionIds();
   const analyzedSessionIds = useMemo(
-    () => new Set(insights.map((i) => i.session_id)),
-    [insights]
+    () => new Set(signals.filter((signal) => signal.is_analyzed).map((signal) => signal.session_id)),
+    [signals]
   );
 
   const insightCountsBySession = useMemo(() => {
     const map = new Map<string, Record<string, number>>();
-    for (const insight of insights) {
-      const counts = map.get(insight.session_id) || {};
-      counts[insight.type] = (counts[insight.type] || 0) + 1;
-      map.set(insight.session_id, counts);
+    for (const signal of signals) {
+      map.set(signal.session_id, signal.insight_counts);
     }
     return map;
-  }, [insights]);
+  }, [signals]);
 
   const sessionOutcomes = useMemo(() => {
     const map = new Map<string, string>();
-    for (const insight of insights) {
-      if (insight.type === 'summary') {
-        const metadata = parseJsonField<InsightMetadata>(insight.metadata, {});
-        if (metadata.outcome) {
-          map.set(insight.session_id, metadata.outcome);
-        }
-      }
+    for (const signal of signals) {
+      if (signal.outcome) map.set(signal.session_id, signal.outcome);
     }
     return map;
-  }, [insights]);
+  }, [signals]);
 
   const promptQualityScores = useMemo(() => {
     const map = new Map<string, number>();
-    for (const insight of insights) {
-      if (insight.type === 'prompt_quality') {
-        const metadata = parseJsonField<Record<string, unknown>>(insight.metadata, {});
-        const score = extractPQScore(metadata);
-        if (score !== null) {
-          map.set(insight.session_id, score);
-        }
+    for (const signal of signals) {
+      if (signal.prompt_quality_score !== null) {
+        map.set(signal.session_id, signal.prompt_quality_score);
       }
     }
     return map;
-  }, [insights]);
+  }, [signals]);
+
+  const signalsBySession = useMemo(
+    () => new Map(signals.map((signal) => [signal.session_id, signal])),
+    [signals]
+  );
 
   // Compute date range bounds for client-side filtering
   const dateBounds = useMemo(() => {
@@ -182,7 +208,7 @@ export function SessionListPanel({
     return { from, to: null };
   }, [filters.dateRange, filters.dateFrom, filters.dateTo]);
 
-  const filteredSessions = useMemo(() => {
+  const baseFilteredSessions = useMemo(() => {
     return sessions.filter((s) => {
       if (filters.character !== 'all' && s.session_character !== filters.character) return false;
       if (filters.status === 'analyzed' && !analyzedSessionIds.has(s.id)) return false;
@@ -204,6 +230,18 @@ export function SessionListPanel({
       return true;
     });
   }, [sessions, filters.character, filters.status, filters.q, analyzedSessionIds, dateBounds, filters.outcome, sessionOutcomes, t]);
+
+  const reviewPresetCounts = useMemo(
+    () => getReviewPresetCounts(baseFilteredSessions, signals),
+    [baseFilteredSessions, signals]
+  );
+
+  const filteredSessions = useMemo(
+    () => baseFilteredSessions.filter((session) =>
+      matchesReviewPreset(signalsBySession.get(session.id), reviewPreset)
+    ),
+    [baseFilteredSessions, reviewPreset, signalsBySession]
+  );
 
   const groupedSessions = useMemo(() => {
     const groups = new Map<string, Session[]>();
@@ -241,12 +279,14 @@ export function SessionListPanel({
   }, [filteredSessions, formatDate, t]);
 
   const hasClientFilters =
+    selectedProject !== 'all' ||
     filters.character !== 'all' ||
     filters.status !== 'all' ||
     !!filters.q ||
     (!!filters.dateRange && filters.dateRange !== 'all') ||
     (!!filters.outcome && filters.outcome !== 'all') ||
-    filters.source !== 'all';
+    filters.source !== 'all' ||
+    reviewPreset !== 'all';
 
   const allFiltersForSave = { ...filters, project: selectedProject } as Record<string, string>;
   const defaultFilterValues: Record<string, string> = {
@@ -265,12 +305,33 @@ export function SessionListPanel({
     return preset ? t(preset.labelKey) : filters.dateRange;
   }, [filters.dateRange, filters.dateFrom, filters.dateTo, t]);
 
+  const focusOnboardingTarget = useCallback((node: HTMLDivElement | null) => {
+    if (!node || onboardingStep !== 1) return;
+    window.requestAnimationFrame(() => {
+      const scroller = sessionListRef.current;
+      if (!scroller || typeof scroller.scrollTo !== 'function') return;
+      const targetRect = node.getBoundingClientRect();
+      const scrollerRect = scroller.getBoundingClientRect();
+      scroller.scrollTo({
+        top: scroller.scrollTop + targetRect.top - scrollerRect.top,
+        behavior: 'smooth',
+      });
+    });
+  }, [onboardingStep, onboardingTargetSessionId]);
+
   return (
     <div className="flex flex-col h-full">
       {/* Session passport discovery controls */}
       <div className="shrink-0 p-4 space-y-3 border-b bg-background">
         <div className="flex items-center gap-2">
-          <h1 className="shrink-0 text-lg font-semibold tracking-tight">{t('sessions.listTitle')}</h1>
+          <div className="flex shrink-0 items-baseline gap-1.5">
+            <h1 className="text-lg font-semibold tracking-tight">{t('sessions.listTitle')}</h1>
+            {!loading && (
+              <span className="font-tabular text-[11px] text-muted-foreground">
+                {formatNumber(totalSessions)}
+              </span>
+            )}
+          </div>
           <div className="relative min-w-24 flex-1">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -419,9 +480,9 @@ export function SessionListPanel({
                 <SelectItem value="all">{t('sessions.allProjects')}</SelectItem>
                 {projects.map((project) => (
                   <SelectItem key={project.id} value={project.id} className="text-xs">
-                    {project.name}
-                </SelectItem>
-              ))}
+                    {projectLabels.get(project.id) ?? project.name}
+                  </SelectItem>
+                ))}
             </SelectContent>
           </Select>
           </FilterField>
@@ -455,8 +516,23 @@ export function SessionListPanel({
         </div>
       </div>
 
+      {showOnboardingWelcome && (
+        <SessionOnboardingWelcome
+          onStart={onStartOnboarding}
+          onSkip={onDismissOnboarding}
+          onClose={onHideOnboardingWelcome}
+        />
+      )}
+
+      <SessionReviewPresetBar
+        value={reviewPreset}
+        counts={reviewPresetCounts}
+        onValueChange={onReviewPresetChange}
+        className={showOnboardingWelcome ? 'pt-2' : 'pt-3'}
+      />
+
       {/* Session list */}
-      <div className="flex-1 overflow-y-auto">
+      <div ref={sessionListRef} className="flex-1 overflow-y-auto">
         {loading ? (
           <div className="p-3 space-y-2">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -494,23 +570,60 @@ export function SessionListPanel({
                     {label}
                   </h3>
                 </div>
-                {groupSessions.map((session) => (
-                  <CompactSessionRow
-                    key={session.id}
-                    session={session}
-                    isActive={session.id === selectedSessionId}
-                    showProject={showProject}
-                    insightCounts={insightCountsBySession.get(session.id)}
-                    outcome={sessionOutcomes.get(session.id)}
-                    promptQualityScore={promptQualityScores.get(session.id)}
-                    isAnalyzed={analyzedSessionIds.has(session.id)}
-                    missingFacets={analyzedSessionIds.has(session.id) && (missingFacetIds?.has(session.id) ?? false)}
-                    isQueued={queuedSessionIds.has(session.id)}
-                    onClick={() => onSelectSession(session.id)}
-                  />
-                ))}
+                {groupSessions.map((session) => {
+                  const isOnboardingTarget =
+                    onboardingStep === 1 && session.id === onboardingTargetSessionId;
+                  return (
+                    <div
+                      key={session.id}
+                      ref={isOnboardingTarget ? focusOnboardingTarget : undefined}
+                      className={cn(
+                        'relative',
+                        isOnboardingTarget && 'z-20 rounded-lg ring-2 ring-inset ring-primary/20'
+                      )}
+                    >
+                      <CompactSessionRow
+                        session={session}
+                        isActive={session.id === selectedSessionId}
+                        showProject={showProject}
+                        insightCounts={insightCountsBySession.get(session.id)}
+                        outcome={sessionOutcomes.get(session.id)}
+                        promptQualityScore={promptQualityScores.get(session.id)}
+                        isAnalyzed={analyzedSessionIds.has(session.id)}
+                        missingFacets={analyzedSessionIds.has(session.id) && (missingFacetIds?.has(session.id) ?? false)}
+                        isQueued={queuedSessionIds.has(session.id)}
+                        onClick={() => onSelectSession(session.id)}
+                      />
+                      {isOnboardingTarget && (
+                        <SessionOnboardingCoach
+                          step={1}
+                          title={t('sessions.onboarding.step1Title')}
+                          description={t('sessions.onboarding.step1Description')}
+                          actionLabel={t('sessions.onboarding.step1Action')}
+                          onAction={() => onSelectSession(session.id)}
+                          onDismiss={onDismissOnboarding}
+                          compactAction
+                          className="right-2 top-[calc(100%-10px)]"
+                        />
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             ))}
+            {hasMore && (
+              <div className="flex flex-col items-center gap-2 border-t px-4 py-5">
+                <p className="text-xs text-muted-foreground">
+                  {t('sessions.resultProgress', {
+                    loaded: formatNumber(sessions.length),
+                    total: formatNumber(totalSessions),
+                  })}
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={onLoadMore}>
+                  {t('sessions.loadMore')}
+                </Button>
+              </div>
+            )}
           </div>
         )}
       </div>

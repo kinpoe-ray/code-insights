@@ -1,7 +1,7 @@
 import { useMemo, useState, useCallback, useEffect } from 'react';
 import { useSearchParams, Link } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
-import { useInsights } from '@/hooks/useInsights';
+import { useInsightSearch } from '@/hooks/useInsights';
 import { useSessions } from '@/hooks/useSessions';
 import { useFilterParams } from '@/hooks/useFilterParams';
 import { useProjects } from '@/hooks/useProjects';
@@ -44,6 +44,8 @@ import { DispatchDiscoveryCallout } from '@/components/insights/DispatchDiscover
 import { fetchFacets } from '@/lib/api';
 import { captureDispatchCalloutShown, captureDispatchOpenedFromInsights } from '@/lib/telemetry';
 import { useLocale } from '@/i18n/LocaleProvider';
+import { buildProjectLabels } from '@/lib/project-labels';
+import { ContextualOnboarding } from '@/components/onboarding/ProductOnboarding';
 
 const INSIGHT_TYPES: InsightType[] = ['summary', 'decision', 'learning', 'technique', 'prompt_quality'];
 
@@ -74,7 +76,7 @@ interface InsightGroup {
 const MAX_DISPATCH_INSIGHTS = 8;
 
 export default function InsightsPage() {
-  const { t, formatDate } = useLocale();
+  const { t, formatDate, formatNumber } = useLocale();
   const [filters, setFilter, setFilters, clearFilters] = useFilterParams({
     q: '',
     project: 'all',
@@ -123,22 +125,61 @@ export default function InsightsPage() {
   // activeTypes is a comma-separated list, or empty = all
   const activeTypes: InsightType[] = useMemo(() => {
     if (!filters.type || filters.type === 'all') return [];
-    return filters.type.split(',').filter((t) => INSIGHT_TYPES.includes(t as InsightType)) as InsightType[];
+    const parsed = filters.type
+      .split(',')
+      .filter((type) => INSIGHT_TYPES.includes(type as InsightType)) as InsightType[];
+    if (parsed.includes('learning') || parsed.includes('technique')) {
+      return [...new Set([
+        ...parsed.filter((type) => type !== 'learning' && type !== 'technique'),
+        'learning' as const,
+        'technique' as const,
+      ])];
+    }
+    return parsed;
   }, [filters.type]);
 
   function handleTypePillChange(types: InsightType[]) {
     setFilter('type', types.length === 0 ? 'all' : types.join(','));
   }
 
+  const handleOnboardingAction = useCallback(() => {
+    setFilters({ type: 'learning,technique', view: 'type' });
+  }, [setFilters]);
+
   const [searchParams] = useSearchParams();
   const highlightedInsightId = searchParams.get('insight') || null;
 
   const { data: projects = [] } = useProjects();
-  const { data: insights = [], isLoading, isError, refetch } = useInsights(
-    filters.project !== 'all' ? { projectId: filters.project } : undefined
+  const projectLabels = useMemo(() => buildProjectLabels(projects), [projects]);
+  const [debouncedQuery, setDebouncedQuery] = useState(filters.q);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setDebouncedQuery(filters.q.trim()), 250);
+    return () => window.clearTimeout(timer);
+  }, [filters.q]);
+
+  const insightSearchParams = useMemo(() => ({
+    ...(filters.project !== 'all' ? { projectId: filters.project } : {}),
+    ...(activeTypes.length > 0 ? { type: activeTypes.join(',') } : {}),
+    ...(filters.source !== 'all' ? { sourceTool: filters.source } : {}),
+    ...(debouncedQuery ? { q: debouncedQuery } : {}),
+  }), [activeTypes, debouncedQuery, filters.project, filters.source]);
+
+  const {
+    data: insightPages,
+    isLoading,
+    isError,
+    refetch,
+    fetchNextPage,
+    hasNextPage,
+    isFetchingNextPage,
+  } = useInsightSearch(insightSearchParams);
+  const insights = useMemo(
+    () => insightPages?.pages.flatMap((page) => page.insights) ?? [],
+    [insightPages],
   );
-  // Fetch sessions for source tool mapping — Insight type lacks source_tool, so we join client-side.
-  // limit: 500 matches Analytics page pattern; server default is 50 which would silently miss sessions.
+  const totalInsights = insightPages?.pages[0]?.total ?? 0;
+
+  // Sessions remain a small supporting index for the optional write-up flow.
   const { data: allSessions = [] } = useSessions({ limit: 500 });
 
   // Fetch raw facets to power DispatchEntryButton prefill
@@ -211,15 +252,6 @@ export default function InsightsPage() {
     markCalloutDismissed();
   }
 
-  // Map session_id → source_tool for client-side source filtering on Insights
-  const sessionSourceMap = useMemo(() => {
-    const map = new Map<string, string | null>();
-    for (const s of allSessions) {
-      map.set(s.id, s.source_tool);
-    }
-    return map;
-  }, [allSessions]);
-
   const patternGroups = useMemo(() => buildPatternGroups(insights), [insights]);
 
   const patternInsightIds = useMemo(() => {
@@ -230,21 +262,9 @@ export default function InsightsPage() {
   const filtered = useMemo(() => {
     return insights.filter((i) => {
       if (patternInsightIds && !patternInsightIds.has(i.id)) return false;
-      // Multi-type pill support: activeTypes empty = all; non-empty = must match one
-      if (activeTypes.length > 0 && !activeTypes.includes(i.type)) return false;
-      if (filters.q) {
-        const q = filters.q.toLowerCase();
-        if (!i.title.toLowerCase().includes(q) && !i.content.toLowerCase().includes(q)) {
-          return false;
-        }
-      }
-      if (filters.source !== 'all') {
-        const sourceTool = sessionSourceMap.get(i.session_id);
-        if (sourceTool !== filters.source) return false;
-      }
       return true;
     });
-  }, [insights, activeTypes, filters.q, filters.source, patternInsightIds, sessionSourceMap]);
+  }, [insights, patternInsightIds]);
 
   const hasFilters = !!filters.q || filters.type !== 'all' || filters.project !== 'all' || !!filters.pattern || filters.source !== 'all';
 
@@ -255,9 +275,9 @@ export default function InsightsPage() {
     for (const insight of filtered) {
       let key: string;
       if (view === 'type') {
-        key = insight.type;
+        key = insight.type === 'technique' ? 'learning' : insight.type;
       } else if (view === 'project') {
-        key = insight.project_name;
+        key = insight.project_id;
       } else if (view === 'session') {
         key = insight.session_id;
       } else {
@@ -306,7 +326,7 @@ export default function InsightsPage() {
       entries.sort((a, b) => b[1].length - a[1].length);
       return entries.map(([key, items]) => ({
         key,
-        label: key,
+        label: projectLabels.get(key) ?? items[0].project_name,
         count: items.length,
         insights: items,
       }));
@@ -333,18 +353,30 @@ export default function InsightsPage() {
         insights: items,
       };
     });
-  }, [filtered, filters.view, formatDate, t]);
+  }, [filtered, filters.view, formatDate, projectLabels, t]);
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)] relative">
+    <div className="relative flex h-[calc(100dvh-4rem)] flex-col">
       {/* Sticky header: title + filters */}
-      <div className="shrink-0 sticky top-0 z-10 bg-background border-b px-6 pt-5 pb-3 space-y-3">
+      <div className="z-10 shrink-0 space-y-3 border-b bg-canvas/95 px-4 pb-3 pt-5 backdrop-blur-xl lg:px-8">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h1 className="text-2xl font-bold">{t('insights.title')}</h1>
             {!isLoading && (
               <p className="text-muted-foreground text-sm">
-                {t('insights.count', { count: filtered.length, filtered: hasFilters ? 1 : 0 })}
+                {t('insights.count', {
+                  count: totalInsights,
+                  displayCount: formatNumber(totalInsights),
+                  filtered: hasFilters ? 1 : 0,
+                })}
+                {insights.length < totalInsights && (
+                  <span className="ml-2 text-xs">
+                    {t('insights.loadedProgress', {
+                      loaded: formatNumber(insights.length),
+                      total: formatNumber(totalInsights),
+                    })}
+                  </span>
+                )}
               </p>
             )}
           </div>
@@ -398,7 +430,7 @@ export default function InsightsPage() {
               <SelectItem value="all">{t('insights.allProjects')}</SelectItem>
               {projects.map((p) => (
                 <SelectItem key={p.id} value={p.id}>
-                  {p.name}
+                  {projectLabels.get(p.id) ?? p.name}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -437,15 +469,16 @@ export default function InsightsPage() {
       </div>
 
       {/* Scrollable content */}
-      <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-      {shouldShowCallout && primarySession && facetsBySessionId.has(primarySession.id) && (
-        <DispatchDiscoveryCallout
-          onTryIt={() => { openDispatchWithPrefill(); }}
-          onDismiss={handleCalloutDismiss}
-        />
-      )}
-      <LlmNudgeBanner context="insights" />
-      {isError && !isLoading ? (
+      <div className="flex-1 space-y-4 overflow-y-auto px-4 py-5 lg:px-8">
+        <ContextualOnboarding module="insights" onAction={handleOnboardingAction} />
+        {shouldShowCallout && primarySession && facetsBySessionId.has(primarySession.id) && (
+          <DispatchDiscoveryCallout
+            onTryIt={() => { openDispatchWithPrefill(); }}
+            onDismiss={handleCalloutDismiss}
+          />
+        )}
+        <LlmNudgeBanner context="insights" />
+        {isError && !isLoading ? (
         <ErrorCard message={t('insights.failed')} onRetry={refetch} />
       ) : isLoading ? (
         <div className="space-y-3">
@@ -479,8 +512,11 @@ export default function InsightsPage() {
         )
       ) : (
         <div className="space-y-6">
-          {!filters.pattern && (
-            <RecurringPatternsSection insights={insights} />
+          {!filters.pattern && insights.length > 0 && (
+            <RecurringPatternsSection
+              insights={insights}
+              partial={insights.length < totalInsights}
+            />
           )}
 
           {grouped.map((group) => {
@@ -493,7 +529,7 @@ export default function InsightsPage() {
                   {SectionIcon && <SectionIcon className={`h-3.5 w-3.5 ${sectionMeta.color}`} />}
                   {group.label} ({group.count})
                 </h2>
-                <div className="rounded-md border overflow-hidden">
+                <div className="overflow-hidden rounded-2xl border border-border/80 bg-elevated shadow-sm">
                   {group.insights.map((insight) => {
                     const isSelected = selectedIds.has(insight.id);
                     const atMax = selectedIds.size >= MAX_DISPATCH_INSIGHTS;
@@ -503,7 +539,11 @@ export default function InsightsPage() {
                         className={`relative group/dispatch ${isSelected ? 'bg-primary/5' : ''}`}
                       >
                         <div
-                          className="absolute left-2 top-3 z-10 opacity-0 group-hover/dispatch:opacity-100 transition-opacity"
+                          className={`absolute left-2 top-3 z-10 transition-opacity ${
+                            isSelected
+                              ? 'opacity-100'
+                              : 'opacity-0 group-hover/dispatch:opacity-100 group-focus-within/dispatch:opacity-100'
+                          }`}
                           onClick={(e) => e.stopPropagation()}
                         >
                           <Checkbox
@@ -513,7 +553,7 @@ export default function InsightsPage() {
                             aria-label={t('insights.select', { title: insight.title })}
                           />
                         </div>
-                        <div className={`transition-[padding-left] ${isSelected ? 'pl-8' : 'group-hover/dispatch:pl-8'}`}>
+                        <div className={`transition-[padding-left] ${isSelected ? 'pl-8' : 'group-hover/dispatch:pl-8 group-focus-within/dispatch:pl-8'}`}>
                           <InsightListItem
                             insight={insight}
                             showProject={filters.view !== 'project'}
@@ -529,8 +569,27 @@ export default function InsightsPage() {
               </div>
             );
           })}
+
+          {hasNextPage && !filters.pattern && (
+            <div className="flex flex-col items-center gap-2 py-4">
+              <p className="text-xs text-muted-foreground">
+                {t('insights.loadedProgress', {
+                  loaded: formatNumber(insights.length),
+                  total: formatNumber(totalInsights),
+                })}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={isFetchingNextPage}
+                onClick={() => fetchNextPage()}
+              >
+                {isFetchingNextPage ? t('insights.loadingMore') : t('insights.loadMore')}
+              </Button>
+            </div>
+          )}
         </div>
-      )}
+        )}
       </div>
 
       <FloatingActionBar

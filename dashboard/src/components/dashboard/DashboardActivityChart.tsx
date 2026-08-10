@@ -51,16 +51,30 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
 
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between pb-1">
-        <CardTitle className="text-sm font-medium">{t('dashboard.chart.activity')}</CardTitle>
-        <div className="flex gap-1">
+      <CardHeader className="flex flex-col gap-3 pb-2 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <CardTitle className="text-[15px] font-semibold">{t('dashboard.chart.activity')}</CardTitle>
+          <p className="mt-1 text-xs text-muted-foreground">{t('dashboard.chart.description')}</p>
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-muted-foreground" aria-label={t('dashboard.chart.legend')}>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: CHART_COLORS.activity.sessions }} />
+              {t('dashboard.chart.sessions')}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <span className="h-2 w-2 rounded-full" style={{ backgroundColor: CHART_COLORS.activity.insights }} />
+              {t('dashboard.chart.insights')}
+            </span>
+          </div>
+        </div>
+        <div className="flex self-start rounded-[10px] bg-muted/75 p-0.5">
           {rangeOptions.map(({ value, labelKey }) => (
             <Button
               key={value}
-              variant={range === value ? 'default' : 'ghost'}
+              variant="ghost"
               size="sm"
-              className="h-7 px-2.5 text-xs"
+              className={`h-7 rounded-lg px-2.5 text-xs ${range === value ? 'bg-card text-foreground shadow-[0_1px_3px_hsl(240_10%_4%/0.10)] hover:bg-card' : 'text-muted-foreground'}`}
               onClick={() => onRangeChange(value)}
+              aria-pressed={range === value}
             >
               {t(labelKey)}
             </Button>
@@ -68,10 +82,14 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
         </div>
       </CardHeader>
       <CardContent>
-        <div className="h-[200px]">
+        <div
+          className="h-[230px]"
+          role="img"
+          aria-label={t('dashboard.chart.accessibleSummary', { points: chartData.length })}
+        >
           {chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={chartData}>
+            <ResponsiveContainer width="100%" height={230} minWidth={0}>
+              <AreaChart data={chartData} accessibilityLayer margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
                 <defs>
                   <linearGradient id="dashColorSessions" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor={CHART_COLORS.activity.sessions} stopOpacity={0.3} />
@@ -82,13 +100,15 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
                     <stop offset="95%" stopColor={CHART_COLORS.activity.insights} stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid strokeDasharray="3 3" className="stroke-muted" />
+                <CartesianGrid vertical={false} strokeDasharray="2 4" className="stroke-border/55" />
                 <XAxis
                   dataKey="date"
                   tick={{ fontSize: 11 }}
                   tickLine={false}
                   axisLine={false}
                   className="text-muted-foreground"
+                  tickMargin={10}
+                  padding={{ left: 8, right: 8 }}
                   interval={range === '7d' ? 0 : range === '30d' ? 4 : range === '90d' ? 13 : 'preserveStartEnd'}
                 />
                 <YAxis
@@ -97,30 +117,40 @@ export function DashboardActivityChart({ data, range, onRangeChange }: Dashboard
                   axisLine={false}
                   className="text-muted-foreground"
                   width={30}
+                  allowDecimals={false}
+                  tickMargin={8}
                 />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: tooltipBg,
                     borderColor: tooltipBorder,
-                    borderRadius: '8px',
+                    borderRadius: '12px',
                     fontSize: '12px',
+                    boxShadow: '0 12px 32px rgba(0,0,0,0.12)',
                   }}
+                  cursor={{ stroke: tooltipBorder, strokeDasharray: '3 3' }}
                 />
                 <Area
-                  type="monotone"
+                  type="linear"
                   dataKey="sessionCount"
                   name={t('dashboard.chart.sessions')}
                   stroke={CHART_COLORS.activity.sessions}
                   fillOpacity={1}
                   fill="url(#dashColorSessions)"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 2 }}
                 />
                 <Area
-                  type="monotone"
+                  type="linear"
                   dataKey="insightCount"
                   name={t('dashboard.chart.insights')}
                   stroke={CHART_COLORS.activity.insights}
                   fillOpacity={1}
                   fill="url(#dashColorInsights)"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4, strokeWidth: 2 }}
                 />
               </AreaChart>
             </ResponsiveContainer>

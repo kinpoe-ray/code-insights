@@ -119,20 +119,20 @@ export const TEAMMATE_DEFAULT_COLORS = { border: 'border-gray-500/40', bg: 'bg-g
 export const CHART_COLORS = {
   // Insight type pie chart — aligned with INSIGHT_TYPE_COLORS badge colors
   insightTypes: {
-    summary: '#a855f7',        // purple-500
-    decision: '#3b82f6',       // blue-500
-    learning: '#22c55e',       // green-500
-    technique: '#22c55e',      // green-500 (same as learning — merged for display)
-    prompt_quality: '#f43f5e', // rose-500
+    summary: '#AF52DE',        // system purple
+    decision: '#007AFF',       // system blue
+    learning: '#34C759',       // system green
+    technique: '#34C759',      // same semantic group as learning
+    prompt_quality: '#FF375F', // system pink
   },
   // Activity area chart lines
   activity: {
-    sessions: '#3b82f6',  // blue-500
-    insights: '#22c55e',  // green-500
+    sessions: '#007AFF',
+    insights: '#AF52DE',
   },
   // Top projects bar chart
   projects: {
-    sessions: '#3b82f6',  // blue-500
+    sessions: '#007AFF',
   },
   // Model distribution pie chart
   models: ['#3b82f6', '#a855f7', '#22c55e', '#f59e0b', '#f43f5e', '#06b6d4'],

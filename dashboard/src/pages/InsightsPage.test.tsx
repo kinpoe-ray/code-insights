@@ -30,7 +30,17 @@ const decisionInsight: Insight = {
 };
 
 vi.mock('@/hooks/useInsights', () => ({
-  useInsights: () => ({ data: [decisionInsight], isLoading: false, isError: false, refetch: vi.fn() }),
+  useInsightSearch: () => ({
+    data: {
+      pages: [{ insights: [decisionInsight], total: 1, limit: 120, offset: 0 }],
+    },
+    isLoading: false,
+    isError: false,
+    refetch: vi.fn(),
+    fetchNextPage: vi.fn(),
+    hasNextPage: false,
+    isFetchingNextPage: false,
+  }),
 }));
 
 vi.mock('@/hooks/useSessions', () => ({

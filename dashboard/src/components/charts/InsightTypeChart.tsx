@@ -1,4 +1,4 @@
-import { PieChart, Pie, Cell, ResponsiveContainer, Legend, Tooltip } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { useThemeColors } from '@/lib/hooks/useThemeColors';
 import { CHART_COLORS } from '@/lib/constants/colors';
@@ -31,12 +31,14 @@ export function InsightTypeChart({ data }: InsightTypeChartProps) {
       value,
       color: COLORS[name as keyof typeof COLORS],
     }));
+  const total = chartData.reduce((sum, item) => sum + item.value, 0);
 
   if (chartData.length === 0) {
     return (
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">{t('analytics.insightTypes')}</CardTitle>
+          <CardTitle className="text-[15px]">{t('analytics.insightTypes')}</CardTitle>
+          <p className="text-xs text-muted-foreground">{t('analytics.insightTypesDescription')}</p>
         </CardHeader>
         <CardContent>
           <div className="flex h-[200px] items-center justify-center">
@@ -50,38 +52,62 @@ export function InsightTypeChart({ data }: InsightTypeChartProps) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="text-base">{t('analytics.insightTypes')}</CardTitle>
+        <CardTitle className="text-[15px]">{t('analytics.insightTypes')}</CardTitle>
+        <p className="text-xs text-muted-foreground">{t('analytics.insightTypesDescription')}</p>
       </CardHeader>
       <CardContent>
-        <div className="h-[200px]">
-          <ResponsiveContainer width="100%" height="100%">
-            <PieChart>
-              <Pie
-                data={chartData}
-                cx="50%"
-                cy="50%"
-                innerRadius={40}
-                outerRadius={70}
-                paddingAngle={2}
-                dataKey="value"
-              >
-                {chartData.map((entry, index) => (
-                  <Cell key={`cell-${index}`} fill={entry.color} />
-                ))}
-              </Pie>
-              <Tooltip
-                contentStyle={{
-                  backgroundColor: tooltipBg,
-                  borderColor: tooltipBorder,
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                }}
-              />
-              <Legend
-                formatter={(value) => <span className="text-sm">{value}</span>}
-              />
-            </PieChart>
-          </ResponsiveContainer>
+        <div className="grid items-center gap-4 sm:grid-cols-[220px_minmax(0,1fr)]">
+          <div className="relative h-[220px]" role="img" aria-label={`${t('analytics.insightTypes')}: ${total}`}>
+            <ResponsiveContainer width="100%" height={220} minWidth={0}>
+              <PieChart accessibilityLayer>
+                <Pie
+                  data={chartData}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={58}
+                  outerRadius={84}
+                  paddingAngle={2}
+                  cornerRadius={4}
+                  dataKey="value"
+                  stroke="none"
+                >
+                  {chartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{
+                    backgroundColor: tooltipBg,
+                    borderColor: tooltipBorder,
+                    borderRadius: '12px',
+                    fontSize: '12px',
+                    boxShadow: '0 12px 32px rgba(0,0,0,0.12)',
+                  }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+            <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+              <span className="font-tabular text-2xl font-semibold tracking-[-0.04em]">{total}</span>
+              <span className="mt-1 text-[11px] text-muted-foreground">{t('analytics.insights')}</span>
+            </div>
+          </div>
+          <div className="space-y-3">
+            {chartData.map((entry) => {
+              const percent = total > 0 ? Math.round((entry.value / total) * 100) : 0;
+              return (
+                <div key={entry.name} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3">
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: entry.color }} />
+                    <span className="truncate text-sm">{entry.name}</span>
+                  </div>
+                  <div className="font-tabular flex items-center gap-3 text-sm">
+                    <span className="font-medium">{entry.value}</span>
+                    <span className="w-9 text-right text-xs text-muted-foreground">{percent}%</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
       </CardContent>
     </Card>

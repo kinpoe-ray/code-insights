@@ -27,12 +27,35 @@ interface StatsHeroProps {
   totalTokens?: number;
   totalCost?: number;
   topModel?: string | null;
+  usageCoverage?: { covered: number; total: number };
   tokenBreakdown?: {
     inputTokens: number;
     outputTokens: number;
     cacheCreationTokens: number;
     cacheReadTokens: number;
   };
+}
+
+interface MetricProps {
+  label: string;
+  value: string;
+  detail?: string;
+  icon: React.ElementType;
+}
+
+function Metric({ label, value, detail, icon: Icon }: MetricProps) {
+  return (
+    <div className="min-w-0 bg-card px-4 py-4 sm:px-5 sm:py-5">
+      <div className="mb-3 flex h-8 w-8 items-center justify-center rounded-[10px] bg-primary/9 text-primary">
+        <Icon className="h-4 w-4" strokeWidth={1.8} />
+      </div>
+      <div className="font-tabular truncate text-[clamp(1.35rem,2vw,1.75rem)] font-semibold leading-none tracking-[-0.035em]">
+        {value}
+      </div>
+      <div className="mt-2 text-[13px] font-medium text-foreground/85">{label}</div>
+      {detail && <div className="mt-0.5 truncate text-xs text-muted-foreground">{detail}</div>}
+    </div>
+  );
 }
 
 export function StatsHero({
@@ -45,6 +68,7 @@ export function StatsHero({
   totalTokens,
   totalCost,
   topModel,
+  usageCoverage,
   tokenBreakdown,
 }: StatsHeroProps) {
   const { t, formatNumber } = useLocale();
@@ -52,7 +76,6 @@ export function StatsHero({
     notation: 'compact',
     maximumFractionDigits: 1,
   });
-  const showUsage = (totalTokens ?? 0) > 0 || (totalCost ?? 0) > 0;
   const hours = Math.floor(totalDurationMin / 60);
   const minutes = totalDurationMin % 60;
   const duration = totalDurationMin < 60
@@ -61,95 +84,77 @@ export function StatsHero({
       ? t('dashboard.duration.hoursMinutes', { hours, minutes })
       : t('dashboard.duration.hours', { hours });
 
-  const coreCell = (
-    key: string,
-    label: string,
-    value: string,
-    Icon: React.ElementType
-  ) => (
-    <div
-      key={key}
-      className="flex-1 min-w-[100px] px-3 py-2 border-r border-border last:border-r-0"
-    >
-      <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
-        <Icon className="h-3 w-3" />
-        <span className="text-[11px] font-medium uppercase tracking-wide">{label}</span>
-      </div>
-      <div className="text-base font-bold text-primary">{value}</div>
-    </div>
-  );
+  const usageDetail = usageCoverage && usageCoverage.total > 0
+    ? t('dashboard.stats.usageCoverage', {
+        covered: usageCoverage.covered,
+        total: usageCoverage.total,
+      })
+    : totalTokens
+      ? t('dashboard.stats.tokensDetail', { tokens: formatCompact(totalTokens) })
+      : undefined;
+
+  const hasUsageCost = usageCoverage
+    ? usageCoverage.covered > 0
+    : (totalCost ?? 0) > 0;
+  const usageMetric = hasUsageCost
+    ? {
+        label: t('dashboard.stats.estimatedCost'),
+        value: `$${(totalCost ?? 0).toFixed(2)}`,
+        detail: usageDetail,
+        icon: DollarSign,
+      }
+    : {
+        label: t('dashboard.stats.tokens'),
+        value: totalTokens ? formatCompact(totalTokens) : '—',
+        detail: topModel ? formatModelName(topModel) : undefined,
+        icon: totalTokens ? Coins : Cpu,
+      };
 
   return (
-    <Card>
+    <Card className="overflow-hidden">
       <CardContent className="p-0">
-        <div className="flex flex-wrap">
-          {coreCell('sessions', t('dashboard.stats.sessions'), formatCompact(totalSessions), Zap)}
-          {coreCell('messages', t('dashboard.stats.messages'), `${!isExact ? '~' : ''}${formatCompact(totalMessages)}`, MessageSquare)}
-          {coreCell('toolCalls', t('dashboard.stats.toolCalls'), `${!isExact ? '~' : ''}${formatCompact(totalToolCalls)}`, Wrench)}
-          {coreCell('duration', t('dashboard.stats.codingTime'), `${!isExact ? '~' : ''}${duration}`, Clock)}
-          <div
-            className={`flex-1 min-w-[100px] px-3 py-2 ${showUsage ? 'border-r border-border' : ''}`}
-          >
-            <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
-              <FolderOpen className="h-3 w-3" />
-              <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.projects')}</span>
-            </div>
-            <div className="text-base font-bold text-primary">{formatCompact(totalProjects)}</div>
-          </div>
-
-          {showUsage && (
-            <>
-              <div className="flex-1 min-w-[100px] px-3 py-2 border-r border-border last:border-r-0">
-                <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
-                  <Coins className="h-3 w-3" />
-                  <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.tokens')}</span>
+        <div className="grid gap-px bg-border/55 grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
+          <Metric
+            label={t('dashboard.stats.sessions')}
+            value={formatCompact(totalSessions)}
+            icon={Zap}
+          />
+          <Metric
+            label={t('dashboard.stats.codingTime')}
+            value={`${!isExact ? '~' : ''}${duration}`}
+            icon={Clock}
+          />
+          <Metric
+            label={t('dashboard.stats.messages')}
+            value={`${!isExact ? '~' : ''}${formatCompact(totalMessages)}`}
+            icon={MessageSquare}
+          />
+          <Metric
+            label={t('dashboard.stats.toolCalls')}
+            value={`${!isExact ? '~' : ''}${formatCompact(totalToolCalls)}`}
+            icon={Wrench}
+          />
+          <Metric
+            label={t('dashboard.stats.projects')}
+            value={formatCompact(totalProjects)}
+            icon={FolderOpen}
+          />
+          {tokenBreakdown ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="cursor-help" aria-label={t('dashboard.stats.tokenBreakdown')}>
+                  <Metric {...usageMetric} />
                 </div>
-                {tokenBreakdown ? (
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div
-                        className="text-base font-bold text-primary cursor-default"
-                        aria-label={t('dashboard.stats.tokenBreakdown')}
-                      >
-                        {formatCompact(totalTokens ?? 0)}
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent side="bottom" className="text-xs space-y-0.5">
-                      <p>{t('dashboard.stats.tokenInput')}: {formatCompact(tokenBreakdown.inputTokens)}</p>
-                      <p>{t('dashboard.stats.tokenOutput')}: {formatCompact(tokenBreakdown.outputTokens)}</p>
-                      <p>{t('dashboard.stats.cacheWrite')}: {formatCompact(tokenBreakdown.cacheCreationTokens)}</p>
-                      <p>{t('dashboard.stats.cacheRead')}: {formatCompact(tokenBreakdown.cacheReadTokens)}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                ) : (
-                  <div className="text-base font-bold text-primary">
-                    {formatCompact(totalTokens ?? 0)}
-                  </div>
-                )}
-              </div>
-
-              <div className="flex-1 min-w-[100px] px-3 py-2 border-r border-border last:border-r-0">
-                <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
-                  <DollarSign className="h-3 w-3" />
-                  <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.cost')}</span>
-                </div>
-                <div className="text-base font-bold text-primary">
-                  ${(totalCost ?? 0).toFixed(2)}
-                </div>
-              </div>
-
-              {topModel && (
-                <div className="flex-1 min-w-[100px] px-3 py-2 last:border-r-0">
-                  <div className="flex items-center gap-1.5 text-muted-foreground mb-0.5">
-                    <Cpu className="h-3 w-3" />
-                    <span className="text-[11px] font-medium uppercase tracking-wide">{t('dashboard.stats.topModel')}</span>
-                  </div>
-                  <div className="text-base font-bold text-primary">
-                    {formatModelName(topModel)}
-                  </div>
-                </div>
-              )}
-            </>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="space-y-1 rounded-xl p-3 text-xs">
+                <p>{t('dashboard.stats.tokenInput')}: {formatCompact(tokenBreakdown.inputTokens)}</p>
+                <p>{t('dashboard.stats.tokenOutput')}: {formatCompact(tokenBreakdown.outputTokens)}</p>
+                <p>{t('dashboard.stats.cacheWrite')}: {formatCompact(tokenBreakdown.cacheCreationTokens)}</p>
+                <p>{t('dashboard.stats.cacheRead')}: {formatCompact(tokenBreakdown.cacheReadTokens)}</p>
+              </TooltipContent>
+            </Tooltip>
+          ) : (
+            <Metric {...usageMetric} />
           )}
         </div>
       </CardContent>

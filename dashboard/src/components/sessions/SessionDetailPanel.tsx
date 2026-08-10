@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useCallback } from 'react';
+import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useSession, useDeleteSession } from '@/hooks/useSessions';
 import { useInsights } from '@/hooks/useInsights';
 import { useMessages } from '@/hooks/useMessages';
@@ -43,10 +43,17 @@ import { VitalsStrip } from '@/components/sessions/VitalsStrip';
 import { AnalysisCostLine } from '@/components/sessions/AnalysisCostLine';
 import { SessionIdentityStrip } from '@/components/sessions/SessionIdentityStrip';
 import { SessionMetadataPanel } from '@/components/sessions/SessionMetadataPanel';
+import { SessionOnboardingCoach } from '@/components/sessions/SessionOnboarding';
 import { ChatConversation } from '@/components/chat/conversation/ChatConversation';
 import { ConversationSearch } from '@/components/chat/conversation/ConversationSearch';
 import {
+  ConversationOutline,
+  buildConversationOutline,
+} from '@/components/chat/conversation/ConversationOutline';
+import type { SessionOnboardingStep } from '@/hooks/useSessionOnboarding';
+import {
   AlertTriangle,
+  CircleHelp,
   Pencil,
   FileText,
   Download,
@@ -57,6 +64,7 @@ import {
   Wrench,
   Target,
   Loader2,
+  MessageCircle,
   Trash2,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -65,9 +73,24 @@ import { useLocale } from '@/i18n/LocaleProvider';
 interface SessionDetailPanelProps {
   sessionId: string;
   onDelete?: () => void;
+  onboardingStep?: SessionOnboardingStep;
+  onOnboardingStepChange?: (step: Exclude<SessionOnboardingStep, 0>) => void;
+  onDismissOnboarding?: () => void;
+  onCompleteOnboarding?: () => void;
+  onRestartOnboarding?: () => void;
+  showOnboardingReplay?: boolean;
 }
 
-export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelProps) {
+export function SessionDetailPanel({
+  sessionId,
+  onDelete,
+  onboardingStep = 0,
+  onOnboardingStepChange,
+  onDismissOnboarding,
+  onCompleteOnboarding,
+  onRestartOnboarding,
+  showOnboardingReplay = false,
+}: SessionDetailPanelProps) {
   const { t } = useLocale();
   const { data: session, isLoading: loading, error } = useSession(sessionId);
   const { data: insights = [] } = useInsights({ sessionId });
@@ -77,6 +100,11 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
   const [searchHighlightId, setSearchHighlightId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [loadingAllMessages, setLoadingAllMessages] = useState(false);
+  const [conversationOutlineOpen, setConversationOutlineOpen] = useState(false);
+  const [outlineHighlightId, setOutlineHighlightId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('insights');
+  const insightsScrollRef = useRef<HTMLDivElement>(null);
+  const conversationScrollRef = useRef<HTMLDivElement>(null);
   const { getAnalysisState } = useAnalysis();
   // Show cost indicator when either analysis type is actively running
   const sessionAnalysisState = getAnalysisState(sessionId, 'session');
@@ -100,17 +128,76 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
   const loadingMessages = messagesQuery.isLoading;
   const loadingMore = messagesQuery.isFetchingNextPage;
   const hasMore = messagesQuery.hasNextPage ?? false;
+  const conversationOutlineItems = useMemo(
+    () => buildConversationOutline(messages, t('chat.outline.untitled')),
+    [messages, t],
+  );
 
   const fetchAllMessages = useCallback(async () => {
     if (loadingAllMessages || !messagesQuery.hasNextPage) return;
     setLoadingAllMessages(true);
-    const MAX_PAGES = 50;
-    for (let i = 0; i < MAX_PAGES; i++) {
-      const result = await messagesQuery.fetchNextPage();
-      if (!result.hasNextPage) break;
+    try {
+      const MAX_PAGES = 50;
+      for (let i = 0; i < MAX_PAGES; i++) {
+        const result = await messagesQuery.fetchNextPage();
+        if (!result.hasNextPage) break;
+      }
+    } finally {
+      setLoadingAllMessages(false);
     }
-    setLoadingAllMessages(false);
   }, [messagesQuery, loadingAllMessages]);
+
+  const handleToggleConversationOutline = useCallback(() => {
+    const nextOpen = !conversationOutlineOpen;
+    setConversationOutlineOpen(nextOpen);
+    if (nextOpen) void fetchAllMessages();
+  }, [conversationOutlineOpen, fetchAllMessages]);
+
+  useEffect(() => {
+    setActiveTab('insights');
+    setConversationOutlineOpen(false);
+    setOutlineHighlightId(null);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (onboardingStep === 1 || onboardingStep === 2) setActiveTab('insights');
+    if (onboardingStep === 3) setActiveTab('conversation');
+    if (onboardingStep === 4) setActiveTab('prompt-quality');
+  }, [onboardingStep]);
+
+  const handleTabChange = useCallback((value: string) => {
+    setActiveTab(value);
+    if (value === 'conversation' && onboardingStep === 2) {
+      onOnboardingStepChange?.(3);
+    }
+    if (value === 'prompt-quality' && onboardingStep === 3) {
+      onOnboardingStepChange?.(4);
+    }
+  }, [onboardingStep, onOnboardingStepChange]);
+
+  const openConversationFromTour = useCallback(() => {
+    setActiveTab('conversation');
+    onOnboardingStepChange?.(3);
+  }, [onOnboardingStepChange]);
+
+  const openPromptQualityFromTour = useCallback(() => {
+    setActiveTab('prompt-quality');
+    onOnboardingStepChange?.(4);
+  }, [onOnboardingStepChange]);
+
+  const focusSummaryTarget = useCallback((node: HTMLDivElement | null) => {
+    if (!node || onboardingStep !== 2) return;
+    window.requestAnimationFrame(() => {
+      const scroller = insightsScrollRef.current;
+      if (!scroller || typeof scroller.scrollTo !== 'function') return;
+      const targetRect = node.getBoundingClientRect();
+      const scrollerRect = scroller.getBoundingClientRect();
+      scroller.scrollTo({
+        top: scroller.scrollTop + targetRect.top - scrollerRect.top - 8,
+        behavior: 'smooth',
+      });
+    });
+  }, [onboardingStep]);
 
   const prLinks = useMemo(() => {
     const linkSet = new Set<string>();
@@ -246,6 +333,19 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             <TooltipContent side="bottom">{t('sessions.detail.rename')}</TooltipContent>
           </Tooltip>
           <div className="ml-auto flex items-center gap-1">
+            {showOnboardingReplay && onRestartOnboarding && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 gap-1.5 px-2 text-xs"
+                aria-label={t('sessions.onboarding.replay')}
+                onClick={onRestartOnboarding}
+              >
+                <CircleHelp className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">{t('sessions.onboarding.replay')}</span>
+              </Button>
+            )}
             <AnalyzeDropdown
               session={session}
               hasExistingInsights={nonPromptInsights.length > 0}
@@ -344,7 +444,11 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
       </div>
 
       {/* Tabs: analysis, source conversation, passport metadata, and prompt quality */}
-      <Tabs defaultValue="insights" className="flex flex-col flex-1 overflow-hidden pt-2">
+      <Tabs
+        value={activeTab}
+        onValueChange={handleTabChange}
+        className="flex flex-col flex-1 overflow-hidden pt-2"
+      >
         <TabsList variant="line" className="shrink-0 w-full justify-start gap-4 px-6 border-b">
           <TabsTrigger value="insights" className="px-0">
             {t('sessions.detail.tabs.insights')}{nonPromptInsights.length > 0 && ` (${nonPromptInsights.length})`}
@@ -371,7 +475,7 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
         </TabsList>
 
         {/* Tab 1: Insights */}
-        <TabsContent value="insights" className="flex-1 overflow-y-auto mt-0 p-5 space-y-4">
+        <TabsContent ref={insightsScrollRef} value="insights" className="flex-1 overflow-y-auto mt-0 p-5 space-y-4">
           <VitalsStrip session={session} />
 
           {/* Queue in-progress indicator — shown when session is awaiting background analysis */}
@@ -424,13 +528,53 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
             </div>
           )}
 
+          {onboardingStep === 2 && !summaryText && (
+            <div
+              ref={focusSummaryTarget}
+              className="relative min-h-32 rounded-lg border border-primary/20 bg-accent/30 p-4 ring-2 ring-primary/20 sm:pr-[250px]"
+            >
+              <div className="flex items-start gap-2">
+                <FileText className="mt-0.5 h-4 w-4 shrink-0 text-purple-500" />
+                <div>
+                  <p className="text-sm font-medium">{t('sessions.detail.notAnalyzed')}</p>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                    {t('sessions.detail.notAnalyzedDescription')}
+                  </p>
+                </div>
+              </div>
+              <SessionOnboardingCoach
+                step={2}
+                title={t('sessions.onboarding.step2Title')}
+                description={t('sessions.onboarding.step2Description')}
+                actionLabel={t('sessions.onboarding.step2Action')}
+                onAction={openConversationFromTour}
+                onDismiss={onDismissOnboarding ?? (() => {})}
+                className="relative right-auto top-auto mt-3 w-full sm:absolute sm:right-3 sm:top-3 sm:mt-0 sm:w-[236px]"
+              />
+            </div>
+          )}
+
           {/* Summary */}
           {summaryText && (
-            <div>
+            <div ref={focusSummaryTarget} className={cn(
+              'relative',
+              onboardingStep === 2 && 'rounded-lg p-2 -m-2 ring-2 ring-primary/20'
+            )}>
               <div className="flex items-center gap-2 mb-2">
                 <FileText className="h-4 w-4 text-purple-500 shrink-0" />
                 <h3 className="text-sm font-medium">{t('sessions.detail.summary')}</h3>
               </div>
+              {onboardingStep === 2 && (
+                <SessionOnboardingCoach
+                  step={2}
+                  title={t('sessions.onboarding.step2Title')}
+                  description={t('sessions.onboarding.step2Description')}
+                  actionLabel={t('sessions.onboarding.step2Action')}
+                  onAction={openConversationFromTour}
+                  onDismiss={onDismissOnboarding ?? (() => {})}
+                  className="relative right-auto top-auto mb-3 w-full sm:absolute sm:right-3 sm:top-8 sm:mb-0 sm:w-[236px]"
+                />
+              )}
               <div className="rounded-md bg-muted/20 px-4 py-3">
                 <p className="font-medium text-sm mb-1.5">{summaryTitle}</p>
                 {summaryBullets.length > 0 ? (
@@ -538,7 +682,24 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
         </TabsContent>
 
         {/* Tab 2: Prompt Quality */}
-        <TabsContent value="prompt-quality" className="flex-1 overflow-y-auto mt-0 p-5 space-y-4">
+        <TabsContent
+          value="prompt-quality"
+          className={cn(
+            'flex-1 overflow-y-auto mt-0 p-5 space-y-4',
+            onboardingStep === 4 && 'bg-accent/25 ring-2 ring-inset ring-primary/20',
+          )}
+        >
+          {onboardingStep === 4 && (
+            <SessionOnboardingCoach
+              step={4}
+              title={t('sessions.onboarding.step4Title')}
+              description={t('sessions.onboarding.step4Description')}
+              actionLabel={t('sessions.onboarding.step4Action')}
+              onAction={onCompleteOnboarding ?? (() => {})}
+              onDismiss={onDismissOnboarding ?? (() => {})}
+              className="relative mb-3 w-full sm:w-[310px]"
+            />
+          )}
           {promptQualityInsight ? (
             <PromptQualityCard insight={promptQualityInsight} />
           ) : (
@@ -562,24 +723,72 @@ export function SessionDetailPanel({ sessionId, onDelete }: SessionDetailPanelPr
           value="conversation"
           className="flex flex-col flex-1 overflow-hidden mt-0 bg-muted/40 dark:bg-muted/20"
         >
+          <section
+            className={cn(
+              'relative shrink-0 border-b bg-background px-5 py-3',
+              onboardingStep === 3 && 'border-primary/20 bg-accent/45 ring-2 ring-inset ring-primary/20'
+            )}
+          >
+            <div className="flex items-center gap-2 text-sm font-semibold">
+              <MessageCircle className="h-4 w-4 shrink-0 text-primary" />
+              <span>{t('sessions.onboarding.evidenceTitle')}</span>
+            </div>
+            <p className="mt-1 max-w-[38rem] text-xs leading-relaxed text-muted-foreground">
+              {t('sessions.onboarding.evidenceDescription')}
+            </p>
+            {onboardingStep === 3 && (
+              <SessionOnboardingCoach
+                step={3}
+                title={t('sessions.onboarding.step3Title')}
+                description={t('sessions.onboarding.step3Description')}
+                actionLabel={t('sessions.onboarding.step3Action')}
+                onAction={openPromptQualityFromTour}
+                onDismiss={onDismissOnboarding ?? (() => {})}
+                className="right-3 top-[calc(100%-8px)] w-[245px]"
+              />
+            )}
+          </section>
           <ConversationSearch
             messages={messages}
             onHighlightMessage={setSearchHighlightId}
             onSearchQueryChange={setSearchQuery}
             fetchAllMessages={fetchAllMessages}
             isLoadingAll={loadingAllMessages}
+            outlineCount={conversationOutlineItems.length}
+            outlineOpen={conversationOutlineOpen}
+            onToggleOutline={handleToggleConversationOutline}
           />
-          <div className="flex-1 overflow-y-auto">
-            <ChatConversation
-              messages={messages}
-              loading={loadingMessages}
-              loadingMore={loadingMore}
-              hasMore={hasMore}
-              onLoadMore={() => messagesQuery.fetchNextPage()}
-              sourceTool={session.source_tool ?? undefined}
-              highlightMessageId={searchHighlightId}
-              searchQuery={searchQuery}
-            />
+          <div className="relative flex min-h-0 flex-1 overflow-hidden">
+            <div ref={conversationScrollRef} className="min-w-0 flex-1 overflow-y-auto">
+              <ChatConversation
+                messages={messages}
+                loading={loadingMessages}
+                loadingMore={loadingMore}
+                hasMore={hasMore}
+                onLoadMore={() => messagesQuery.fetchNextPage()}
+                sourceTool={session.source_tool ?? undefined}
+                highlightMessageId={searchHighlightId ?? outlineHighlightId}
+                searchQuery={searchQuery}
+              />
+            </div>
+            {conversationOutlineOpen && (
+              <>
+                <button
+                  type="button"
+                  className="absolute inset-0 z-20 bg-background/60 backdrop-blur-[1px] 2xl:hidden"
+                  aria-label={t('chat.outline.close')}
+                  onClick={() => setConversationOutlineOpen(false)}
+                />
+                <ConversationOutline
+                  items={conversationOutlineItems}
+                  scrollContainerRef={conversationScrollRef}
+                  isLoadingAll={loadingAllMessages}
+                  onNavigate={setOutlineHighlightId}
+                  onClose={() => setConversationOutlineOpen(false)}
+                  className="absolute inset-y-0 right-0 z-30 w-[min(19rem,88%)] shadow-[-12px_0_32px_hsl(240_10%_4%/0.10)] 2xl:relative 2xl:z-auto 2xl:w-72 2xl:shrink-0 2xl:shadow-none"
+                />
+              </>
+            )}
           </div>
         </TabsContent>
 

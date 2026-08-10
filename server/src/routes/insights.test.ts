@@ -103,6 +103,45 @@ describe('Insights routes', () => {
       const body = await res.json();
       expect(body.insights).toHaveLength(1);
       expect(body.insights[0].type).toBe('decision');
+      expect(body).toMatchObject({ total: 1, limit: 5000, offset: 0 });
+    });
+
+    it('supports canonical multi-type filters with exact pagination metadata', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedInsight('ins-1', 'sess-1', 'proj-1', 'summary');
+      seedInsight('ins-2', 'sess-1', 'proj-1', 'learning');
+      seedInsight('ins-3', 'sess-1', 'proj-1', 'technique');
+      seedInsight('ins-4', 'sess-1', 'proj-1', 'decision');
+
+      const app = createApp();
+      const res = await app.request('/api/insights?type=learning,technique&limit=1&offset=1');
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      expect(body).toMatchObject({ total: 2, limit: 1, offset: 1 });
+      expect(body.insights).toHaveLength(1);
+      expect(['learning', 'technique']).toContain(body.insights[0].type);
+    });
+
+    it('filters by the parent session source tool', async () => {
+      seedProjectAndSession('proj-1', 'sess-1');
+      seedProjectAndSession('proj-2', 'sess-2');
+      testDb.prepare("UPDATE sessions SET source_tool = 'cursor' WHERE id = 'sess-2'").run();
+      seedInsight('ins-1', 'sess-1', 'proj-1', 'summary');
+      seedInsight('ins-2', 'sess-2', 'proj-2', 'summary');
+
+      const app = createApp();
+      const res = await app.request('/api/insights?sourceTool=cursor');
+      const body = await res.json();
+
+      expect(body.total).toBe(1);
+      expect(body.insights.map((insight: { id: string }) => insight.id)).toEqual(['ins-2']);
+    });
+
+    it('rejects invalid types instead of silently returning misleading results', async () => {
+      const app = createApp();
+      const res = await app.request('/api/insights?type=summary,unknown');
+      expect(res.status).toBe(400);
     });
   });
 

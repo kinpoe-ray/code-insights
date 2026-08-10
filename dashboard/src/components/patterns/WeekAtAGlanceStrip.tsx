@@ -93,6 +93,9 @@ export function WeekAtAGlanceStrip({
         .sort((a, b) => b[1] - a[1])
         .slice(0, MAX_CHARACTER_BADGES)
     : [];
+  const characterCovered = characterDistribution
+    ? Object.values(characterDistribution).reduce((sum, count) => sum + count, 0)
+    : 0;
 
   const showStreak = (streak ?? 0) >= 2;
 
@@ -174,20 +177,13 @@ export function WeekAtAGlanceStrip({
           triggerDownload();
         }}
       />
-      <div className="rounded-lg border bg-gradient-to-br from-blue-500/5 to-violet-500/5 dark:from-blue-500/10 dark:to-violet-500/10 p-4 space-y-3">
+      <section className="space-y-4 rounded-2xl border border-border/80 bg-elevated p-5 shadow-sm">
         {/* Top row: tagline + streak/rate-limit badges + download button */}
         <div className="flex items-start justify-between gap-3 flex-wrap">
           <div className="flex-1 min-w-0">
             {hasGenerated && displayTagline ? (
               <p
-                className="text-base font-semibold leading-snug"
-                style={{
-                  color: '#60a5fa',
-                  background: 'linear-gradient(to right, #3b82f6, #a855f7)',
-                  WebkitBackgroundClip: 'text',
-                  WebkitTextFillColor: 'transparent',
-                  backgroundClip: 'text',
-                }}
+                className="text-lg font-semibold leading-snug tracking-[-0.02em] text-foreground"
               >
                 {displayTagline}
               </p>
@@ -273,6 +269,14 @@ export function WeekAtAGlanceStrip({
                 {characterLabel(key)} {formatNumber(count)}
               </span>
             ))}
+            {characterCovered < totalSessions && (
+              <span className="text-[11px] text-muted-foreground">
+                {t('patterns.characterCoverageShort', {
+                  covered: formatNumber(characterCovered),
+                  total: formatNumber(totalSessions),
+                })}
+              </span>
+            )}
           </div>
         )}
 
@@ -305,7 +309,7 @@ export function WeekAtAGlanceStrip({
             </div>
           </div>
         )}
-      </div>
+      </section>
 
     </>
   );

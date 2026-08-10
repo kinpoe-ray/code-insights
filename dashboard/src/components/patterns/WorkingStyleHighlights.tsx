@@ -13,7 +13,7 @@ interface WorkingStyleHighlightsProps {
   narrative?: string;
   totalSessions: number;
   successCount: number;
-  topCharacter?: { name: string; percentage: number };
+  topCharacter?: { name: string; percentage: number; covered: number; total: number };
   topFriction?: { category: string; count: number };
   topPattern?: { label: string; frequency: number };
 }
@@ -77,10 +77,18 @@ export function WorkingStyleHighlights({
 
   if (topCharacter) {
     const charColorClass = SESSION_CHARACTER_COLORS[topCharacter.name] ?? 'bg-muted text-muted-foreground border-border';
+    const partialCoverage = topCharacter.covered < topCharacter.total;
     pills.push({
       icon: <User className="h-4 w-4" />,
-      value: `${formatNumber(topCharacter.percentage)}%`,
-      sublabel: characterLabel(topCharacter.name),
+      value: partialCoverage
+        ? `${formatNumber(topCharacter.covered)}/${formatNumber(topCharacter.total)}`
+        : `${formatNumber(topCharacter.percentage)}%`,
+      sublabel: partialCoverage
+        ? t('patterns.characterShareCovered', {
+            character: characterLabel(topCharacter.name),
+            percentage: formatNumber(topCharacter.percentage),
+          })
+        : characterLabel(topCharacter.name),
       // Use the character color classes but override bg/border via className merge
       className: charColorClass,
     });
@@ -102,7 +110,7 @@ export function WorkingStyleHighlights({
             {pill.icon}
             <div className="min-w-0">
               <div className="text-sm font-semibold leading-tight tabular-nums">{pill.value}</div>
-              <div className="text-xs text-muted-foreground leading-tight truncate max-w-[120px]">{pill.sublabel}</div>
+              <div className="max-w-[180px] truncate text-xs leading-tight text-muted-foreground">{pill.sublabel}</div>
             </div>
           </div>
         ))}

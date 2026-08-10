@@ -41,7 +41,7 @@ export function SessionIdentityStrip({ session }: { session: Session }) {
   return (
     <div>
       <div
-        className="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6"
+        className="grid grid-cols-2 gap-2 md:grid-cols-3 2xl:grid-cols-6"
         data-testid="session-identity-strip"
       >
         <IdentityCell

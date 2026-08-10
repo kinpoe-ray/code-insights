@@ -2,7 +2,7 @@
 // Base URL is relative in production (SPA served by the same server).
 // In Vite dev mode, the proxy forwards /api -> localhost:7890.
 
-import type { Project, Session, Message, Insight, DashboardStats, LLMConfig, ExportTemplate, FacetRow, AnalysisLanguage } from '@/lib/types';
+import type { Project, Session, SessionListSignal, Message, Insight, DashboardStats, AnalyticsOverview, AnalyticsRange, LLMConfig, ExportTemplate, FacetRow, AnalysisLanguage } from '@/lib/types';
 import { dashboardFetch } from '@/lib/dashboard-http';
 import { parseSSEStream } from '@/lib/sse';
 
@@ -38,16 +38,60 @@ export function fetchProject(id: string) {
 export function fetchSessions(params?: {
   projectId?: string;
   sourceTool?: string;
+  q?: string;
+  character?: string;
+  status?: string;
+  outcome?: string;
+  from?: string;
+  to?: string;
   limit?: number;
   offset?: number;
 }) {
   const q = new URLSearchParams();
   if (params?.projectId) q.set('projectId', params.projectId);
   if (params?.sourceTool) q.set('sourceTool', params.sourceTool);
+  if (params?.q) q.set('q', params.q);
+  if (params?.character) q.set('character', params.character);
+  if (params?.status) q.set('status', params.status);
+  if (params?.outcome) q.set('outcome', params.outcome);
+  if (params?.from) q.set('from', params.from);
+  if (params?.to) q.set('to', params.to);
   if (params?.limit !== undefined) q.set('limit', String(params.limit));
   if (params?.offset !== undefined) q.set('offset', String(params.offset));
   const qs = q.toString() ? `?${q.toString()}` : '';
-  return request<{ sessions: Session[] }>(`/sessions${qs}`);
+  return request<{ sessions: Session[]; total: number; limit: number; offset: number }>(`/sessions${qs}`);
+}
+
+export function fetchSessionIndex(params?: {
+  projectId?: string;
+  sourceTool?: string;
+  q?: string;
+  character?: string;
+  status?: string;
+  outcome?: string;
+  from?: string;
+  to?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const q = new URLSearchParams({ includeSignals: 'true' });
+  if (params?.projectId) q.set('projectId', params.projectId);
+  if (params?.sourceTool) q.set('sourceTool', params.sourceTool);
+  if (params?.q) q.set('q', params.q);
+  if (params?.character) q.set('character', params.character);
+  if (params?.status) q.set('status', params.status);
+  if (params?.outcome) q.set('outcome', params.outcome);
+  if (params?.from) q.set('from', params.from);
+  if (params?.to) q.set('to', params.to);
+  if (params?.limit !== undefined) q.set('limit', String(params.limit));
+  if (params?.offset !== undefined) q.set('offset', String(params.offset));
+  return request<{
+    sessions: Session[];
+    signals: SessionListSignal[];
+    total: number;
+    limit: number;
+    offset: number;
+  }>(`/sessions?${q.toString()}`);
 }
 
 export function fetchSession(id: string) {
@@ -86,13 +130,26 @@ export function fetchInsights(params?: {
   projectId?: string;
   sessionId?: string;
   type?: string;
+  sourceTool?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
 }) {
   const q = new URLSearchParams();
   if (params?.projectId) q.set('projectId', params.projectId);
   if (params?.sessionId) q.set('sessionId', params.sessionId);
   if (params?.type) q.set('type', params.type);
+  if (params?.sourceTool) q.set('sourceTool', params.sourceTool);
+  if (params?.q) q.set('q', params.q);
+  if (params?.limit !== undefined) q.set('limit', String(params.limit));
+  if (params?.offset !== undefined) q.set('offset', String(params.offset));
   const qs = q.toString() ? `?${q.toString()}` : '';
-  return request<{ insights: Insight[] }>(`/insights${qs}`);
+  return request<{
+    insights: Insight[];
+    total: number;
+    limit: number;
+    offset: number;
+  }>(`/insights${qs}`);
 }
 
 export function deleteInsight(id: string) {
@@ -134,6 +191,19 @@ export function fetchSearch(params: { q: string; limit?: number }) {
 
 export function fetchDashboardStats(range: '7d' | '30d' | '90d' | 'all' = '7d') {
   return request<{ range: string; stats: DashboardStats }>(`/analytics/dashboard?range=${range}`);
+}
+
+export function fetchAnalyticsOverview(
+  range: AnalyticsRange = '7d',
+  source = 'all',
+  timezoneOffset = new Date().getTimezoneOffset(),
+) {
+  const query = new URLSearchParams({
+    range,
+    timezoneOffset: String(timezoneOffset),
+  });
+  if (source !== 'all') query.set('source', source);
+  return request<AnalyticsOverview>(`/analytics/overview?${query.toString()}`);
 }
 
 // ── Analysis (Phase 4) ────────────────────────────────────────────────────────

@@ -2,8 +2,11 @@ import { defineMessages } from './types';
 
 export const insightsMessages = defineMessages({
   'insights.title': 'Insights',
-  'insights.count': ({ count, filtered }) =>
-    `${count} insight${count === 1 ? '' : 's'}${filtered === 1 ? ' matching filters' : ''}`,
+  'insights.count': ({ count, displayCount, filtered }) =>
+    `${displayCount ?? count} insight${Number(count) === 1 ? '' : 's'}${filtered === 1 ? ' matching filters' : ''}`,
+  'insights.loadedProgress': ({ loaded, total }) => `${loaded} of ${total} loaded`,
+  'insights.loadMore': 'Load more',
+  'insights.loadingMore': 'Loading…',
   'insights.pattern': 'Pattern',
   'insights.patternShowing': ({ count }) =>
     `Showing ${count} insight${count === 1 ? '' : 's'} in this recurring pattern`,
@@ -15,7 +18,7 @@ export const insightsMessages = defineMessages({
   'insights.view.session': 'By Session',
   'insights.type.summary': 'Summary',
   'insights.type.decision': 'Decision',
-  'insights.type.learning': 'Learning',
+  'insights.type.learning': 'Learnings',
   'insights.type.promptQuality': 'Prompt Quality',
   'insights.filterByType': 'Filter by insight type',
   'insights.failed': 'Failed to load insights',
@@ -42,6 +45,7 @@ export const insightsMessages = defineMessages({
   'insights.card.evidence': ({ evidence }) => `Evidence: ${evidence}`,
   'insights.card.viewSession': 'View session',
   'insights.patterns.title': 'Recurring Patterns',
+  'insights.patterns.loadedScope': 'within loaded results',
   'insights.patterns.lastSeen': ({ relative }) => `Last seen ${relative}`,
   'insights.outcome.success': 'Success',
   'insights.outcome.partial': 'Partial',
@@ -106,8 +110,11 @@ export const insightsMessages = defineMessages({
   'insights.pq.tips': 'Tips',
 }, {
   'insights.title': '洞察',
-  'insights.count': ({ count, filtered }) =>
-    `${count} 条洞察${filtered === 1 ? '符合筛选条件' : ''}`,
+  'insights.count': ({ count, displayCount, filtered }) =>
+    `${displayCount ?? count} 条洞察${filtered === 1 ? '符合筛选条件' : ''}`,
+  'insights.loadedProgress': ({ loaded, total }) => `已加载 ${loaded}/${total}`,
+  'insights.loadMore': '加载更多',
+  'insights.loadingMore': '正在加载…',
   'insights.pattern': '模式',
   'insights.patternShowing': ({ count }) => `正在显示该重复模式中的 ${count} 条洞察`,
   'insights.search': '搜索洞察…',
@@ -118,7 +125,7 @@ export const insightsMessages = defineMessages({
   'insights.view.session': '按会话',
   'insights.type.summary': '摘要',
   'insights.type.decision': '决策',
-  'insights.type.learning': '学习',
+  'insights.type.learning': '经验',
   'insights.type.promptQuality': '提示词质量',
   'insights.filterByType': '按洞察类型筛选',
   'insights.failed': '洞察加载失败',
@@ -145,6 +152,7 @@ export const insightsMessages = defineMessages({
   'insights.card.evidence': ({ evidence }) => `证据：${evidence}`,
   'insights.card.viewSession': '查看会话',
   'insights.patterns.title': '重复出现的模式',
+  'insights.patterns.loadedScope': '基于当前已加载结果',
   'insights.patterns.lastSeen': ({ relative }) => `最近出现于${relative}`,
   'insights.outcome.success': '成功',
   'insights.outcome.partial': '部分完成',

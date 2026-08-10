@@ -12,6 +12,7 @@ import { journalMessages } from './journal';
 import { analysisMessages } from './analysis';
 import { dispatchMessages } from './dispatch';
 import { chatMessages } from './chat';
+import { onboardingMessages } from './onboarding';
 import type { MessageDefinition } from './types';
 
 export const enUS = {
@@ -27,6 +28,7 @@ export const enUS = {
   ...analysisMessages.enUS,
   ...dispatchMessages.enUS,
   ...chatMessages.enUS,
+  ...onboardingMessages.enUS,
   ...sharedMessages.enUS,
 };
 
@@ -45,5 +47,6 @@ export const zhCN = {
   ...analysisMessages.zhCN,
   ...dispatchMessages.zhCN,
   ...chatMessages.zhCN,
+  ...onboardingMessages.zhCN,
   ...sharedMessages.zhCN,
 } satisfies { [K in MessageKey]: MessageDefinition };

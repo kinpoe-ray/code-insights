@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { useQueryClient, useQuery } from '@tanstack/react-query';
 import { useProjects } from '@/hooks/useProjects';
 import { useFacetAggregation, useReflectSnapshot, useReflectWeeks } from '@/hooks/useReflect';
@@ -22,6 +22,16 @@ import {
 } from 'lucide-react';
 import { LlmNudgeBanner } from '@/components/LlmNudgeBanner';
 import { useLocale } from '@/i18n/LocaleProvider';
+import { PageHeader, PageShell } from '@/components/layout/PageShell';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { buildProjectLabels } from '@/lib/project-labels';
+import { ContextualOnboarding } from '@/components/onboarding/ProductOnboarding';
 
 export default function PatternsPage() {
   const { t, formatNumber, formatRelativeDate } = useLocale();
@@ -32,9 +42,11 @@ export default function PatternsPage() {
   const [reflectResults, setReflectResults] = useState<Record<string, unknown> | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const signalsRef = useRef<HTMLDivElement | null>(null);
   const queryClient = useQueryClient();
 
   const { data: projects = [] } = useProjects();
+  const projectLabels = useMemo(() => buildProjectLabels(projects), [projects]);
 
   const { data: weeksData } = useReflectWeeks({ project: selectedProject });
   const weeks = weeksData?.weeks ?? [];
@@ -64,16 +76,16 @@ export default function PatternsPage() {
     };
   }, []);
 
-  // On initial load, jump to the most recent week that has a snapshot.
-  // This avoids showing the current week with no data when reflections exist for recent weeks.
+  // On initial load, jump to the most recent week with sessions. Fresh live
+  // evidence is a safer default than an older saved synthesis.
   // Only runs once (when weeks first loads) — tracked by whether currentWeek is still the computed default.
   const initialWeekRef = useRef<string>(getCurrentIsoWeek());
   useEffect(() => {
     if (!weeksData?.weeks.length) return;
     if (currentWeek !== initialWeekRef.current) return; // user already navigated
-    const mostRecentWithSnapshot = weeksData.weeks.find(w => w.hasSnapshot);
-    if (mostRecentWithSnapshot && mostRecentWithSnapshot.week !== currentWeek) {
-      handleWeekChange(mostRecentWithSnapshot.week);
+    const mostRecentWithSessions = weeksData.weeks.find(w => w.sessionCount > 0);
+    if (mostRecentWithSessions && mostRecentWithSessions.week !== currentWeek) {
+      handleWeekChange(mostRecentWithSessions.week);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   // Intentional: handleWeekChange is stable (useCallback with no deps) and initialWeekRef
@@ -168,9 +180,13 @@ export default function PatternsPage() {
     setTimeout(() => setCopiedKey(null), 2000);
   }, []);
 
+  const handleOnboardingAction = useCallback(() => {
+    signalsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, []);
+
   if (isLoading) {
     return (
-      <div className="space-y-6 p-4 lg:p-6">
+      <PageShell className="space-y-6">
         <Skeleton className="h-8 w-48" />
         <div className="grid gap-4 md:grid-cols-3">
           <Skeleton className="h-32" />
@@ -178,15 +194,15 @@ export default function PatternsPage() {
           <Skeleton className="h-32" />
         </div>
         <Skeleton className="h-64" />
-      </div>
+      </PageShell>
     );
   }
 
   if (isError) {
     return (
-      <div className="p-4 lg:p-6">
+      <PageShell>
         <ErrorCard message={t('patterns.loadError')} onRetry={refetch} />
-      </div>
+      </PageShell>
     );
   }
 
@@ -212,8 +228,15 @@ export default function PatternsPage() {
     ? aggregation.totalSessions / aggregation.totalAllSessions
     : 0;
 
-  const rulesSkillsResult = reflectResults?.['rules-skills'] as Record<string, unknown> | undefined;
-  const workingStyleResult = reflectResults?.['working-style'] as Record<string, unknown> | undefined;
+  const snapshot = snapshotData?.snapshot ?? null;
+  const isSnapshotStale = !!snapshot
+    && snapshot.sessionCount !== (aggregation?.totalSessions ?? 0);
+  // A stale synthesis may contain fluent but materially outdated conclusions.
+  // Keep the live deterministic aggregates visible, but do not present old
+  // working-style claims or copyable artifacts as if they describe this scope.
+  const trustedReflectResults = isSnapshotStale ? null : reflectResults;
+  const rulesSkillsResult = trustedReflectResults?.['rules-skills'] as Record<string, unknown> | undefined;
+  const workingStyleResult = trustedReflectResults?.['working-style'] as Record<string, unknown> | undefined;
 
   const tagline = workingStyleResult?.tagline as string | undefined;
   const taglineSubtitle = workingStyleResult?.tagline_subtitle as string | undefined;
@@ -230,7 +253,12 @@ export default function PatternsPage() {
     ? Object.values(aggregation.characterDistribution).reduce((s, v) => s + v, 0)
     : 0;
   const topCharacter = topCharacterEntry && totalCharacters > 0
-    ? { name: topCharacterEntry[0], percentage: Math.round((topCharacterEntry[1] / totalCharacters) * 100) }
+    ? {
+        name: topCharacterEntry[0],
+        percentage: Math.round((topCharacterEntry[1] / totalCharacters) * 100),
+        covered: totalCharacters,
+        total: aggregation?.totalSessions ?? 0,
+      }
     : undefined;
 
   const topFrictionEntry = frictionItems[0];
@@ -244,46 +272,59 @@ export default function PatternsPage() {
     : undefined;
 
   return (
-    <div className="space-y-4 p-4 lg:p-6">
-      <LlmNudgeBanner context="patterns" />
-      {/* Header */}
-      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">{t('patterns.title')}</h1>
-          <p className="text-sm text-muted-foreground">
-            {t('patterns.subtitle')}
-          </p>
-          {/* Snapshot metadata line — shown when a reflection exists for this week */}
-          {snapshotData?.snapshot && reflectResults && (
-            <p className="text-xs text-muted-foreground mt-1">
-              {t('patterns.generated', { date: formatRelativeDate(snapshotData.snapshot.generatedAt) })}
-              {' · '}
-              {t('patterns.sessionsAnalyzed', { count: formatNumber(snapshotData.snapshot.sessionCount) })}
-              {aggregation && aggregation.totalSessions > snapshotData.snapshot.sessionCount && (
-                <> — <span className="text-amber-500">{t('patterns.newSince', { count: formatNumber(aggregation.totalSessions - snapshotData.snapshot.sessionCount) })}</span></>
-              )}
-            </p>
-          )}
-        </div>
-        <div className="flex flex-col items-end gap-2">
+    <PageShell className="space-y-6">
+      <PageHeader
+        eyebrow={t('patterns.liveSignals')}
+        title={t('patterns.title')}
+        subtitle={t('patterns.subtitle')}
+        meta={aggregation && (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              {t('patterns.liveScope', {
+                analyzed: formatNumber(aggregation.totalSessions),
+                total: formatNumber(aggregation.totalAllSessions),
+              })}
+            </span>
+            {snapshot && (
+              <Badge
+                variant="secondary"
+                className={isSnapshotStale
+                  ? 'border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300'
+                  : 'border-emerald-500/20 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'}
+              >
+                {isSnapshotStale
+                  ? t('patterns.synthesisStale')
+                  : t('patterns.synthesisCurrent')}
+              </Badge>
+            )}
+          </div>
+        )}
+        actions={(
+          <div className="flex w-full flex-col items-stretch gap-2 sm:w-auto sm:items-end">
           {/* Week selector */}
           <WeekSelector
             currentWeek={currentWeek}
             weeks={weeks}
             onWeekChange={handleWeekChange}
           />
-          <div className="flex items-center gap-2 flex-wrap justify-end">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             {projects.length > 1 && (
-              <select
-                value={selectedProject || ''}
-                onChange={(e) => handleProjectChange(e.target.value || undefined)}
-                className="h-8 rounded-md border bg-background px-2 text-xs"
+              <Select
+                value={selectedProject ?? 'all'}
+                onValueChange={(value) => handleProjectChange(value === 'all' ? undefined : value)}
               >
-                <option value="">{t('patterns.allProjects')}</option>
-                {projects.map(p => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
-                ))}
-              </select>
+                <SelectTrigger className="h-9 w-[220px] max-w-full bg-elevated text-xs">
+                  <SelectValue placeholder={t('patterns.allProjects')} />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">{t('patterns.allProjects')}</SelectItem>
+                  {projects.map((project) => (
+                    <SelectItem key={project.id} value={project.id}>
+                      {projectLabels.get(project.id) ?? project.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             )}
             <Button
               onClick={handleGenerate}
@@ -299,8 +340,31 @@ export default function PatternsPage() {
               )}
             </Button>
           </div>
-        </div>
-      </div>
+          </div>
+        )}
+      />
+
+      <ContextualOnboarding module="patterns" onAction={handleOnboardingAction} />
+
+      <LlmNudgeBanner context="patterns" />
+
+      {isSnapshotStale && snapshot && aggregation && (
+        <Alert className="border-amber-500/30 bg-amber-500/[0.07]">
+          <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-300" />
+          <AlertDescription>
+            <p className="text-sm font-medium text-foreground">
+              {t('patterns.staleTitle')}
+            </p>
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              {t('patterns.staleDescription', {
+                date: formatRelativeDate(snapshot.generatedAt),
+                snapshot: formatNumber(snapshot.sessionCount),
+                current: formatNumber(aggregation.totalSessions),
+              })}
+            </p>
+          </AlertDescription>
+        </Alert>
+      )}
 
       {/* Threshold gate */}
       {!hasEnoughFacets && aggregation && (
@@ -378,7 +442,7 @@ export default function PatternsPage() {
         totalSessions={aggregation?.totalSessions ?? 0}
         totalAllSessions={aggregation?.totalAllSessions ?? 0}
         outcomeDistribution={aggregation?.outcomeDistribution ?? {}}
-        hasGenerated={!!reflectResults}
+        hasGenerated={!!trustedReflectResults}
         characterDistribution={aggregation?.characterDistribution}
         streak={aggregation?.streak}
         rateLimitCount={aggregation?.rateLimitInfo?.count}
@@ -425,7 +489,7 @@ export default function PatternsPage() {
           )}
 
           {/* Friction + Patterns — 50/50 grid */}
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div ref={signalsRef} className="grid scroll-mt-6 gap-4 lg:grid-cols-2">
             {/* Friction Points — red left accent */}
             <Card className="border-l-2 border-red-400 dark:border-red-500">
               <CardHeader>
@@ -587,6 +651,6 @@ export default function PatternsPage() {
           )}
         </TabsContent>
       </Tabs>
-    </div>
+    </PageShell>
   );
 }

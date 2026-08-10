@@ -9,6 +9,7 @@ import { useLocale } from '@/i18n/LocaleProvider';
 
 interface RecurringPatternsSectionProps {
   insights: Insight[];
+  partial?: boolean;
 }
 
 interface PatternGroup {
@@ -21,7 +22,7 @@ interface PatternGroup {
   insightIds: Set<string>;
 }
 
-export function RecurringPatternsSection({ insights }: RecurringPatternsSectionProps) {
+export function RecurringPatternsSection({ insights, partial = false }: RecurringPatternsSectionProps) {
   const { t, formatRelativeDate } = useLocale();
   const patterns = useMemo((): PatternGroup[] => {
     const insightMap = new Map<string, Insight>();
@@ -79,6 +80,11 @@ export function RecurringPatternsSection({ insights }: RecurringPatternsSectionP
         <Badge variant="secondary" className="text-xs">
           {patterns.length}
         </Badge>
+        {partial && (
+          <span className="text-xs text-muted-foreground">
+            {t('insights.patterns.loadedScope')}
+          </span>
+        )}
       </div>
       <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
         {patterns.map((pattern) => (

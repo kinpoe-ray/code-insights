@@ -21,12 +21,14 @@ import type { Session } from '@/lib/types';
 import { useLocale } from '@/i18n/LocaleProvider';
 
 interface BulkAnalyzeButtonProps {
-  sessions: Session[];
+  sessions?: Session[];
+  sessionIds?: string[];
   onComplete?: () => void;
 }
 
 export function BulkAnalyzeButton({
   sessions,
+  sessionIds: providedSessionIds,
   onComplete,
 }: BulkAnalyzeButtonProps) {
   const { t } = useLocale();
@@ -34,7 +36,7 @@ export function BulkAnalyzeButton({
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const { data: llmConfig } = useLlmConfig();
-  const sessionIds = sessions.map((session) => session.id);
+  const sessionIds = providedSessionIds ?? sessions?.map((session) => session.id) ?? [];
   const {
     receipt,
     progress,
@@ -47,7 +49,7 @@ export function BulkAnalyzeButton({
   const configured = !!(llmConfig?.provider && llmConfig?.model);
 
   const handleAnalyze = async () => {
-    if (!configured || sessions.length === 0 || submitting) return;
+    if (!configured || sessionIds.length === 0 || submitting) return;
 
     setSubmitting(true);
     setSubmitError(null);
@@ -83,18 +85,18 @@ export function BulkAnalyzeButton({
         <Button
           variant="outline"
           className="gap-2"
-          disabled={sessions.length === 0}
+          disabled={sessionIds.length === 0}
           onClick={() => setOpen(true)}
         >
           <Sparkles className="h-4 w-4" />
-          {t('analysis.bulk.trigger', { count: sessions.length })}
+          {t('analysis.bulk.trigger', { count: sessionIds.length })}
         </Button>
       </DialogTrigger>
       <DialogContent>
         <DialogHeader>
           <DialogTitle>{t('analysis.bulk.title')}</DialogTitle>
           <DialogDescription>
-            {t('analysis.bulk.description', { count: sessions.length })}
+            {t('analysis.bulk.description', { count: sessionIds.length })}
           </DialogDescription>
         </DialogHeader>
 

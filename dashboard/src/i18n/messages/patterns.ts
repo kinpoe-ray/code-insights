@@ -3,6 +3,13 @@ import { defineMessages } from './types';
 export const patternsMessages = defineMessages({
   'patterns.title': 'Patterns',
   'patterns.subtitle': 'Cross-session analysis — friction, wins, and working style',
+  'patterns.liveSignals': 'Live signals',
+  'patterns.liveScope': ({ analyzed, total }) => `${analyzed}/${total} sessions have current facet data`,
+  'patterns.synthesisCurrent': 'Synthesis current',
+  'patterns.synthesisStale': 'Synthesis out of date',
+  'patterns.staleTitle': 'Saved synthesis no longer matches the live scope',
+  'patterns.staleDescription': ({ date, snapshot, current }) =>
+    `The synthesis generated ${date} covered ${snapshot} sessions; the live view now contains ${current}. Working-style claims and copyable artifacts are hidden until you regenerate.`,
   'patterns.generated': ({ date }) => `Generated ${date}`,
   'patterns.sessionsAnalyzed': ({ count }) => `${count} sessions analyzed`,
   'patterns.newSince': ({ count }) => `${count} new since`,
@@ -93,9 +100,18 @@ export const patternsMessages = defineMessages({
   'patterns.character.refactor': 'Refactor',
   'patterns.character.learning': 'Learning',
   'patterns.character.quick_task': 'Quick Task',
+  'patterns.characterCoverageShort': ({ covered, total }) => `mode labels ${covered}/${total}`,
+  'patterns.characterShareCovered': ({ character, percentage }) => `${character} · ${percentage}% of labeled sessions`,
 }, {
   'patterns.title': '模式',
   'patterns.subtitle': '跨会话分析——阻力、有效做法与工作风格',
+  'patterns.liveSignals': '实时信号',
+  'patterns.liveScope': ({ analyzed, total }) => `当前 ${analyzed}/${total} 个会话已有切面数据`,
+  'patterns.synthesisCurrent': '综合结论为最新',
+  'patterns.synthesisStale': '综合结论已过期',
+  'patterns.staleTitle': '已保存的综合结论与当前数据范围不一致',
+  'patterns.staleDescription': ({ date, snapshot, current }) =>
+    `${date}生成的综合结论覆盖 ${snapshot} 个会话；当前实时视图已有 ${current} 个。重新生成前，工作风格结论和可复制产物将暂时隐藏。`,
   'patterns.generated': ({ date }) => `生成于${date}`,
   'patterns.sessionsAnalyzed': ({ count }) => `已分析 ${count} 个会话`,
   'patterns.newSince': ({ count }) => `之后新增 ${count} 个`,
@@ -186,4 +202,6 @@ export const patternsMessages = defineMessages({
   'patterns.character.refactor': '重构',
   'patterns.character.learning': '学习',
   'patterns.character.quick_task': '快速任务',
+  'patterns.characterCoverageShort': ({ covered, total }) => `会话模式覆盖 ${covered}/${total}`,
+  'patterns.characterShareCovered': ({ character, percentage }) => `${character} · 已分类中 ${percentage}%`,
 });

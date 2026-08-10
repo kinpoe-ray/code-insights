@@ -110,7 +110,7 @@ function RouteLoadingFallback() {
   // covers the brief interval while a route chunk is fetched.
   return (
     <div
-      className="flex min-h-[calc(100vh-3.5rem)] items-center justify-center px-3 text-sm text-muted-foreground"
+      className="flex min-h-[calc(100dvh-4rem)] items-center justify-center px-3 text-sm text-muted-foreground"
       role="status"
       aria-live="polite"
       aria-busy="true"

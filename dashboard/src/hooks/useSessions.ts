@@ -1,9 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchSessions, fetchSession, patchSession, deleteSession, fetchDeletedSessionCount } from '@/lib/api';
+import { fetchSessions, fetchSessionIndex, fetchSession, patchSession, deleteSession, fetchDeletedSessionCount } from '@/lib/api';
 
 interface SessionFilters {
   projectId?: string;
   sourceTool?: string;
+  q?: string;
+  character?: string;
+  status?: string;
+  outcome?: string;
+  from?: string;
+  to?: string;
   limit?: number;
   offset?: number;
 }
@@ -12,6 +18,14 @@ export function useSessions(filters?: SessionFilters) {
   return useQuery({
     queryKey: ['sessions', filters],
     queryFn: () => fetchSessions(filters).then((r) => r.sessions),
+    refetchInterval: 60_000,
+  });
+}
+
+export function useSessionIndex(filters?: SessionFilters) {
+  return useQuery({
+    queryKey: ['sessions', 'index', filters],
+    queryFn: () => fetchSessionIndex(filters),
     refetchInterval: 60_000,
   });
 }

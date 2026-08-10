@@ -68,6 +68,14 @@ export interface Session {
   slash_commands: string | null; // JSON-encoded string[] — decode with parseJsonField<string[]>(x, [])
 }
 
+export interface SessionListSignal {
+  session_id: string;
+  insight_counts: Partial<Record<InsightType, number>>;
+  outcome: string | null;
+  prompt_quality_score: number | null;
+  is_analyzed: boolean;
+}
+
 export type InsightType = 'summary' | 'decision' | 'learning' | 'technique' | 'prompt_quality';
 export type InsightScope = 'session' | 'project' | 'overall';
 
@@ -159,6 +167,70 @@ export interface DashboardStats {
   cache_creation_tokens: number | null;
   cache_read_tokens: number | null;
   estimated_cost_usd: number | null;
+}
+
+export type AnalyticsRange = '7d' | '30d' | '90d' | 'all';
+
+export interface AnalyticsProject {
+  project_id: string;
+  project_name: string;
+  project_path: string;
+  session_count: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  estimated_cost_usd: number;
+  usage_covered_sessions: number;
+  summary_count: number;
+  decision_count: number;
+  learning_count: number;
+  prompt_quality_count: number;
+}
+
+/**
+ * Grain-safe analytics response. All counts are scoped by session start time;
+ * insight counts are attributed to their parent session rather than backfill time.
+ */
+export interface AnalyticsOverview {
+  range: AnalyticsRange;
+  source: string;
+  generated_at: string;
+  timezone_offset: number;
+  activity_grain: 'day' | 'month';
+  window_start: string | null;
+  window_end: string;
+  summary: {
+    session_count: number;
+    insight_count: number;
+    active_projects: number;
+    total_messages: number;
+    total_tool_calls: number;
+    total_duration_min: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+    estimated_cost_usd: number;
+  };
+  coverage: {
+    analyzed_sessions: number;
+    usage_covered_sessions: number;
+    model_covered_sessions: number;
+    latest_session_at: string | null;
+    latest_sync_at: string | null;
+    latest_analysis_at: string | null;
+  };
+  insight_types: {
+    summary: number;
+    decision: number;
+    learning: number;
+    prompt_quality: number;
+  };
+  daily: DailyStats[];
+  projects: AnalyticsProject[];
+  models: Array<{ model: string; session_count: number }>;
+  unanalyzed_session_ids: string[];
 }
 
 /**
