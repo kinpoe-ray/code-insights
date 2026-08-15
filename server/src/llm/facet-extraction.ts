@@ -3,18 +3,18 @@
 
 import { jsonrepair } from 'jsonrepair';
 import { createLLMClient, isLLMConfigured, loadLLMConfig } from './client.js';
-import { calculateAnalysisCost } from './analysis-pricing.js';
-import { saveAnalysisUsage } from './analysis-usage-db.js';
-import type { SQLiteMessageRow, AnalysisResponse } from './prompt-types.js';
-import { formatMessagesForAnalysis } from './message-format.js';
-import { extractJsonPayload, validateAnalysisFacets } from './response-parsers.js';
-import { SHARED_ANALYST_SYSTEM_PROMPT, buildCacheableConversationBlock, buildFacetOnlyInstructions } from './prompts.js';
+import { calculateAnalysisCost } from '@code-insights/cli/analysis/analysis-pricing';
+import { saveAnalysisUsage } from '@code-insights/cli/analysis/analysis-usage-db';
+import type { SQLiteMessageRow, AnalysisResponse } from '@code-insights/cli/analysis/prompt-types';
+import { formatMessagesForAnalysis } from '@code-insights/cli/analysis/message-format';
+import { extractJsonPayload, validateAnalysisFacets } from '@code-insights/cli/analysis/response-parsers';
+import { SHARED_ANALYST_SYSTEM_PROMPT, buildCacheableConversationBlock, buildFacetOnlyInstructions } from '@code-insights/cli/analysis/prompts';
 import { prepareBoundedConversationRequest } from './types.js';
 import {
   ANALYSIS_VERSION,
   saveFacetsToDb,
   type SessionData,
-} from './analysis-db.js';
+} from '@code-insights/cli/analysis/analysis-db';
 import { buildSessionMeta } from './analysis-internal.js';
 import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
 

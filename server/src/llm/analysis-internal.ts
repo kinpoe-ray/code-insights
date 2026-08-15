@@ -1,8 +1,8 @@
 // Internal helpers and shared types for analysis modules.
 // Not part of the public API — consumers import from analysis.ts or a specific analysis module.
 
-import type { SessionMetadata } from './prompt-types.js';
-import type { SessionData, InsightRow } from './analysis-db.js';
+import type { SessionMetadata } from '@code-insights/cli/analysis/prompt-types';
+import type { SessionData, InsightRow } from '@code-insights/cli/analysis/analysis-db';
 import { safeParseJson } from '../utils.js';
 
 // ─── Shared types ─────────────────────────────────────────────────────────────

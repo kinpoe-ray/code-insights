@@ -124,6 +124,29 @@ function seedTestSession(db: Database.Database) {
   ).run();
 }
 
+// The two-pass pipeline freezes its input from SQLite (point-in-time safety),
+// so tests must seed the message rows they analyze.
+function seedMessages(db: Database.Database, messages: ReturnType<typeof makeMessage>[]) {
+  const insert = db.prepare(
+    `INSERT INTO messages (id, session_id, type, content, thinking, tool_calls, tool_results, usage, timestamp, parent_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const message of messages) {
+    insert.run(
+      message.id,
+      message.session_id,
+      message.type,
+      message.content,
+      message.thinking,
+      message.tool_calls,
+      message.tool_results,
+      message.usage,
+      message.timestamp,
+      message.parent_id,
+    );
+  }
+}
+
 // Canonical valid analysis JSON for happy-path tests
 const VALID_ANALYSIS_RESPONSE = {
   summary: { title: 'Test Summary', content: 'A summary.', bullets: ['point 1'] },
@@ -274,6 +297,7 @@ describe('configured analysis language', () => {
     mockChat
       .mockResolvedValueOnce({ content: JSON.stringify(VALID_ANALYSIS_RESPONSE), usage: null })
       .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null })
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null })
       .mockResolvedValueOnce({
         content: JSON.stringify(VALID_ANALYSIS_RESPONSE.facets),
         usage: null,
@@ -283,14 +307,18 @@ describe('configured analysis language', () => {
       makeMessage({ id: 'assistant-1', type: 'assistant', content: 'Reply.' }),
       makeMessage({ id: 'user-2', type: 'user', content: 'Second request.' }),
     ];
+    seedMessages(testDb, messages);
 
     await analyzeSession(makeSession(), messages);
     await analyzePromptQuality(makeSession(), messages);
     await extractFacetsOnly(makeSession(), messages);
 
-    expect(mockChat).toHaveBeenCalledTimes(3);
+    // analyzeSession now runs the full two-pass pipeline (session + PQ), so
+    // the three calls above produce four provider requests in total.
+    expect(mockChat).toHaveBeenCalledTimes(4);
     expect(mockChat.mock.calls.map(([request]) => JSON.stringify(request)))
       .toEqual([
+        expect.stringContaining('Simplified Chinese (zh-CN)'),
         expect.stringContaining('Simplified Chinese (zh-CN)'),
         expect.stringContaining('Simplified Chinese (zh-CN)'),
         expect.stringContaining('Simplified Chinese (zh-CN)'),
@@ -317,13 +345,15 @@ describe('analyzeSession', () => {
   });
 
   it('parse failure — non-JSON response', async () => {
+    const messages = [makeMessage()];
+    seedMessages(testDb, messages);
     mockChat.mockResolvedValue({ content: 'not JSON at all', usage: null });
-    const result = await analyzeSession(makeSession(), [makeMessage()]);
+    const result = await analyzeSession(makeSession(), messages);
     expect(result.success).toBe(false);
     expect(result.error_type).toBe('no_json_found');
   });
 
-  it('characterization: a required chunk failure preserves the previous complete insight set', async () => {
+  it('characterization: a failed prompt-quality pass preserves the previous complete insight set', async () => {
     testDb.prepare(`
       INSERT INTO insights (
         id, session_id, project_id, project_name, type, title, content,
@@ -336,6 +366,8 @@ describe('analyzeSession', () => {
         '2025-06-15T11:00:00Z', 'session', '3.0.0'
       )
     `).run();
+    const messages = [makeMessage(), makeMessage({ id: 'msg-2' })];
+    seedMessages(testDb, messages);
     mockChat
       .mockResolvedValueOnce({
         content: JSON.stringify(VALID_ANALYSIS_RESPONSE),
@@ -346,24 +378,28 @@ describe('analyzeSession', () => {
         usage: { inputTokens: 200, outputTokens: 40 },
       });
 
-    const result = await analyzeSession(makeSession(), [
-      makeMessage({ id: 'large-a', content: 'A'.repeat(200_000) }),
-      makeMessage({ id: 'large-b', content: 'B'.repeat(200_000) }),
-    ]);
+    const result = await analyzeSession(makeSession(), messages);
 
     expect(result.success).toBe(false);
-    expect(result.error_type).toBe('partial_failure');
+    expect(result.error_type).toBe('no_json_found');
     const rows = testDb.prepare(
       'SELECT id, title FROM insights WHERE session_id = ? ORDER BY id',
     ).all('sess-test');
     expect(rows).toEqual([
       { id: 'old-summary', title: 'Previous complete analysis' },
     ]);
+    // Two-pass publishes session + PQ together or not at all: a failed pass 2
+    // must not leave usage rows (or freshness credit) behind either.
+    expect(testDb.prepare('SELECT COUNT(*) AS n FROM analysis_usage').get())
+      .toEqual({ n: 0 });
+    expect(testDb.prepare('SELECT COUNT(*) AS n FROM session_facets').get())
+      .toEqual({ n: 0 });
   });
 
   it('AbortError propagation', async () => {
     const abortErr = new Error('Aborted');
     abortErr.name = 'AbortError';
+    seedMessages(testDb, [makeMessage()]);
     mockChat.mockRejectedValue(abortErr);
     const result = await analyzeSession(makeSession(), [makeMessage()]);
     expect(result.success).toBe(false);
@@ -372,29 +408,40 @@ describe('analyzeSession', () => {
 
   it('API error propagation', async () => {
     const secret = 'provider-error-secret';
+    seedMessages(testDb, [makeMessage()]);
     mockChat.mockRejectedValue(new Error(`Rate limit: ${secret}`));
     const result = await analyzeSession(makeSession(), [makeMessage()]);
     expect(result.success).toBe(false);
     expect(result.error_type).toBe('api_error');
-    expect(result.error).toBe('The analysis provider request failed.');
+    // The engine sanitizes provider failures; the pass adds its own prefix.
+    expect(result.error).toContain('The analysis provider request failed.');
     expect(JSON.stringify(result)).not.toContain(secret);
   });
 
-  it('happy path — valid JSON response writes insights and facets', async () => {
-    mockChat.mockResolvedValue({
-      content: JSON.stringify(VALID_ANALYSIS_RESPONSE),
-      usage: { inputTokens: 100, outputTokens: 50 },
-    });
+  it('happy path — valid JSON response writes insights, facets, and revision-stamped usage', async () => {
+    const messages = [makeMessage()];
+    seedMessages(testDb, messages);
+    mockChat
+      .mockResolvedValueOnce({
+        content: JSON.stringify(VALID_ANALYSIS_RESPONSE),
+        usage: { inputTokens: 100, outputTokens: 50 },
+      })
+      .mockResolvedValueOnce({
+        content: JSON.stringify(VALID_PQ_RESPONSE),
+        usage: { inputTokens: 30, outputTokens: 15 },
+      });
 
-    const result = await analyzeSession(makeSession(), [makeMessage()]);
+    const result = await analyzeSession(makeSession(), messages);
     expect(result.success).toBe(true);
-    // summary + 1 decision (85 >= 70) + 1 learning (80 >= 70) = 3
-    expect(result.insights.length).toBe(3);
-    expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 50 });
+    // summary + 1 decision (85 >= 70) + 1 learning (80 >= 70) + 1 prompt_quality = 4
+    expect(result.insights.length).toBe(4);
+    expect(result.insights.map(insight => insight.type))
+      .toEqual(['summary', 'decision', 'learning', 'prompt_quality']);
+    expect(result.usage).toEqual({ inputTokens: 130, outputTokens: 65 });
 
     // Verify insights written to DB
     const dbInsights = testDb.prepare('SELECT * FROM insights WHERE session_id = ?').all('sess-test');
-    expect(dbInsights.length).toBe(3);
+    expect(dbInsights.length).toBe(4);
 
     // Verify facets written to DB
     const facetRow = testDb.prepare('SELECT * FROM session_facets WHERE session_id = ?').get('sess-test') as Record<string, unknown> | undefined;
@@ -403,6 +450,20 @@ describe('analyzeSession', () => {
     expect(facetRow!.workflow_pattern).toBe('plan-then-implement');
     expect(facetRow!.had_course_correction).toBe(0);
     expect(facetRow!.iteration_count).toBe(2);
+
+    // Regression guard for the duplicate-paid-reanalysis bug: dashboard runs
+    // must stamp usage rows with input/pipeline revisions so freshness checks
+    // (isAlreadyAnalyzed) count them instead of re-running the pipeline.
+    const usageRows = testDb.prepare(
+      `SELECT analysis_type, input_revision, pipeline_revision FROM analysis_usage
+       WHERE session_id = ? ORDER BY analysis_type`,
+    ).all('sess-test');
+    expect(usageRows).toEqual([
+      { analysis_type: 'prompt_quality', input_revision: expect.any(String), pipeline_revision: expect.any(String) },
+      { analysis_type: 'session', input_revision: expect.any(String), pipeline_revision: expect.any(String) },
+    ]);
+    expect(usageRows[0].input_revision).toMatch(/^sha256:/);
+    expect(usageRows[0].pipeline_revision).toContain('two-pass-v5/lang-zh-CN');
   });
 
   it('confidence filtering — low-confidence decisions and learnings dropped', async () => {
@@ -442,14 +503,18 @@ describe('analyzeSession', () => {
       ],
     };
 
-    mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
-    const result = await analyzeSession(makeSession(), [makeMessage()]);
+    mockChat
+      .mockResolvedValueOnce({ content: JSON.stringify(response), usage: null })
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null });
+    const messages = [makeMessage()];
+    seedMessages(testDb, messages);
+    const result = await analyzeSession(makeSession(), messages);
     expect(result.success).toBe(true);
 
     const types = result.insights.map(i => i.type);
-    // 1 summary + 1 decision (85) + 1 learning (80) = 3 (50 and 60 filtered)
-    expect(types).toEqual(['summary', 'decision', 'learning']);
-    expect(result.insights.length).toBe(3);
+    // 1 summary + 1 decision (85) + 1 learning (80) + PQ = 4 (50 and 60 filtered)
+    expect(types).toEqual(['summary', 'decision', 'learning', 'prompt_quality']);
+    expect(result.insights.length).toBe(4);
   });
 
   it('persists only decisions and learnings grounded in the analyzed conversation', async () => {
@@ -492,7 +557,10 @@ describe('analyzeSession', () => {
       makeMessage({ id: 'user-1', type: 'user', content: 'Please verify persistence.' }),
       makeMessage({ id: 'assistant-1', type: 'assistant', content: 'I will verify it.' }),
     ];
-    mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
+    seedMessages(testDb, messages);
+    mockChat
+      .mockResolvedValueOnce({ content: JSON.stringify(response), usage: null })
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null });
 
     const result = await analyzeSession(makeSession(), messages);
 
@@ -501,6 +569,7 @@ describe('analyzeSession', () => {
       'Test Summary',
       'Grounded decision',
       'Grounded learning',
+      expect.stringContaining('75'),
     ]);
     const persisted = testDb.prepare(
       "SELECT type, title, metadata FROM insights WHERE session_id = ? AND type IN ('decision', 'learning') ORDER BY type",
@@ -534,8 +603,12 @@ describe('analyzeSession', () => {
       },
     };
 
-    mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
-    await analyzeSession(makeSession(), [makeMessage()]);
+    mockChat
+      .mockResolvedValueOnce({ content: JSON.stringify(response), usage: null })
+      .mockResolvedValueOnce({ content: JSON.stringify(VALID_PQ_RESPONSE), usage: null });
+    const messages = [makeMessage()];
+    seedMessages(testDb, messages);
+    await analyzeSession(makeSession(), messages);
 
     const facetRow = testDb.prepare('SELECT effective_patterns FROM session_facets WHERE session_id = ?').get('sess-test') as { effective_patterns: string } | undefined;
     expect(facetRow).toBeTruthy();
@@ -612,6 +685,7 @@ describe('analyzePromptQuality', () => {
   });
 
   it('happy path — valid PQ response creates prompt_quality insight', async () => {
+    seedMessages(testDb, twoUserMessages);
     mockChat.mockResolvedValue({
       content: JSON.stringify(VALID_PQ_RESPONSE),
       usage: { inputTokens: 200, outputTokens: 80 },
@@ -635,6 +709,31 @@ describe('analyzePromptQuality', () => {
       "SELECT * FROM insights WHERE session_id = ? AND type = 'prompt_quality'",
     ).get('sess-test');
     expect(dbRow).toBeTruthy();
+
+    // PQ-only reruns publish through the same machinery: the usage row must
+    // carry input/pipeline revisions like a queue-run pass 2.
+    const usageRow = testDb.prepare(
+      `SELECT analysis_type, input_revision, pipeline_revision FROM analysis_usage
+       WHERE session_id = ?`,
+    ).get('sess-test') as { analysis_type: string; input_revision: string; pipeline_revision: string };
+    expect(usageRow.analysis_type).toBe('prompt_quality');
+    expect(usageRow.input_revision).toMatch(/^sha256:/);
+    expect(usageRow.pipeline_revision).toContain('two-pass-v5/lang-zh-CN');
+  });
+
+  it('retries malformed prompt-quality output once before failing (two-pass parity)', async () => {
+    seedMessages(testDb, twoUserMessages);
+    mockChat.mockResolvedValue({ content: 'not-json', usage: null });
+
+    const result = await analyzePromptQuality(makeSession(), twoUserMessages);
+
+    // The legacy server path returned after the first parse failure; the
+    // two-pass pass corrects once before giving up.
+    expect(mockChat).toHaveBeenCalledTimes(2);
+    expect(result.success).toBe(false);
+    expect(result.error_type).toBe('no_json_found');
+    expect(testDb.prepare('SELECT COUNT(*) AS n FROM analysis_usage').get())
+      .toEqual({ n: 0 });
   });
 
   it('persists only prompt-quality items that reference a real user turn', async () => {
@@ -666,6 +765,7 @@ describe('analyzePromptQuality', () => {
       ],
     };
     mockChat.mockResolvedValue({ content: JSON.stringify(response), usage: null });
+    seedMessages(testDb, twoUserMessages);
 
     const result = await analyzePromptQuality(makeSession(), twoUserMessages);
 
@@ -700,12 +800,14 @@ describe('analyzePromptQuality', () => {
       };
     });
     const expandingContent = 'EXPAND_ME'.repeat(2_500);
-
-    const result = await analyzePromptQuality(makeSession(), [
+    const messages = [
       makeMessage({ id: 'pq-large-1', type: 'user', content: expandingContent }),
       makeMessage({ id: 'pq-large-2', type: 'assistant', content: 'Response.' }),
       makeMessage({ id: 'pq-large-3', type: 'user', content: expandingContent }),
-    ]);
+    ];
+    seedMessages(testDb, messages);
+
+    const result = await analyzePromptQuality(makeSession(), messages);
 
     expect(result.success).toBe(true);
     expect(estimatedFinalRequestTokens(finalRequest)).toBeLessThanOrEqual(budget);

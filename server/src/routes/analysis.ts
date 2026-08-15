@@ -5,8 +5,8 @@ import { applyGeneratedTitle } from '@code-insights/cli/analysis/analysis-db';
 import { parseIntParam } from '../utils.js';
 import { loadLLMConfig } from '../llm/client.js';
 import { analyzeSession, analyzePromptQuality, findRecurringInsights } from '../llm/analysis.js';
-import { getSessionAnalysisUsage } from '../llm/analysis-usage-db.js';
-import { calculateAnalysisCost } from '../llm/analysis-pricing.js';
+import { getSessionAnalysisUsage } from '@code-insights/cli/analysis/analysis-usage-db';
+import { calculateAnalysisCost } from '@code-insights/cli/analysis/analysis-pricing';
 import { llmBusyPayload, runWithLlmLock } from '../llm/llm-lock.js';
 import {
   loadSessionForAnalysis,

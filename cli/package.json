@@ -37,6 +37,7 @@
     "./analysis/analysis-pricing": "./dist/analysis/analysis-pricing.js",
     "./analysis/llm-client": "./dist/analysis/llm-client.js",
     "./analysis/provider-runner": "./dist/analysis/provider-runner.js",
+    "./analysis/two-pass-analysis": "./dist/analysis/two-pass-analysis.js",
     "./privacy/outbound-credential-guard": "./dist/privacy/outbound-credential-guard.js",
     "./analysis/schemas/session-analysis.json": "./dist/analysis/schemas/session-analysis.json",
     "./analysis/schemas/prompt-quality.json": "./dist/analysis/schemas/prompt-quality.json"

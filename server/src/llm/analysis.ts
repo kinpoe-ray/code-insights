@@ -1,29 +1,31 @@
-// Server persistence adapter for the shared CLI-core AnalysisEngine.
-// Prompt construction, budgeting, chunking, merging, usage and error
-// normalization live in cli/src/analysis/analysis-engine.ts.
+// Server adapter over the shared CLI-core two-pass pipeline.
+// freeze → prepare both passes → atomic publish live in
+// cli/src/analysis/two-pass-analysis.ts. This module maps that contract onto
+// the AnalysisResult shape the dashboard routes consume. Every analysis
+// triggered here produces revision-stamped usage rows, so freshness checks
+// (isAlreadyAnalyzed in cli/src/commands/insights.ts) count dashboard runs
+// exactly like queue runs instead of re-analyzing — and re-paying for — them.
 
-import { createAnalysisEngine } from '@code-insights/cli/analysis/analysis-engine';
-import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
-import { sanitizeSessionMessageReferences } from '@code-insights/cli/analysis/message-references';
 import { createLLMClient, isLLMConfigured } from './client.js';
-import type { SQLiteMessageRow } from './prompt-types.js';
+import { loadConfiguredAnalysisLanguage } from '@code-insights/cli/analysis/analysis-language';
+import { classifyStoredUserMessage } from '@code-insights/cli/analysis/message-format';
 import {
-  ANALYSIS_VERSION,
-  convertToInsightRows,
-  saveInsightsToDb,
-  deleteSessionInsights,
-  saveFacetsToDb,
-  type InsightRow,
-  type SessionData,
-} from './analysis-db.js';
+  AnalysisPassError,
+  freezeSessionAnalysisInput,
+  preparePromptQualityPass,
+  prepareSessionAnalysisPass,
+  publishPreparedPromptQualityPass,
+  publishPreparedTwoPass,
+  type PreparedPassUsage,
+} from '@code-insights/cli/analysis/two-pass-analysis';
+import type { InsightRow, SessionData } from '@code-insights/cli/analysis/analysis-db';
+import type { SQLiteMessageRow } from '@code-insights/cli/analysis/prompt-types';
 import type {
   AnalysisProgress,
   AnalysisOptions,
   AnalysisResult,
 } from './analysis-internal.js';
-import { saveAnalysisUsage } from './analysis-usage-db.js';
 
-export { analyzePromptQuality } from './prompt-quality-analysis.js';
 export { findRecurringInsights } from './recurring-insights.js';
 export type { RecurringInsightGroup, RecurringInsightResult } from './recurring-insights.js';
 export { extractFacetsOnly } from './facet-extraction.js';
@@ -31,23 +33,59 @@ export { extractFacetsOnly } from './facet-extraction.js';
 export type { AnalysisProgress, AnalysisOptions, AnalysisResult };
 export type { InsightRow, SessionData };
 
-function legacyErrorType(
-  error: {
-    kind: 'empty' | 'parse' | 'provider' | 'aborted' | 'partial_failure';
-    parseErrorType?: string;
-  },
-): string {
-  if (error.kind === 'aborted') return 'abort';
-  if (error.kind === 'provider') return 'api_error';
-  if (error.kind === 'partial_failure') return 'partial_failure';
-  return error.parseErrorType ?? error.kind;
+function usageForResult(usage: PreparedPassUsage): AnalysisResult['usage'] {
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    ...(usage.cacheCreationTokens > 0 && { cacheCreationTokens: usage.cacheCreationTokens }),
+    ...(usage.cacheReadTokens > 0 && { cacheReadTokens: usage.cacheReadTokens }),
+  };
+}
+
+function summedUsage(stages: PreparedPassUsage[]): AnalysisResult['usage'] {
+  return usageForResult({
+    inputTokens: stages.reduce((sum, usage) => sum + usage.inputTokens, 0),
+    outputTokens: stages.reduce((sum, usage) => sum + usage.outputTokens, 0),
+    cacheCreationTokens: stages.reduce((sum, usage) => sum + usage.cacheCreationTokens, 0),
+    cacheReadTokens: stages.reduce((sum, usage) => sum + usage.cacheReadTokens, 0),
+    estimatedCostUsd: 0,
+    durationMs: 0,
+    chunkCount: 0,
+  });
+}
+
+function failureFromError(error: unknown): AnalysisResult {
+  if (error instanceof AnalysisPassError) {
+    return {
+      success: false,
+      insights: [],
+      error: error.message,
+      error_type: error.details.errorType ?? 'parse',
+      ...(error.details.responseLength !== undefined && {
+        response_length: error.details.responseLength,
+      }),
+    };
+  }
+  if (error instanceof Error && error.name === 'AbortError') {
+    return { success: false, insights: [], error: 'Analysis cancelled', error_type: 'abort' };
+  }
+  if (error instanceof Error && error.message.includes('not found in local database')) {
+    return { success: false, insights: [], error: error.message, error_type: 'not_found' };
+  }
+  return {
+    success: false,
+    insights: [],
+    error: 'The analysis provider request failed.',
+    error_type: 'api_error',
+  };
 }
 
 /**
- * Analyze one session and persist only a complete result.
+ * Analyze one session through the full two-pass pipeline.
  *
- * The shared engine is pure: this adapter is the only place that writes the
- * server result to SQLite. A partial or aborted run never reaches these writes.
+ * Identical to the CLI queue path: freeze → prepare session pass → prepare
+ * prompt-quality pass → one atomic publish. A partial or aborted run never
+ * reaches the database, and both usage rows carry input/pipeline revisions.
  */
 export async function analyzeSession(
   session: SessionData,
@@ -71,106 +109,98 @@ export async function analyzeSession(
   }
 
   try {
-    const engine = createAnalysisEngine({
-      client: createLLMClient(),
-      analysisLanguage: loadConfiguredAnalysisLanguage(),
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
+    const client = createLLMClient();
+    const input = freezeSessionAnalysisInput(session.id);
+
+    const sessionStage = await prepareSessionAnalysisPass(input, client, analysisLanguage, {
+      signal: options?.signal,
+      onProgress: options?.onProgress,
     });
-    const outcome = await engine.analyzeSession(
-      { session, messages },
-      {
-        signal: options?.signal,
-        onProgress: options?.onProgress
-          ? (progress) => options.onProgress?.(progress)
-          : undefined,
-      },
+    const promptQualityStage = await preparePromptQualityPass(
+      input,
+      client,
+      sessionStage,
+      analysisLanguage,
+      { signal: options?.signal },
     );
 
-    if (!outcome.ok || outcome.completeness !== 'complete') {
-      return {
-        success: false,
-        insights: [],
-        error: outcome.ok ? 'Analysis result was incomplete.' : outcome.error.message,
-        error_type: outcome.ok ? 'partial_failure' : legacyErrorType(outcome.error),
-        ...(!outcome.ok && outcome.error.responseLength !== undefined && {
-          response_length: outcome.error.responseLength,
-        }),
-        usage: {
-          inputTokens: outcome.usage.inputTokens,
-          outputTokens: outcome.usage.outputTokens,
-          ...(outcome.usage.cacheCreationTokens > 0 && {
-            cacheCreationTokens: outcome.usage.cacheCreationTokens,
-          }),
-          ...(outcome.usage.cacheReadTokens > 0 && {
-            cacheReadTokens: outcome.usage.cacheReadTokens,
-          }),
-        },
-        completeness: outcome.completeness,
-        stats: outcome.stats,
-        warnings: outcome.warnings,
-      };
-    }
-
     options?.onProgress?.({ phase: 'saving' });
-    const sanitizedResponse = sanitizeSessionMessageReferences(outcome.response, messages);
-    const insights = convertToInsightRows(sanitizedResponse, session);
-
-    saveInsightsToDb(insights);
-    deleteSessionInsights(session.id, {
-      excludeTypes: ['prompt_quality'],
-      excludeIds: insights.map((insight) => insight.id),
-    });
-
-    if (sanitizedResponse.facets) {
-      saveFacetsToDb(session.id, sanitizedResponse.facets, ANALYSIS_VERSION);
-    }
-
-    if (outcome.usage.inputTokens > 0 || outcome.usage.outputTokens > 0) {
-      saveAnalysisUsage({
-        session_id: session.id,
-        analysis_type: 'session',
-        provider: outcome.usage.provider,
-        model: outcome.usage.model,
-        input_tokens: outcome.usage.inputTokens,
-        output_tokens: outcome.usage.outputTokens,
-        cache_creation_tokens: outcome.usage.cacheCreationTokens,
-        cache_read_tokens: outcome.usage.cacheReadTokens,
-        estimated_cost_usd: outcome.usage.estimatedCostUsd,
-        duration_ms: outcome.usage.durationMs,
-        chunk_count: outcome.usage.chunkCount,
-      });
-    }
+    const published = publishPreparedTwoPass(input, sessionStage, promptQualityStage);
 
     return {
       success: true,
-      insights,
-      usage: {
-        inputTokens: outcome.usage.inputTokens,
-        outputTokens: outcome.usage.outputTokens,
-        ...(outcome.usage.cacheCreationTokens > 0 && {
-          cacheCreationTokens: outcome.usage.cacheCreationTokens,
-        }),
-        ...(outcome.usage.cacheReadTokens > 0 && {
-          cacheReadTokens: outcome.usage.cacheReadTokens,
-        }),
-      },
-      completeness: outcome.completeness,
-      stats: outcome.stats,
-      warnings: outcome.warnings,
+      insights: published.insights,
+      usage: summedUsage([sessionStage.usage, promptQualityStage.usage]),
+      completeness: 'complete',
     };
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      return {
-        success: false,
-        insights: [],
-        error: 'Analysis cancelled',
-        error_type: 'abort',
-      };
-    }
+    return failureFromError(error);
+  }
+}
+
+/**
+ * Re-run the prompt-quality pass alone through the same two-pass machinery:
+ * corrective retry on malformed output, revision-stamped usage row, atomic
+ * replace of the session's prompt_quality insight.
+ */
+export async function analyzePromptQuality(
+  session: SessionData,
+  messages: SQLiteMessageRow[],
+  options?: AnalysisOptions,
+): Promise<AnalysisResult> {
+  if (!isLLMConfigured()) {
     return {
       success: false,
       insights: [],
-      error: 'The analysis provider request failed.',
-      error_type: 'api_error',
+      error: 'LLM not configured. Run `code-insights config llm` to configure a provider.',
     };
+  }
+
+  if (messages.length === 0) {
+    return {
+      success: false,
+      insights: [],
+      error: 'No messages found for this session.',
+    };
+  }
+
+  // Only genuine human messages count (not tool-results or system artifacts);
+  // fewer than 2 means there is nothing to evaluate and no LLM call to make.
+  const humanMessages = messages.filter(
+    message => message.type === 'user' && classifyStoredUserMessage(message.content) === 'human',
+  );
+  if (humanMessages.length < 2) {
+    return {
+      success: false,
+      insights: [],
+      error: 'Not enough user messages to analyze prompt quality (need at least 2).',
+    };
+  }
+
+  try {
+    const analysisLanguage = loadConfiguredAnalysisLanguage();
+    const client = createLLMClient();
+    const input = freezeSessionAnalysisInput(session.id);
+
+    options?.onProgress?.({ phase: 'analyzing' });
+    const stage = await preparePromptQualityPass(
+      input,
+      client,
+      undefined,
+      analysisLanguage,
+      { signal: options?.signal },
+    );
+
+    options?.onProgress?.({ phase: 'saving' });
+    const published = publishPreparedPromptQualityPass(input, stage);
+
+    return {
+      success: true,
+      insights: published.insights,
+      usage: usageForResult(stage.usage),
+    };
+  } catch (error) {
+    return failureFromError(error);
   }
 }
