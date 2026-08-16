@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3';
 import type { AnalysisLanguage } from '../types.js';
 import { getDb } from '../db/client.js';
 import { redactCredentialText } from '../privacy/outbound-credential-guard.js';
-import { createAnalysisEngine } from './analysis-engine.js';
+import { createAnalysisEngine, type AnalysisProgress } from './analysis-engine.js';
 import {
   applyGeneratedTitle,
   convertPQToInsightRow,
@@ -13,12 +13,16 @@ import {
   saveFacetsToDb,
   saveInsightsToDb,
   ANALYSIS_VERSION,
+  type InsightRow,
   type SessionData,
 } from './analysis-db.js';
 import { calculateAnalysisCost } from './analysis-pricing.js';
 import { saveAnalysisUsage, type SaveAnalysisUsageData } from './analysis-usage-db.js';
 import { prepareBoundedConversationRequest, type LLMClient } from './llm-client.js';
-import { sanitizeMessageReferences } from './message-references.js';
+import {
+  sanitizeMessageReferences,
+  sanitizePromptQualityMessageReferences,
+} from './message-references.js';
 import { formatMessagesForAnalysis } from './message-format.js';
 import type { AnalysisResponse, PromptQualityResponse, SQLiteMessageRow } from './prompt-types.js';
 import {
@@ -51,6 +55,30 @@ export function pipelineRevisionForAnalysisLanguage(
 
 export interface SessionAnalysisRow extends SessionData {
   message_count: number;
+}
+
+/**
+ * Structured failure from a prepare pass. The message matches what the CLI
+ * surfaces; `details` lets non-CLI callers (the server dashboard adapter) map
+ * the failure onto their own error-type contract without parsing the message.
+ */
+export class AnalysisPassError extends Error {
+  readonly details: {
+    errorType?: string;
+    responseLength?: number;
+  };
+
+  constructor(message: string, details: { errorType?: string; responseLength?: number } = {}) {
+    super(message);
+    this.name = 'AnalysisPassError';
+    this.details = details;
+  }
+}
+
+/** Execution options shared by both prepare passes. */
+export interface AnalysisRunOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: AnalysisProgress) => void;
 }
 
 /** Point-in-time input. Conversation text lives here, never in durable stages. */
@@ -104,6 +132,8 @@ type CurrentPreparedPass = (PreparedSessionPass | PreparedPromptQualityPass) & {
 export interface PublishedTwoPassResult {
   insightCount: number;
   promptQualityScore: number;
+  /** Every published row: session insights followed by the prompt-quality insight. */
+  insights: InsightRow[];
 }
 
 function loadSessionRow(db: Database.Database, sessionId: string): SessionAnalysisRow | null {
@@ -175,7 +205,7 @@ export function freezeSessionAnalysisInput(
 export const loadFrozenSessionInput = freezeSessionAnalysisInput;
 
 export function isAnalysisLLMClient(
-  runner: AnalysisRunner,
+  runner: AnalysisRunner | LLMClient,
 ): runner is AnalysisRunner & LLMClient {
   const candidate = runner as Partial<LLMClient>;
   return typeof candidate.chat === 'function'
@@ -287,8 +317,9 @@ function assertStageUsesCurrentLanguagePolicy(
 /** Execute pass 1 without writing analysis artifacts to SQLite. */
 export async function prepareSessionAnalysisPass(
   input: FrozenSessionAnalysisInput,
-  runner: AnalysisRunner,
+  runner: AnalysisRunner | LLMClient,
   analysisLanguage: AnalysisLanguage = 'auto',
+  runOptions?: AnalysisRunOptions,
 ): Promise<PreparedSessionPass> {
   let response: AnalysisResponse;
   let provider: string;
@@ -299,10 +330,13 @@ export async function prepareSessionAnalysisPass(
     const outcome = await createAnalysisEngine({
       client: runner,
       analysisLanguage,
-    }).analyzeSession({
-      session: input.session,
-      messages: input.messages,
-    });
+    }).analyzeSession(
+      { session: input.session, messages: input.messages },
+      {
+        signal: runOptions?.signal,
+        onProgress: runOptions?.onProgress,
+      },
+    );
     if (!outcome.ok || outcome.completeness !== 'complete') {
       const message = outcome.ok
         ? 'Analysis result was incomplete. json_parse_error'
@@ -311,7 +345,15 @@ export async function prepareSessionAnalysisPass(
             outcome.error.parseErrorType,
             outcome.error.code === 'PARTIAL_RESPONSE' ? 'json_parse_error' : undefined,
           ].filter(Boolean).join(' ');
-      throw new Error(`Session analysis failed: ${message}`);
+      const errorType = !outcome.ok
+        ? passErrorType(outcome.error.kind, outcome.error.parseErrorType)
+        : 'partial_failure';
+      throw new AnalysisPassError(`Session analysis failed: ${message}`, {
+        errorType,
+        ...(!outcome.ok && outcome.error.responseLength !== undefined && {
+          responseLength: outcome.error.responseLength,
+        }),
+      });
     }
     response = outcome.response;
     provider = outcome.usage.provider;
@@ -333,15 +375,18 @@ export async function prepareSessionAnalysisPass(
     // pass. jsonrepair patches minor damage (trailing commas, truncation); a
     // second model call covers the structurally broken JSON that weaker models
     // emit and jsonrepair cannot reconstruct (e.g. missing keys / colons).
-    const attempts: RunAnalysisResult[] = [await runGuardedAnalysis(runner, analysisParams)];
+    // Anything that is not an LLMClient must be a native AnalysisRunner.
+    const nativeRunner = runner as AnalysisRunner;
+    const attempts: RunAnalysisResult[] = [await runGuardedAnalysis(nativeRunner, analysisParams)];
     let parsed = parseAnalysisResponse(attempts[0].rawJson);
     if (!parsed.success) {
-      attempts.push(await runGuardedAnalysis(runner, analysisParams));
+      attempts.push(await runGuardedAnalysis(nativeRunner, analysisParams));
       parsed = parseAnalysisResponse(attempts[attempts.length - 1].rawJson);
     }
     if (!parsed.success) {
-      throw new Error(
+      throw new AnalysisPassError(
         `Session analysis failed: ${parsed.error.error_type}: ${parsed.error.error_message}`,
+        { errorType: parsed.error.error_type },
       );
     }
     const combined = combineRunAnalysisResults(attempts);
@@ -362,14 +407,25 @@ export async function prepareSessionAnalysisPass(
   };
 }
 
+/** Map an engine failure kind onto the shared error-type vocabulary. */
+function passErrorType(
+  kind: 'empty' | 'parse' | 'provider' | 'aborted' | 'partial_failure',
+  parseErrorType?: string,
+): string {
+  if (kind === 'aborted') return 'abort';
+  if (kind === 'provider') return 'api_error';
+  return parseErrorType ?? kind;
+}
+
 /** Short alias retained for callers that already use the pass-oriented name. */
 export const prepareSessionPass = prepareSessionAnalysisPass;
 
 async function runPromptQualityPass(
   input: FrozenSessionAnalysisInput,
-  runner: AnalysisRunner,
+  runner: AnalysisRunner | LLMClient,
   analysisLanguage: AnalysisLanguage,
   correctiveRetry = false,
+  runOptions?: AnalysisRunOptions,
 ): Promise<RunAnalysisResult> {
   const formattedMessages = formatMessagesForAnalysis(input.messages);
   const humanMessageCount = input.messages.filter(message => message.type === 'user').length;
@@ -392,7 +448,7 @@ explanatory text.`
   const conversationBlock = buildCacheableConversationBlock(formattedMessages);
 
   if (!isAnalysisLLMClient(runner)) {
-    return runGuardedAnalysis(runner, {
+    return runGuardedAnalysis(runner as AnalysisRunner, {
       systemPrompt: SHARED_ANALYST_SYSTEM_PROMPT,
       userPrompt: `${conversationBlock.text}\n${instructions}`,
     });
@@ -406,12 +462,15 @@ explanatory text.`
     },
   ]);
   if (!preparedRequest) {
-    throw new Error('Prompt quality request exceeds the provider context window.');
+    throw new AnalysisPassError('Prompt quality request exceeds the provider context window.', {
+      errorType: 'context_limit',
+    });
   }
   const startedAt = Date.now();
   const response = await runner.chat(preparedRequest.messages, {
     temperature: 0,
     responseFormat: 'json',
+    signal: runOptions?.signal,
   });
   return {
     rawJson: response.content,
@@ -451,9 +510,10 @@ function combineRunAnalysisResults(
 /** Execute pass 2 against pass 1's frozen revision, without DB writes. */
 export async function preparePromptQualityPass(
   input: FrozenSessionAnalysisInput,
-  runner: AnalysisRunner,
+  runner: AnalysisRunner | LLMClient,
   sessionStage?: PreparedSessionPass,
   analysisLanguage: AnalysisLanguage = 'auto',
+  runOptions?: AnalysisRunOptions,
 ): Promise<PreparedPromptQualityPass> {
   if (sessionStage) {
     assertStageMatchesInput(sessionStage, input);
@@ -466,16 +526,20 @@ export async function preparePromptQualityPass(
     }
   }
 
-  const attempts = [await runPromptQualityPass(input, runner, analysisLanguage)];
+  const attempts = [await runPromptQualityPass(input, runner, analysisLanguage, false, runOptions)];
   let parsed = parsePromptQualityResponse(attempts[0].rawJson);
   if (!parsed.success) {
-    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true));
+    attempts.push(await runPromptQualityPass(input, runner, analysisLanguage, true, runOptions));
     parsed = parsePromptQualityResponse(attempts[1].rawJson);
   }
   if (!parsed.success) {
-    throw new Error(
+    throw new AnalysisPassError(
       `Prompt quality analysis failed: ${parsed.error.error_type} `
       + `(response length ${parsed.error.response_length}).`,
+      {
+        errorType: parsed.error.error_type,
+        responseLength: parsed.error.response_length,
+      },
     );
   }
   const result = combineRunAnalysisResults(attempts);
@@ -581,11 +645,53 @@ export function publishPreparedTwoPass(
     saveAnalysisUsage(usageWrite(sessionStage), db);
     saveAnalysisUsage(usageWrite(promptQualityStage), db);
 
-    const result = {
+    const publishedInsights = [...sessionInsights, promptQualityInsight];
+    const result: PublishedTwoPassResult = {
       insightCount: sessionInsights.length,
       promptQualityScore: promptQualityStage.response.efficiency_score,
+      insights: publishedInsights,
     };
     onPublished?.(result);
     return result;
+  })();
+}
+
+export interface PublishedPromptQualityResult {
+  insights: InsightRow[];
+}
+
+/**
+ * Atomically replace only the prompt-quality artifacts of one prepared pass.
+ *
+ * Companion to publishPreparedTwoPass for callers that re-run pass 2 alone
+ * (dashboard "re-analyze prompt quality", PQ backfill): the stage still carries
+ * input/pipeline revisions, so freshness checks count it exactly like a
+ * two-pass run's pass 2.
+ */
+export function publishPreparedPromptQualityPass(
+  input: FrozenSessionAnalysisInput,
+  promptQualityStage: PreparedPromptQualityPass,
+  db: Database.Database = getDb(),
+): PublishedPromptQualityResult {
+  assertStageMatchesInput(promptQualityStage, input);
+  assertStageUsesCurrentLanguagePolicy(promptQualityStage);
+
+  return db.transaction((): PublishedPromptQualityResult => {
+    const currentInput = freezeSessionAnalysisInput(promptQualityStage.sessionId, db);
+    assertStageMatchesInput(promptQualityStage, currentInput);
+
+    const sanitizedResponse = sanitizePromptQualityMessageReferences(
+      promptQualityStage.response,
+      currentInput.messages,
+    );
+    const insight = convertPQToInsightRow(sanitizedResponse, currentInput.session);
+    saveInsightsToDb([insight], db);
+    deleteSessionInsights(promptQualityStage.sessionId, {
+      includeOnlyTypes: ['prompt_quality'],
+      excludeIds: [insight.id],
+    }, db);
+    saveAnalysisUsage(usageWrite(promptQualityStage), db);
+
+    return { insights: [insight] };
   })();
 }

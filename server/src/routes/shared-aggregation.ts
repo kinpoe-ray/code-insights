@@ -2,10 +2,10 @@
 // Extracted to avoid ~150 lines of duplication between the two routes.
 
 import { getDb } from '@code-insights/cli/db/client';
-import { normalizeFrictionCategory } from '../llm/friction-normalize.js';
-import { normalizePatternCategory, getPatternCategoryLabel } from '../llm/pattern-normalize.js';
-import { normalizePromptQualityCategory, PQ_CATEGORY_LABELS } from '../llm/prompt-quality-normalize.js';
-import { CANONICAL_PQ_STRENGTH_CATEGORIES } from '../llm/prompt-constants.js';
+import { normalizeFrictionCategory } from '@code-insights/cli/analysis/friction-normalize';
+import { normalizePatternCategory, getPatternCategoryLabel } from '@code-insights/cli/analysis/pattern-normalize';
+import { normalizePromptQualityCategory, PQ_CATEGORY_LABELS } from '@code-insights/cli/analysis/prompt-quality-normalize';
+import { CANONICAL_PQ_STRENGTH_CATEGORIES } from '@code-insights/cli/analysis/prompt-constants';
 import { safeParseJson } from '../utils.js';
 
 // ISO week regex: matches YYYY-WNN format (e.g., 2026-W10)

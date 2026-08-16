@@ -1,6 +1,6 @@
 // Prompt quality category labels and type detection for dashboard rendering.
 // Category normalization happens server-side at write time — client only needs display helpers.
-// Keep in sync with server/src/llm/prompt-quality-normalize.ts (labels and strength set).
+// Keep in sync with @code-insights/cli/analysis/prompt-quality-normalize (labels and strength set).
 
 const PQ_CATEGORY_LABELS: Record<string, string> = {
   'vague-request': 'Vague Request',

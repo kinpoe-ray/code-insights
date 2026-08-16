@@ -799,7 +799,9 @@ describe('two-pass preparation and publication', () => {
 
     const result = publishPreparedTwoPass(frozen, sessionStage, pqStage);
 
-    expect(result).toEqual({ insightCount: 1, promptQualityScore: 91 });
+    expect(result.insightCount).toBe(1);
+    expect(result.promptQualityScore).toBe(91);
+    expect(result.insights.map(insight => insight.type)).toEqual(['summary', 'prompt_quality']);
     expect(mockDb.prepare(`SELECT generated_title FROM sessions WHERE id = 'sess1'`).get())
       .toEqual({ generated_title: 'Fresh title' });
     expect(mockDb.prepare(`SELECT type, title FROM insights WHERE session_id = 'sess1' ORDER BY type`).all())
